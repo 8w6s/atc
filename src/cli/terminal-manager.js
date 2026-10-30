@@ -232,32 +232,37 @@ export async function showAccountStatus() {
         const models = live.models || {};
         const modelKeys = Object.keys(models);
 
-        if (modelKeys.length > 0) {
-            const summaryParts = [];
-            const keyModels = [
-                'gemini-3.8-flash-high',
-                'gemini-3.8-flash-medium',
-                'gemini-3.1-flash-lite',
-                'claude-sonnet-4-6'
-            ];
+        let fiveHour = null;
+        let weekly = null;
 
-            for (const km of keyModels) {
-                if (models[km]) {
-                    const label = km.replace('gemini-', '').replace('claude-', '');
-                    const qFormatted = formatPercentage(models[km].remaining, models[km].remainingFraction);
-                    summaryParts.push(`${label}: ${qFormatted} left`);
+        if (modelKeys.length > 0) {
+            const now = Date.now();
+            for (const [mId, mInfo] of Object.entries(models)) {
+                if (!mInfo || typeof mInfo.remainingFraction !== 'number') continue;
+                const rMs = mInfo.resetTime ? Math.max(0, new Date(mInfo.resetTime).getTime() - now) : 0;
+                const isWeekly = rMs > 24 * 3600 * 1000 || mId.toLowerCase().includes('argon') || mId.toLowerCase().includes('weekly');
+                if (isWeekly) {
+                    if (!weekly || mInfo.remainingFraction < weekly.remainingFraction) {
+                        weekly = { ...mInfo, modelId: mId, resetMs: rMs };
+                    }
+                } else {
+                    if (!fiveHour || mId.includes('flash-high') || mInfo.remainingFraction < fiveHour.remainingFraction) {
+                        fiveHour = { ...mInfo, modelId: mId, resetMs: rMs };
+                    }
                 }
             }
 
-            if (summaryParts.length > 0) {
-                console.log(`   ${c.gray}quota:${c.reset} ${summaryParts.join(' · ')}`);
-            }
+            const fiveStr = fiveHour
+                ? `${formatPercentage(`${Math.round(fiveHour.remainingFraction * 100)}%`, fiveHour.remainingFraction)} ${fiveHour.resetMs > 0 ? c.gray + '(resets in ' + formatDuration(fiveHour.resetMs) + ')' + c.reset : ''}`
+                : `${c.gray}ready${c.reset}`;
 
-            // Show reset time for primary flash model
-            const primaryModel = models['gemini-3.8-flash-high'] || models['gemini-3.8-flash-medium'] || models[modelKeys[0]];
-            if (primaryModel && primaryModel.resetTime) {
-                console.log(`   ${c.gray}resets:${c.reset} ${formatResetTime(primaryModel.resetTime)}`);
-            }
+            const weekStr = weekly
+                ? (weekly.remainingFraction === 0
+                    ? `${c.bold}${c.red}0% [EXHAUSTED - resets in ${formatDuration(weekly.resetMs)}]${c.reset}`
+                    : `${formatPercentage(`${Math.round(weekly.remainingFraction * 100)}%`, weekly.remainingFraction)} ${c.gray}(resets in ${formatDuration(weekly.resetMs)})${c.reset}`)
+                : `${c.gray}100% (unrestricted)${c.reset}`;
+
+            console.log(`   ${c.gray}quota 5h:${c.reset} ${fiveStr}  ${c.gray}weekly:${c.reset} ${weekStr}`);
         } else if (acc.isInvalid) {
             console.log(`   ${c.red}status: invalid (${acc.invalidReason || 'verification needed'})${c.reset}`);
         } else {
@@ -267,9 +272,15 @@ export async function showAccountStatus() {
         // Forecast score calculation
         if (acc.enabled && !isInvalid && !isLimited) {
             let score = 50;
-            const highModel = models['gemini-3.8-flash-high'];
-            if (highModel && typeof highModel.remainingFraction === 'number') {
-                score += Math.round(highModel.remainingFraction * 50);
+            if (fiveHour && typeof fiveHour.remainingFraction === 'number') {
+                score += Math.round(fiveHour.remainingFraction * 40);
+            }
+            if (weekly) {
+                if (weekly.remainingFraction === 0) {
+                    score = Math.max(5, score - 60); // Severely penalize weekly exhaustion
+                } else {
+                    score += Math.round(weekly.remainingFraction * 10);
+                }
             }
             if (score > bestScore) {
                 bestScore = score;

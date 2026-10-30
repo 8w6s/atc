@@ -9,8 +9,8 @@ import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { sendMessage, sendMessageStream, listModels, getModelQuotas, getSubscriptionTier, isValidModel } from './cloudcode/index.js';
-import { mountWebUI } from './webui/index.js';
 import { config } from './config.js';
+import { getPackageVersion } from './utils/helpers.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -130,8 +130,21 @@ app.use((req, res, next) => {
     next();
 });
 
-// Mount WebUI (optional web interface for account management)
-mountWebUI(app, __dirname, accountManager);
+// Minimal JSON root status endpoint (Terminal TUI is the primary interface)
+app.get('/', (req, res) => {
+    res.json({
+        service: 'atc (Antigravity to Claude)',
+        version: getPackageVersion(),
+        status: 'active',
+        interface: 'Terminal TUI dashboard (run "atc" or "atc dash")',
+        endpoints: {
+            messages: '/v1/messages',
+            models: '/v1/models',
+            health: '/health',
+            accountLimits: '/account-limits'
+        }
+    });
+});
 
 /**
  * Parse error message to extract error type, status code, and user-friendly message

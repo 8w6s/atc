@@ -146,7 +146,7 @@ const server = app.listen(PORT, HOST, () => {
 ║            atc (Antigravity to Claude) v${packageVersion}            ║
 ╠══════════════════════════════════════════════════════════════╣
 ║                                                              ║
-${border}  ${align(`Server and WebUI running at: http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`)}${border}
+${border}  ${align(`atc proxy daemon running at: http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`)}${border}
 ${border}  ${align(`Bound to: ${boundHost}:${boundPort}`)}${border}
 ${statusSection}║                                                              ║
 ${controlSection}

@@ -83,9 +83,9 @@ function getDisplayWidth(str) {
 }
 
 /**
- * Render a perfectly aligned cyberpunk/neon rounded box
+ * Render a perfectly aligned rounded box with unified 67-column width
  */
-function printBox(contentLines, width = 58) {
+function printBox(contentLines, width = 67) {
   const innerWidth = width - 2;
   const top = `${c.cyan}╭${'─'.repeat(innerWidth)}╮${c.reset}`;
   const bottom = `${c.cyan}╰${'─'.repeat(innerWidth)}╯${c.reset}`;
@@ -344,15 +344,14 @@ async function startServer() {
   const isHealthy = await checkProxyHealth(port, 12000);
   if (isHealthy) {
     console.log('');
-    printBox([`  ⚡ ${c.bold + c.bGreen}atc proxy is now in orbit!${c.reset}`], 56);
+    printBox([`  ⚡ ${c.bold + c.bGreen}atc proxy is now in orbit!${c.reset}`], 67);
     console.log('');
     console.log(`   ${c.cyan}├─${c.reset} Process ID: ${c.bYellow}${serverProcess.pid}${c.reset}`);
-    console.log(`   ${c.cyan}├─${c.reset} Local:      ${c.underline}http://localhost:${port}${c.reset}`);
-    console.log(`   ${c.cyan}└─${c.reset} Dashboard:  ${c.underline}http://localhost:${port}/${c.reset}\n`);
+    console.log(`   ${c.cyan}├─${c.reset} Endpoint:   ${c.underline}http://localhost:${port}${c.reset}`);
+    console.log(`   ${c.cyan}└─${c.reset} TUI:        Run "atc" in terminal\n`);
     console.log(`   ${c.bold}Quick Commands:${c.reset}`);
-    console.log(`   • ${c.cyan}atc${c.reset}           → Open interactive TUI`);
-    console.log(`   • ${c.cyan}atc ui${c.reset}        → Open dashboard in browser`);
-    console.log(`   • ${c.cyan}atc status${c.reset}    → View proxy health`);
+    console.log(`   • ${c.cyan}atc${c.reset}           → Open interactive TUI dashboard`);
+    console.log(`   • ${c.cyan}atc status${c.reset}    → View proxy health & quotas`);
     console.log(`   • ${c.cyan}atc stop${c.reset}      → Shut down proxy\n`);
     return { success: true, pid: serverProcess.pid, port };
   } else {
@@ -449,7 +448,7 @@ function setConfigInitialized(val = true) {
  */
 function showStatus() {
   console.log('');
-  printBox([`  🛸 ${c.bold + c.bCyan}atc (Antigravity to Claude)${c.reset}`], 56);
+  printBox([`  🛸 ${c.bold + c.bCyan}atc (Antigravity to Claude)${c.reset} ${c.bMagenta}v${packageJson.version}${c.reset}`], 67);
   console.log('');
 
   if (isServiceRunning()) {
@@ -461,9 +460,9 @@ function showStatus() {
     console.log(`  ${c.cyan}├─${c.reset} PID:       ${c.bYellow}${pid}${c.reset}`);
     console.log(`  ${c.cyan}├─${c.reset} Port:      ${c.bYellow}${port}${c.reset}`);
     console.log(`  ${c.cyan}├─${c.reset} API:       ${c.underline}http://localhost:${port}${c.reset}`);
-    console.log(`  ${c.cyan}└─${c.reset} Dashboard: ${c.underline}http://localhost:${port}/${c.reset}\n`);
+    console.log(`  ${c.cyan}└─${c.reset} TUI:       Run "atc" or "atc dash"\n`);
     console.log(`  ${c.bold}AVAILABLE COMMANDS${c.reset}`);
-    console.log(`  • ${c.cyan}atc ui${c.reset}         Open dashboard in browser`);
+    console.log(`  • ${c.cyan}atc${c.reset}            Open interactive TUI dashboard`);
     console.log(`  • ${c.cyan}atc restart${c.reset}    Relaunch proxy`);
     console.log(`  • ${c.cyan}atc stop${c.reset}       Take offline`);
   } else {
@@ -475,49 +474,11 @@ function showStatus() {
   console.log('');
 }
 
-/**
- * Open WebUI in browser
- */
-async function openUI() {
-  if (!isServiceRunning()) {
-    console.log(`\n${c.bCyan}🌌 atc proxy offline - launching now...${c.reset}`);
-    await startServer();
-    await new Promise(resolve => setTimeout(resolve, 1000));
-  }
-
-  const port = getPort();
-  const uiUrl = `http://localhost:${port}/`;
-
-  console.log(`\n🖥️  Opening dashboard → ${c.underline}${uiUrl}${c.reset}\n`);
-
-  const platform = process.platform;
-  let openCommand = '';
-
-  if (platform === 'win32') {
-    openCommand = `start ${uiUrl}`;
-  } else if (platform === 'darwin') {
-    openCommand = `open ${uiUrl}`;
-  } else if (platform === 'linux') {
-    openCommand = `xdg-open ${uiUrl}`;
-  } else {
-    console.error(`${c.yellow}▲ Cannot auto-open browser on this platform${c.reset}`);
-    console.log(`   Manual URL: ${uiUrl}\n`);
-    return;
-  }
-
-  exec(openCommand, (error) => {
-    if (error) {
-      console.error(`${c.yellow}▲ Browser launch failed:${c.reset} ${error.message}`);
-      console.log(`   Manual URL: ${uiUrl}\n`);
-    }
-  });
-}
-
 function showHelp() {
   console.log('');
   printBox([
-    `  🛸 ${c.bold + c.bCyan}ATC — Antigravity to Claude ${c.bMagenta}v${packageJson.version}${c.reset}`
-  ], 58);
+    `  🛸 ${c.bold + c.bCyan}atc (Antigravity to Claude)${c.reset} ${c.bMagenta}v${packageJson.version}${c.reset}`
+  ], 67);
 
   console.log(`
 Route Claude Code CLI through Antigravity's multi-model API
@@ -526,7 +487,7 @@ with intelligent load balancing across Google accounts.
 ${c.bold + c.cyan}USAGE${c.reset}
   ${c.bCyan}atc${c.reset} <command> [options]
 
-${c.bold + c.bCyan}━━━ LIFECYCLE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}
+${c.bold + c.bCyan}━━━ LIFECYCLE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}
   ${c.cyan}init, initialize${c.reset}    Configure atc for Claude Code & Windows startup
   ${c.cyan}reinit${c.reset}              Repair configuration & restart proxy daemon
   ${c.cyan}remove${c.reset}              Remove Windows startup integration
@@ -534,15 +495,14 @@ ${c.bold + c.bCyan}━━━ LIFECYCLE ━━━━━━━━━━━━━�
   ${c.cyan}stop${c.reset}                Shut down proxy daemon
   ${c.cyan}restart${c.reset}             Restart proxy daemon
 
-${c.bold + c.bCyan}━━━ DASHBOARD & MANAGEMENT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}
+${c.bold + c.bCyan}━━━ DASHBOARD & MANAGEMENT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}
   ${c.cyan}atc, dash${c.reset}           Open interactive TUI dashboard (default)
   ${c.cyan}status${c.reset}              Show daemon health & active accounts overview
-  ${c.cyan}ui${c.reset}                  Open WebUI dashboard in browser
   ${c.cyan}models${c.reset}              List available Claude/Gemini model mappings
   ${c.cyan}switch <id>${c.reset}         Switch active account by index (1-9) or email
   ${c.cyan}toggle <id>${c.reset}         Enable/disable account in round-robin pool
 
-${c.bold + c.bCyan}━━━ OPTIONS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}
+${c.bold + c.bCyan}━━━ OPTIONS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}
   ${c.yellow}-h, -H, --help${c.reset}      Show this help
   ${c.yellow}-v, --version${c.reset}       Show version
   ${c.yellow}--log${c.reset}               Run in foreground with live stream logs
@@ -629,7 +589,7 @@ function isWindowsStartupInstalled() {
 
 async function initCommand() {
   console.log('');
-  printBox([`  ⚡ ${c.bold + c.bCyan}Initializing atc (Antigravity to Claude)${c.reset}`], 56);
+  printBox([`  ⚡ ${c.bold + c.bCyan}Initializing atc (Antigravity to Claude)${c.reset}`], 67);
   console.log('');
 
   const port = getPort();
@@ -640,7 +600,7 @@ async function initCommand() {
     if (isHealthy) {
       console.log(`${c.green}✓${c.reset} ${c.bold + c.bGreen}atc is already initialized and proxy is running healthy!${c.reset}`);
       console.log(`  • Proxy endpoint: ${c.underline}http://localhost:${port}${c.reset}`);
-      console.log(`  • Dashboard:      ${c.underline}http://localhost:${port}/${c.reset}\n`);
+      console.log(`  • TUI:            Run "atc" or "atc dash" in terminal\n`);
       console.log(`  To re-sync or change configuration, run: ${c.cyan}atc reinit${c.reset}`);
       console.log(`  To view current accounts and quota, run:  ${c.cyan}atc${c.reset} or ${c.cyan}atc status${c.reset}\n`);
       return;
@@ -858,7 +818,8 @@ async function main() {
       break;
 
     case 'ui':
-      await openUI();
+      console.log(`\n${c.cyan}ℹ️  WebUI panel has been deprecated.${c.reset}`);
+      console.log(`   Use the interactive terminal dashboard instead: ${c.bold + c.bGreen}atc${c.reset} (or ${c.cyan}atc dash${c.reset})\n`);
       break;
 
     case 'accounts': {
