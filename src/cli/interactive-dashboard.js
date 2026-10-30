@@ -150,6 +150,70 @@ function writeClaudeSettings(settings) {
     }
 }
 
+
+// Brand-accurate gradient color palette and shimmer animation
+const TITLE_CHARS = [
+    // Antigravity (12 chars): Blue 40% (5), Green 20% (2), Yellow 20% (2), Red 20% (3)
+    { ch: 'A', r: 66,  g: 133, b: 244 },
+    { ch: 'n', r: 66,  g: 133, b: 244 },
+    { ch: 't', r: 66,  g: 133, b: 244 },
+    { ch: 'i', r: 66,  g: 133, b: 244 },
+    { ch: 'g', r: 66,  g: 133, b: 244 },
+    { ch: 'r', r: 52,  g: 168, b: 83  },
+    { ch: 'a', r: 52,  g: 168, b: 83  },
+    { ch: 'v', r: 251, g: 188, b: 5   },
+    { ch: 'i', r: 251, g: 188, b: 5   },
+    { ch: 't', r: 234, g: 67,  b: 53  },
+    { ch: 'y', r: 234, g: 67,  b: 53  },
+    { ch: ' ', r: 255, g: 255, b: 255 },
+
+    // to: white
+    { ch: 't', r: 245, g: 245, b: 245 },
+    { ch: 'o', r: 245, g: 245, b: 245 },
+    { ch: ' ', r: 255, g: 255, b: 255 },
+
+    // Claude Code (11 chars): Orange 60% (7), Yellow 40% (4)
+    { ch: 'C', r: 224, g: 106, b: 59  },
+    { ch: 'l', r: 224, g: 106, b: 59  },
+    { ch: 'a', r: 224, g: 106, b: 59  },
+    { ch: 'u', r: 224, g: 106, b: 59  },
+    { ch: 'd', r: 224, g: 106, b: 59  },
+    { ch: 'e', r: 224, g: 106, b: 59  },
+    { ch: ' ', r: 224, g: 106, b: 59  },
+    { ch: 'C', r: 245, g: 158, b: 11  },
+    { ch: 'o', r: 245, g: 158, b: 11  },
+    { ch: 'd', r: 245, g: 158, b: 11  },
+    { ch: 'e', r: 245, g: 158, b: 11  }
+];
+
+function getShimmerTitle() {
+    const cycleMs = 3000; // 3 seconds sweep period across the whole text
+    const t = (Date.now() % cycleMs) / cycleMs;
+    const total = TITLE_CHARS.length;
+    const center = t * (total + 8) - 4; // smooth sweep from left into right
+
+    let out = '\x1b[1m';
+    for (let i = 0; i < total; i++) {
+        const item = TITLE_CHARS[i];
+        if (item.ch === ' ') {
+            out += ' ';
+            continue;
+        }
+        const dist = Math.abs(i - center);
+        if (dist < 2.8) {
+            const factor = Math.cos((dist / 2.8) * (Math.PI / 2));
+            const r = Math.round(item.r + (255 - item.r) * factor);
+            const g = Math.round(item.g + (255 - item.g) * factor);
+            const b = Math.round(item.b + (255 - item.b) * factor);
+            out += `\x1b[38;2;${r};${g};${b}m${item.ch}`;
+        } else {
+            out += `\x1b[38;2;${item.r};${item.g};${item.b}m${item.ch}`;
+        }
+    }
+    out += '\x1b[0m';
+    return out;
+}
+
 export async function runInteractiveDashboard() {
     let accountsData = await loadAccounts(ACCOUNT_CONFIG_PATH);
     const port = getProxyPort();
@@ -225,7 +289,7 @@ export async function runInteractiveDashboard() {
         let buf = c.hideCursor + c.disableWrap + c.cursorHome;
 
         // Header Title
-        buf += `${c.brandCyan}Antigravity to Claude Code${c.reset} ${c.textMuted}(${c.brandMint}atc v1.0.0${c.textMuted})${c.reset}${c.clearToEndOfLine}\n`;
+        buf += `${getShimmerTitle()} ${c.textMuted}(${c.brandMint}atc v1.0.0${c.textMuted})${c.reset}${c.clearToEndOfLine}\n`;
 
         const liveMap = new Map();
         if (proxyHealth && Array.isArray(proxyHealth.accounts)) {
@@ -351,10 +415,13 @@ export async function runInteractiveDashboard() {
     const onResize = () => render();
     process.stdout.on('resize', onResize);
 
+    let shimmerTimer = setInterval(() => render(), 75);
+
     render();
 
     return new Promise((resolve) => {
         function cleanupAndExit() {
+            if (shimmerTimer) clearInterval(shimmerTimer);
             process.stdout.removeListener('resize', onResize);
             process.stdout.write(c.exitAltScreen + c.enableWrap + c.showCursor);
             if (process.stdin.isTTY) process.stdin.setRawMode(false);
