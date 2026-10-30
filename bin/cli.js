@@ -9,6 +9,7 @@ if (!process.argv.includes('--log')) {
   logger.info = () => {};
   logger.warn = () => {};
 }
+import { runInteractiveDashboard } from '../src/cli/interactive-dashboard.js';
 import {
   showAccountStatus,
   switchAccount,
@@ -463,6 +464,12 @@ async function main() {
 
     case 'restart':
       await restartServer();
+      break;
+
+    case 'dash':
+    case 'dashboard':
+    case 'tui':
+      await runInteractiveDashboard();
       break;
 
     case 'status':
