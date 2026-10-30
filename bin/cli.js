@@ -898,7 +898,7 @@ async function uninstallCommand() {
   }
 
   console.log(`\n${c.bold}To complete total uninstallation, remove the CLI package:${c.reset}`);
-  console.log(`  ${c.bCyan}npm uninstall -g atc${c.reset}\n`);
+  console.log(`  ${c.bCyan}npm uninstall -g @8w6s/atc${c.reset}\n`);
 }
 
 async function main() {

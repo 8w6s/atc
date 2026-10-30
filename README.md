@@ -69,10 +69,11 @@ The system consists of three decoupled components:
 ### 1. Install
 
 ```bash
-# Install dependencies
-pnpm install --allow-build=better-sqlite3
+# Global install
+npm i -g @8w6s/atc
 
-# Link binary globally
+# Or clone and link locally
+pnpm install --allow-build=better-sqlite3
 npm link --force
 ```
 

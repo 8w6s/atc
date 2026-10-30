@@ -1,9 +1,12 @@
 {
-  "name": "atc",
+  "name": "@8w6s/atc",
   "version": "1.0.0",
   "description": "atc (Antigravity to Claude) - Multi-account terminal manager and API proxy",
   "main": "src/index.js",
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "atc": "bin/cli.js"
   },
@@ -41,7 +44,7 @@
     "proxy",
     "vertex-ai"
   ],
-  "author": "Badri Narayanan",
+  "author": "8w6s <satoharuki2321@proton.me>",
   "license": "MIT",
   "repository": {
     "type": "git",
