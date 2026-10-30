@@ -110,6 +110,46 @@ const STRATEGY_CYCLE = [
     { id: 'sticky', label: 'Sticky (Cache)', desc: 'Keeps using current account to maximize prompt caching' }
 ];
 
+
+function getMappingTarget(mm, modelId) {
+    if (!modelId) return 'none';
+    const val = mm[modelId] || mm[modelId.toLowerCase()];
+    if (!val) {
+        if (modelId.includes('opus')) return getMappingTarget(mm, 'claude-opus-5-5') || 'gemini-3.8-flash-high';
+        if (modelId.includes('sonnet')) return getMappingTarget(mm, 'claude-sonnet-5-5') || 'gemini-3.8-flash-high';
+        if (modelId.includes('haiku')) return getMappingTarget(mm, 'claude-haiku-5-5') || 'gemini-3.1-flash-lite';
+        return 'gemini-3.8-flash-high';
+    }
+    return typeof val === 'object' ? (val.mapping || 'unknown') : val;
+}
+
+function getClaudeSettingsPath() {
+    const home = process.env.USERPROFILE || process.env.HOME || '';
+    return join(home, '.claude', 'settings.json');
+}
+
+function readClaudeSettings() {
+    try {
+        const p = getClaudeSettingsPath();
+        if (existsSync(p)) {
+            return JSON.parse(readFileSync(p, 'utf-8'));
+        }
+    } catch {
+        // ignore
+    }
+    return { env: {} };
+}
+
+function writeClaudeSettings(settings) {
+    try {
+        const p = getClaudeSettingsPath();
+        writeFileSync(p, JSON.stringify(settings, null, 2), 'utf-8');
+        return true;
+    } catch {
+        return false;
+    }
+}
+
 export async function runInteractiveDashboard() {
     let accountsData = await loadAccounts(ACCOUNT_CONFIG_PATH);
     const port = getProxyPort();
@@ -150,7 +190,7 @@ export async function runInteractiveDashboard() {
         list.push({ type: 'action', id: 'add_account', label: 'Add New Account', desc: 'Link a new Google account via OAuth browser' });
         list.push({ type: 'action', id: 'lb_strategy', label: `Load Balancer: [${stratObj.label}]`, desc: stratObj.desc });
         list.push({ type: 'action', id: 'custom_project', label: `Custom GCP Project: [${customProject}]`, desc: 'Configure custom Google Cloud Project ID for quotas' });
-        list.push({ type: 'action', id: 'model_mapping', label: 'Model Mappings (Claude <-> Gemini)', desc: 'Customize mapping from Claude models to Gemini IDs' });
+        list.push({ type: 'action', id: 'model_mapping', label: 'Model Mappings', desc: 'Configure Claude Code models, subagents, and environment overrides' });
         list.push({ type: 'action', id: 'pick_best', label: 'Pick Best Account', desc: 'Automatically switch to healthiest account with highest quota' });
         list.push({ type: 'action', id: 'health_check', label: 'Run Health Check', desc: 'Inspect credentials, token validity, and proxy health' });
 
@@ -526,52 +566,128 @@ export async function runInteractiveDashboard() {
                         if (process.stdin.isTTY) process.stdin.setRawMode(false);
                         console.log(c.clearScreen);
                         console.log(`${c.brandGreen}╭─────────────────────────────────────────────────────────────────╮${c.reset}`);
-                        console.log(`${c.brandGreen}│  Custom Model ID Mappings (Claude <-> Gemini)                   │${c.reset}`);
+                        console.log(`${c.brandGreen}│  Model Configuration & Environment Management                   │${c.reset}`);
                         console.log(`${c.brandGreen}╰─────────────────────────────────────────────────────────────────╯${c.reset}\n`);
-                        console.log('Current Mappings exposed to Claude Code:\n');
+
+                        const claudeSettings = readClaudeSettings();
+                        const cEnv = claudeSettings.env || {};
                         const mm = config.modelMapping || {};
-                        console.log(`  • Sonnet  -> ${mm['claude-3-5-sonnet-20241022'] || 'gemini-3.8-flash-high'}`);
-                        console.log(`  • Opus    -> ${mm['claude-3-opus-20240229'] || 'gemini-3.8-flash-high'}`);
-                        console.log(`  • Haiku   -> ${mm['claude-3-5-haiku-20241022'] || 'gemini-3.1-flash-lite'}\n`);
-                        console.log('Presets:');
-                        console.log('  [1] Max-Speed: Sonnet & Opus -> gemini-3.8-flash-high, Haiku -> gemini-3.1-flash-lite');
-                        console.log('  [2] Balanced: Opus -> gemini-3.8-flash-high, Sonnet -> gemini-3.8-flash-medium, Haiku -> gemini-3.1-flash-lite');
-                        console.log('  [3] Custom Input: Enter custom mapping');
-                        console.log('  [Enter] Keep current & exit\n');
+
+                        const mainModel = cEnv.ANTHROPIC_MODEL || '';
+                        const opusModel = cEnv.ANTHROPIC_DEFAULT_OPUS_MODEL || cEnv.ANTHROPIC_CLAUDE_OPUS_MODEL || '';
+                        const sonnetModel = cEnv.ANTHROPIC_DEFAULT_SONNET_MODEL || cEnv.ANTHROPIC_CLAUDE_SONNET_MODEL || '';
+                        const haikuModel = cEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL || '';
+                        const subagentModel = cEnv.CLAUDE_CODE_SUBAGENT_MODEL || '';
+
+                        console.log(`Claude Code Model Environment (${c.textDark}~/.claude/settings.json${c.reset}):\n`);
+                        console.log(`  1. Main Model     (ANTHROPIC_MODEL):           ${mainModel ? `${c.activeBright}${mainModel}${c.reset} -> ${c.actionGreen}${getMappingTarget(mm, mainModel)}${c.reset}` : `${c.textMuted}(not set - uses Claude default)${c.reset}`}`);
+                        console.log(`  2. Opus Override  (ANTHROPIC_DEFAULT_OPUS):    ${opusModel ? `${c.activeBright}${opusModel}${c.reset} -> ${c.actionGreen}${getMappingTarget(mm, opusModel)}${c.reset}` : `${c.textMuted}(not set)${c.reset}`}`);
+                        console.log(`  3. Sonnet Override(ANTHROPIC_DEFAULT_SONNET):  ${sonnetModel ? `${c.activeBright}${sonnetModel}${c.reset} -> ${c.actionGreen}${getMappingTarget(mm, sonnetModel)}${c.reset}` : `${c.textMuted}(not set)${c.reset}`}`);
+                        console.log(`  4. Haiku Override (ANTHROPIC_DEFAULT_HAIKU):   ${haikuModel ? `${c.activeBright}${haikuModel}${c.reset} -> ${c.actionGreen}${getMappingTarget(mm, haikuModel)}${c.reset}` : `${c.textMuted}(not set)${c.reset}`}`);
+                        console.log(`  5. Subagent Model (CLAUDE_CODE_SUBAGENT_MODEL):${subagentModel ? `${c.activeBright}${subagentModel}${c.reset} -> ${c.actionGreen}${getMappingTarget(mm, subagentModel)}${c.reset}` : `${c.textMuted}(not set - falls back to Haiku)${c.reset}`}\n`);
+
+                        console.log('Options:');
+                        console.log('  [1] Max Performance Preset (Sonnet/Opus -> Flash-High, Subagent/Haiku -> Flash-Lite)');
+                        console.log('  [2] Balanced Preset        (Opus -> Flash-High, Sonnet -> Flash-Medium, Subagent -> Flash-Lite)');
+                        console.log('  [3] Set Subagent Model     (Configure CLAUDE_CODE_SUBAGENT_MODEL, blank to delete)');
+                        console.log('  [4] Edit Specific Variable (Choose 1-5 to edit, or leave blank to delete env)');
+                        console.log('  [5] Clean All Model Envs   (Remove all model env overrides from settings.json)');
+                        console.log('  [Enter] Return to Dashboard\n');
 
                         const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-                        const opt = await new Promise(r => rl.question('Select option [1-3] or press Enter to return: ', r));
+                        const opt = await new Promise(r => rl.question('Select option [1-5] or press Enter: ', r));
 
                         if (opt === '1') {
-                            saveConfig({
-                                modelMapping: {
-                                    'claude-3-opus-20240229': 'gemini-3.8-flash-high',
-                                    'claude-3-5-sonnet-20241022': 'gemini-3.8-flash-high',
-                                    'claude-3-5-haiku-20241022': 'gemini-3.1-flash-lite'
-                                }
-                            });
-                            statusMessage = 'Applied Preset 1: Max-Speed mappings.';
-                        } else if (opt === '2') {
-                            saveConfig({
-                                modelMapping: {
-                                    'claude-3-opus-20240229': 'gemini-3.8-flash-high',
-                                    'claude-3-5-sonnet-20241022': 'gemini-3.8-flash-medium',
-                                    'claude-3-5-haiku-20241022': 'gemini-3.1-flash-lite'
-                                }
-                            });
-                            statusMessage = 'Applied Preset 2: Balanced mappings.';
-                        } else if (opt === '3') {
-                            const cModel = await new Promise(r => rl.question('Enter Claude Model ID (e.g. claude-3-opus-20240229): ', r));
-                            const gModel = await new Promise(r => rl.question('Enter Gemini Target ID (e.g. gemini-3.8-flash-high): ', r));
-                            if (cModel.trim() && gModel.trim()) {
-                                const newMm = { ...(config.modelMapping || {}) };
-                                newMm[cModel.trim()] = gModel.trim();
-                                saveConfig({ modelMapping: newMm });
-                                statusMessage = `Mapped ${cModel.trim()} -> ${gModel.trim()}`;
-                            }
-                        }
-                        rl.close();
+                            claudeSettings.env = claudeSettings.env || {};
+                            claudeSettings.env.ANTHROPIC_MODEL = 'claude-sonnet-5-5';
+                            claudeSettings.env.ANTHROPIC_DEFAULT_OPUS_MODEL = 'claude-opus-5-5';
+                            claudeSettings.env.ANTHROPIC_DEFAULT_SONNET_MODEL = 'claude-sonnet-5-5';
+                            claudeSettings.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = 'claude-haiku-5-5';
+                            claudeSettings.env.CLAUDE_CODE_SUBAGENT_MODEL = 'claude-haiku-5-5';
+                            claudeSettings.env.ANTHROPIC_CLAUDE_OPUS_MODEL = 'claude-opus-5-5';
+                            claudeSettings.env.ANTHROPIC_CLAUDE_SONNET_MODEL = 'claude-sonnet-5-5';
+                            writeClaudeSettings(claudeSettings);
 
+                            const newMm = { ...(config.modelMapping || {}) };
+                            newMm['claude-opus-5-5'] = { mapping: 'gemini-3.8-flash-high' };
+                            newMm['claude-sonnet-5-5'] = { mapping: 'gemini-3.8-flash-high' };
+                            newMm['claude-haiku-5-5'] = { mapping: 'gemini-3.1-flash-lite' };
+                            saveConfig({ modelMapping: newMm });
+                            statusMessage = 'Applied Preset 1: Max Performance models in Claude Code.';
+                        } else if (opt === '2') {
+                            claudeSettings.env = claudeSettings.env || {};
+                            claudeSettings.env.ANTHROPIC_MODEL = 'claude-sonnet-5-5';
+                            claudeSettings.env.ANTHROPIC_DEFAULT_OPUS_MODEL = 'claude-opus-5-5';
+                            claudeSettings.env.ANTHROPIC_DEFAULT_SONNET_MODEL = 'claude-sonnet-5-5';
+                            claudeSettings.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = 'claude-haiku-5-5';
+                            claudeSettings.env.CLAUDE_CODE_SUBAGENT_MODEL = 'claude-haiku-5-5';
+                            writeClaudeSettings(claudeSettings);
+
+                            const newMm = { ...(config.modelMapping || {}) };
+                            newMm['claude-opus-5-5'] = { mapping: 'gemini-3.8-flash-high' };
+                            newMm['claude-sonnet-5-5'] = { mapping: 'gemini-3.8-flash-medium' };
+                            newMm['claude-haiku-5-5'] = { mapping: 'gemini-3.1-flash-lite' };
+                            saveConfig({ modelMapping: newMm });
+                            statusMessage = 'Applied Preset 2: Balanced models in Claude Code.';
+                        } else if (opt === '3') {
+                            const curSub = cEnv.CLAUDE_CODE_SUBAGENT_MODEL || '';
+                            console.log(`\nCurrent Subagent Model: ${curSub || '(not set)'}`);
+                            const ans = await new Promise(r => rl.question('Enter model ID for subagents (leave blank to delete env): ', r));
+                            const trimmed = ans.trim();
+                            claudeSettings.env = claudeSettings.env || {};
+                            if (trimmed) {
+                                claudeSettings.env.CLAUDE_CODE_SUBAGENT_MODEL = trimmed;
+                                statusMessage = `Set CLAUDE_CODE_SUBAGENT_MODEL to ${trimmed}.`;
+                            } else {
+                                delete claudeSettings.env.CLAUDE_CODE_SUBAGENT_MODEL;
+                                statusMessage = 'Deleted CLAUDE_CODE_SUBAGENT_MODEL from settings.json.';
+                            }
+                            writeClaudeSettings(claudeSettings);
+                        } else if (opt === '4') {
+                            const envKeys = [
+                                'ANTHROPIC_MODEL',
+                                'ANTHROPIC_DEFAULT_OPUS_MODEL',
+                                'ANTHROPIC_DEFAULT_SONNET_MODEL',
+                                'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+                                'CLAUDE_CODE_SUBAGENT_MODEL'
+                            ];
+                            const varNum = await new Promise(r => rl.question('Select variable number to edit [1-5]: ', r));
+                            const idx = parseInt(varNum, 10) - 1;
+                            if (idx >= 0 && idx < envKeys.length) {
+                                const selectedKey = envKeys[idx];
+                                const currentVal = cEnv[selectedKey] || '';
+                                console.log(`Current value of ${selectedKey}: ${currentVal || '(not set)'}`);
+                                const newVal = await new Promise(r => rl.question(`Enter new value (leave blank to delete ${selectedKey}): `, r));
+                                const trimmed = newVal.trim();
+                                claudeSettings.env = claudeSettings.env || {};
+                                if (trimmed && trimmed.toLowerCase() !== 'delete' && trimmed.toLowerCase() !== 'none') {
+                                    claudeSettings.env[selectedKey] = trimmed;
+                                    statusMessage = `Updated ${selectedKey} = ${trimmed}.`;
+                                } else {
+                                    delete claudeSettings.env[selectedKey];
+                                    statusMessage = `Deleted ${selectedKey} from settings.json.`;
+                                }
+                                writeClaudeSettings(claudeSettings);
+                            }
+                        } else if (opt === '5') {
+                            const keysToRemove = [
+                                'ANTHROPIC_MODEL',
+                                'ANTHROPIC_DEFAULT_OPUS_MODEL',
+                                'ANTHROPIC_DEFAULT_SONNET_MODEL',
+                                'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+                                'CLAUDE_CODE_SUBAGENT_MODEL',
+                                'ANTHROPIC_CLAUDE_OPUS_MODEL',
+                                'ANTHROPIC_CLAUDE_SONNET_MODEL',
+                                'ANTHROPIC_CLAUDE_5_OPUS_MODEL',
+                                'ANTHROPIC_CLAUDE_5_SONNET_MODEL'
+                            ];
+                            claudeSettings.env = claudeSettings.env || {};
+                            keysToRemove.forEach(k => delete claudeSettings.env[k]);
+                            writeClaudeSettings(claudeSettings);
+                            statusMessage = 'Cleaned all model environment variables from settings.json.';
+                        }
+
+                        rl.close();
                         process.stdout.write(c.enterAltScreen + c.disableWrap + c.hideCursor);
                         if (process.stdin.isTTY) process.stdin.setRawMode(true);
                         process.stdin.resume();
