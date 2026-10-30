@@ -200,11 +200,13 @@ function getShimmerTitle() {
             continue;
         }
         const dist = Math.abs(i - center);
-        if (dist < 2.8) {
-            const factor = Math.cos((dist / 2.8) * (Math.PI / 2));
-            const r = Math.round(item.r + (255 - item.r) * factor);
-            const g = Math.round(item.g + (255 - item.g) * factor);
-            const b = Math.round(item.b + (255 - item.b) * factor);
+        if (dist < 2.6) {
+            const factor = Math.cos((dist / 2.6) * (Math.PI / 2));
+            // Shimmer xám sáng ánh kim tinh tế (subtle silver-gray gleam)
+            const silverR = 220, silverG = 226, silverB = 236;
+            const r = Math.round(item.r + (silverR - item.r) * factor * 0.65);
+            const g = Math.round(item.g + (silverG - item.g) * factor * 0.65);
+            const b = Math.round(item.b + (silverB - item.b) * factor * 0.65);
             out += `\x1b[38;2;${r};${g};${b}m${item.ch}`;
         } else {
             out += `\x1b[38;2;${item.r};${item.g};${item.b}m${item.ch}`;
@@ -284,8 +286,11 @@ export async function runInteractiveDashboard() {
     // Enter alternate screen buffer, disable line wrap & hide cursor for 100% flicker-free isolated TUI
     process.stdout.write(c.enterAltScreen + c.disableWrap + c.hideCursor);
 
+    let isSubScreenActive = false;
+
     // Fixed-height, 0% flicker render function
     function render() {
+        if (isSubScreenActive) return;
         let buf = c.hideCursor + c.disableWrap + c.cursorHome;
 
         // Header Title
@@ -309,18 +314,29 @@ export async function runInteractiveDashboard() {
             const isSelected = i === selectedIndex;
 
             if (it.type === 'header') {
-                buf += `${c.textBright}${it.label}${c.reset}${c.clearToEndOfLine}\n`;
+                buf += `\x1b[1;38;5;110m${it.label}${c.reset}${c.clearToEndOfLine}\n`;
                 if (it.label === 'Saved Accounts') {
-                    buf += `    ${c.textDark}Account / Email                 Plan      Status${c.reset}${c.clearToEndOfLine}\n`;
+                    buf += `    \x1b[38;5;241mAccount / Email                 Plan      Status      Active${c.reset}${c.clearToEndOfLine}\n`;
                 }
                 continue;
             }
 
             if (it.type === 'action') {
-                let pointer = isSelected ? `${c.cursorGreen}> ` : `  ${c.textDark}o `;
-                let text = isSelected
-                    ? `${c.activeBright}${it.label}${c.reset}`
-                    : `${c.actionGreen}${it.label}${c.reset}`;
+                let pointer = isSelected ? `\x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
+                let text = '';
+                if (isSelected) {
+                    text = `\x1b[1;38;5;255m${it.label}${c.reset}`;
+                } else {
+                    // Stylize label with balanced, elegant colors
+                    if (it.label.includes(': [')) {
+                        const parts = it.label.split(': [');
+                        const prefix = parts[0];
+                        const val = parts[1].replace(']', '');
+                        text = `\x1b[38;5;250m${prefix}:\x1b[0m \x1b[38;5;147m[${val}]\x1b[0m`;
+                    } else {
+                        text = `\x1b[38;5;252m${it.label}${c.reset}`;
+                    }
+                }
 
                 buf += `${pointer}${text}${c.clearToEndOfLine}\n`;
                 if (isSelected) {
@@ -354,17 +370,30 @@ export async function runInteractiveDashboard() {
                 const planPad = ' '.repeat(Math.max(1, 10 - planBadgeRawLen));
                 const planStr = formatPlanBadge(planTier) + planPad;
 
-                // Column 3: Status / Role Badges
-                let statusBadges = [];
-                if (it.isCurrent) statusBadges.push(`${c.statusCurrent}[current]${c.reset}`);
-                if (!acc.enabled) statusBadges.push(`${c.statusMuted}[disabled]${c.reset}`);
-                else if (hasVerifyUrl) statusBadges.push(`${c.statusDanger}[verify-required]${c.reset}`);
-                else if (isInvalid) statusBadges.push(`${c.statusDanger}[invalid]${c.reset}`);
-                else if (isLimited) statusBadges.push(`${c.statusWarn}[rate-limited]${c.reset}`);
-                else statusBadges.push(`${c.statusOk}[ok]${c.reset}`);
+                // Column 3: Status Badge (strictly 12-char width)
+                let statusLabel = '[ok]';
+                let statusColor = c.statusOk;
+                if (!acc.enabled) {
+                    statusLabel = '[disabled]';
+                    statusColor = c.statusMuted;
+                } else if (hasVerifyUrl) {
+                    statusLabel = '[verify-req]';
+                    statusColor = c.statusDanger;
+                } else if (isInvalid) {
+                    statusLabel = '[invalid]';
+                    statusColor = c.statusDanger;
+                } else if (isLimited) {
+                    statusLabel = '[rate-limit]';
+                    statusColor = c.statusWarn;
+                }
+                const statusPad = ' '.repeat(Math.max(1, 12 - statusLabel.length));
+                const statusStr = `${statusColor}${statusLabel}${c.reset}${statusPad}`;
 
-                let pointer = isSelected ? `${c.cursorGreen}> ` : `  ${c.textDark}o `;
-                buf += `${pointer}${emailStr} ${planStr} ${statusBadges.join(' ')}${c.clearToEndOfLine}\n`;
+                // Column 4: Role / Active tag on the outside (nằm ngoài cùng)
+                const currentBadge = it.isCurrent ? ` ${c.statusCurrent}[current]${c.reset}` : '';
+
+                let pointer = isSelected ? `\x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
+                buf += `${pointer}${emailStr} ${planStr} ${statusStr}${currentBadge}${c.clearToEndOfLine}\n`;
 
                 if (isSelected) {
                     const models = live.models || lim.models || {};
@@ -592,6 +621,8 @@ export async function runInteractiveDashboard() {
 
                     // 2. Custom GCP Project Setup
                     if (cur.id === 'custom_project') {
+                        isSubScreenActive = true;
+                        if (shimmerTimer) clearInterval(shimmerTimer);
                         process.stdout.write(c.exitAltScreen + c.enableWrap + c.showCursor);
                         if (process.stdin.isTTY) process.stdin.setRawMode(false);
                         console.log(c.clearScreen);
@@ -619,9 +650,11 @@ export async function runInteractiveDashboard() {
                             statusMessage = `Configured custom project ID: ${trimmed}.`;
                         }
 
+                        isSubScreenActive = false;
                         process.stdout.write(c.enterAltScreen + c.disableWrap + c.hideCursor);
                         if (process.stdin.isTTY) process.stdin.setRawMode(true);
                         process.stdin.resume();
+                        shimmerTimer = setInterval(() => render(), 75);
                         items = getItems();
                         render();
                         return;
@@ -629,6 +662,8 @@ export async function runInteractiveDashboard() {
 
                     // 3. Custom Model Mappings
                     if (cur.id === 'model_mapping') {
+                        isSubScreenActive = true;
+                        if (shimmerTimer) clearInterval(shimmerTimer);
                         process.stdout.write(c.exitAltScreen + c.enableWrap + c.showCursor);
                         if (process.stdin.isTTY) process.stdin.setRawMode(false);
                         console.log(c.clearScreen);
@@ -755,9 +790,11 @@ export async function runInteractiveDashboard() {
                         }
 
                         rl.close();
+                        isSubScreenActive = false;
                         process.stdout.write(c.enterAltScreen + c.disableWrap + c.hideCursor);
                         if (process.stdin.isTTY) process.stdin.setRawMode(true);
                         process.stdin.resume();
+                        shimmerTimer = setInterval(() => render(), 75);
                         items = getItems();
                         render();
                         return;
@@ -811,6 +848,8 @@ export async function runInteractiveDashboard() {
                     }
 
                     if (cur.id === 'health_check') {
+                        isSubScreenActive = true;
+                        if (shimmerTimer) clearInterval(shimmerTimer);
                         process.stdout.write(c.exitAltScreen + c.enableWrap + c.showCursor);
                         if (process.stdin.isTTY) process.stdin.setRawMode(false);
                         console.log(c.clearScreen);
