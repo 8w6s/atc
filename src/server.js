@@ -145,14 +145,14 @@ function parseError(error) {
         errorType = 'authentication_error';
         statusCode = 401;
         errorMessage = 'Authentication failed. Make sure Antigravity is running with a valid token.';
-    } else if (error.message.includes('429') || error.message.includes('RESOURCE_EXHAUSTED') || error.message.includes('QUOTA_EXHAUSTED')) {
-        errorType = 'invalid_request_error';  // Use invalid_request_error to force client to purge/stop
-        statusCode = 400;  // Use 400 to ensure client does not retry (429 and 529 trigger retries)
+    } else if (error.message.includes('429') || error.message.includes('RESOURCE_EXHAUSTED') || error.message.includes('QUOTA_EXHAUSTED') || error.message.includes('RATE_LIMITED')) {
+        errorType = 'rate_limit_error';  // Standard Anthropic rate_limit_error allows Claude Code & subagents to auto-retry gracefully
+        statusCode = 429;  // Standard 429 prevents premature subagent termination
 
         // Try to extract the quota reset time from the error
         const resetMatch = error.message.match(/quota will reset after ([\dh\dm\ds]+)/i);
         // Try to extract model from our error format "Rate limited on <model>" or JSON format
-        const modelMatch = error.message.match(/Rate limited on ([^.]+)\./) || error.message.match(/"model":\s*"([^"]+)"/);
+        const modelMatch = error.message.match(/Rate limited on ([^.]+)\./) || error.message.match(/"model":\s*"([^"]+)"/) || error.message.match(/on ([a-zA-Z0-9._-]+)\./);
         const model = modelMatch ? modelMatch[1] : 'the model';
 
         if (resetMatch) {
@@ -877,7 +877,18 @@ app.post('/v1/messages', async (req, res) => {
                 if (!res.headersSent) {
                     logger.error('[API] Initial stream error:', error);
                     const { errorType, statusCode, errorMessage } = parseError(error);
-                    
+
+                    if (statusCode === 429) {
+                        let retrySec = 60;
+                        const durMatch = errorMessage.match(/(\d+)h(\d+)m(\d+)s|(\d+)m(\d+)s|(\d+)s/i);
+                        if (durMatch) {
+                            if (durMatch[1]) retrySec = parseInt(durMatch[1], 10) * 3600 + parseInt(durMatch[2], 10) * 60 + parseInt(durMatch[3], 10);
+                            else if (durMatch[4]) retrySec = parseInt(durMatch[4], 10) * 60 + parseInt(durMatch[5], 10);
+                            else if (durMatch[6]) retrySec = parseInt(durMatch[6], 10);
+                        }
+                        res.setHeader('Retry-After', retrySec.toString());
+                    }
+
                     return res.status(statusCode).json({
                         type: 'error',
                         error: {
@@ -937,6 +948,17 @@ app.post('/v1/messages', async (req, res) => {
             })}\n\n`);
             res.end();
         } else {
+            if (statusCode === 429) {
+                let retrySec = 60;
+                const durMatch = errorMessage.match(/(\d+)h(\d+)m(\d+)s|(\d+)m(\d+)s|(\d+)s/i);
+                if (durMatch) {
+                    if (durMatch[1]) retrySec = parseInt(durMatch[1], 10) * 3600 + parseInt(durMatch[2], 10) * 60 + parseInt(durMatch[3], 10);
+                    else if (durMatch[4]) retrySec = parseInt(durMatch[4], 10) * 60 + parseInt(durMatch[5], 10);
+                    else if (durMatch[6]) retrySec = parseInt(durMatch[6], 10);
+                }
+                res.setHeader('Retry-After', retrySec.toString());
+            }
+
             res.status(statusCode).json({
                 type: 'error',
                 error: {

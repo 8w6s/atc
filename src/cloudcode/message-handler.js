@@ -183,7 +183,17 @@ export async function sendMessage(anthropicRequest, accountManager, fallbackEnab
                             continue;
                         }
 
-                        if (response.status === 429) {
+                        // Check for Quota / Rate limit (either HTTP 429 or HTTP 400 with RESOURCE_EXHAUSTED)
+                        const lowerErrorText = (errorText || '').toLowerCase();
+                        const isQuotaOrRateLimit = response.status === 429 ||
+                            lowerErrorText.includes('resource_exhausted') ||
+                            lowerErrorText.includes('quota_exhausted') ||
+                            lowerErrorText.includes('exhausted your capacity') ||
+                            lowerErrorText.includes('quota will reset') ||
+                            lowerErrorText.includes('quota exceeded') ||
+                            lowerErrorText.includes('daily limit');
+
+                        if (isQuotaOrRateLimit) {
                             const resetMs = parseResetTime(response, errorText);
                             const consecutiveFailures = accountManager.getConsecutiveFailures?.(account.email) || 0;
 
@@ -205,58 +215,19 @@ export async function sendMessage(anthropicRequest, accountManager, fallbackEnab
                                 logger.warn(`[CloudCode] Max capacity retries (${MAX_CAPACITY_RETRIES}) exceeded, switching account`);
                             }
 
-                            // Get rate limit backoff with exponential backoff and state reset
-                            const backoff = getRateLimitBackoff(account.email, model, resetMs);
-
                             // For very short rate limits (< 1 second), always wait and retry
-                            // Switching accounts won't help when all accounts have per-second rate limits
                             if (resetMs !== null && resetMs < 1000) {
                                 const waitMs = resetMs;
                                 logger.info(`[CloudCode] Short rate limit on ${account.email} (${resetMs}ms), waiting and retrying...`);
                                 await sleep(waitMs);
-                                // Don't increment endpointIndex - retry same endpoint
                                 continue;
                             }
 
-                            // If within dedup window AND reset time is >= 1s, switch account
-                            if (backoff.isDuplicate) {
-                                const smartBackoffMs = calculateSmartBackoff(errorText, resetMs, consecutiveFailures);
-                                logger.info(`[CloudCode] Skipping retry due to recent rate limit on ${account.email} (attempt ${backoff.attempt}), switching account...`);
-                                accountManager.markRateLimited(account.email, smartBackoffMs, model);
-                                throw new Error(`RATE_LIMITED_DEDUP: ${errorText}`);
-                            }
-
-                            // Calculate smart backoff based on error type
-                            const smartBackoffMs = calculateSmartBackoff(errorText, resetMs, consecutiveFailures);
-
-                            // Decision: wait and retry OR switch account
-                            // First 429 gets a quick 1s retry (FIRST_RETRY_DELAY_MS)
-                            if (backoff.attempt === 1 && smartBackoffMs <= DEFAULT_COOLDOWN_MS) {
-                                // Quick 1s retry on first 429 (matches opencode-antigravity-auth)
-                                const waitMs = backoff.delayMs;
-                                // markRateLimited already increments consecutiveFailures internally
-                                // This prevents concurrent retry storms and ensures progressive backoff escalation
-                                accountManager.markRateLimited(account.email, waitMs, model);
-                                logger.info(`[CloudCode] First rate limit on ${account.email}, quick retry after ${formatDuration(waitMs)}...`);
-                                await sleep(waitMs);
-                                // Don't increment endpointIndex - retry same endpoint
-                                continue;
-                            } else if (smartBackoffMs > DEFAULT_COOLDOWN_MS) {
-                                // Long-term quota exhaustion (> 10s) - wait SWITCH_ACCOUNT_DELAY_MS then switch
-                                logger.info(`[CloudCode] Quota exhausted for ${account.email} (${formatDuration(smartBackoffMs)}), switching account after ${formatDuration(SWITCH_ACCOUNT_DELAY_MS)} delay...`);
-                                await sleep(SWITCH_ACCOUNT_DELAY_MS);
-                                accountManager.markRateLimited(account.email, smartBackoffMs, model);
-                                throw new Error(`QUOTA_EXHAUSTED: ${errorText}`);
-                            } else {
-                                // Short-term rate limit but not first attempt - use exponential backoff delay
-                                const waitMs = backoff.delayMs;
-                                // markRateLimited already increments consecutiveFailures internally
-                                accountManager.markRateLimited(account.email, waitMs, model);
-                                logger.info(`[CloudCode] Rate limit on ${account.email} (attempt ${backoff.attempt}), waiting ${formatDuration(waitMs)}...`);
-                                await sleep(waitMs);
-                                // Don't increment endpointIndex - retry same endpoint
-                                continue;
-                            }
+                            // Long-term quota exhaustion or rate limit: mark account and switch
+                            const smartBackoffMs = resetMs || calculateSmartBackoff(errorText, resetMs, consecutiveFailures);
+                            logger.warn(`[CloudCode] Quota/Capacity exhausted for ${account.email} (${formatDuration(smartBackoffMs)}), rotating account...`);
+                            accountManager.markRateLimited(account.email, smartBackoffMs, model);
+                            throw new Error(`QUOTA_EXHAUSTED: ${errorText}`);
                         }
 
                         if (response.status >= 400) {
@@ -280,8 +251,8 @@ export async function sendMessage(anthropicRequest, accountManager, fallbackEnab
                                 throw new Error(`CAPACITY_EXHAUSTED: ${errorText}`);
                             }
 
-                            // 400 errors are client errors - fail immediately, don't retry or switch accounts
-                            // Examples: token limit exceeded, invalid schema, malformed request
+                            // 400 errors are client syntax errors - fail immediately, don't retry or switch accounts
+                            // (Only true syntax errors, since quota errors were handled above)
                             if (response.status === 400) {
                                 logger.error(`[CloudCode] Invalid request (400): ${errorText.substring(0, 200)}`);
                                 throw new Error(`invalid_request_error: ${errorText}`);
@@ -336,15 +307,22 @@ export async function sendMessage(anthropicRequest, accountManager, fallbackEnab
                     return convertGoogleToAnthropic(data, anthropicRequest.model);
 
                 } catch (endpointError) {
-                    if (isRateLimitError(endpointError)) {
+                    const msg = (endpointError.message || '').toLowerCase();
+                    const isQuotaErr = isRateLimitError(endpointError) ||
+                        msg.includes('resource_exhausted') ||
+                        msg.includes('quota_exhausted') ||
+                        msg.includes('exhausted your capacity') ||
+                        msg.includes('quota will reset');
+
+                    if (isQuotaErr) {
                         throw endpointError; // Re-throw to trigger account switch
                     }
                     // 403 account-level errors - re-throw to trigger account rotation
                     if (isAccountForbiddenError(endpointError)) {
                         throw endpointError;
                     }
-                    // 400 errors are client errors - re-throw immediately, don't retry
-                    if (endpointError.message?.includes('400')) {
+                    // 400 errors are client syntax errors - re-throw immediately, don't retry (only true syntax errors)
+                    if (endpointError.message?.includes('400') && !isQuotaErr) {
                         throw endpointError;
                     }
                     logger.warn(`[CloudCode] Error at ${endpoint}:`, endpointError.message);
@@ -364,10 +342,19 @@ export async function sendMessage(anthropicRequest, accountManager, fallbackEnab
             }
 
         } catch (error) {
-            if (isRateLimitError(error)) {
-                // Rate limited - already marked, notify strategy and continue to next account
+            const errLower = (error.message || '').toLowerCase();
+            const isRateOrQuota = isRateLimitError(error) ||
+                errLower.includes('resource_exhausted') ||
+                errLower.includes('quota_exhausted') ||
+                errLower.includes('exhausted your capacity') ||
+                errLower.includes('quota will reset');
+
+            if (isRateOrQuota) {
+                // Rate limited / Quota exhausted - notify strategy and continue to next account
                 accountManager.notifyRateLimit(account, model);
-                logger.info(`[CloudCode] Account ${account.email} rate-limited, trying next...`);
+                const resetMs = parseResetTime(null, error.message) || 60000;
+                accountManager.markRateLimited(account.email, resetMs, model);
+                logger.info(`[CloudCode] Account ${account.email} quota/rate-limited, rotating to next account in pool...`);
 
                 // CRITICAL FIX: If this is a duplicate rate limit (account was already known to be
                 // rate-limited), don't count it as a failed attempt. This prevents "Max retries exceeded"

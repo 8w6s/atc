@@ -49,6 +49,8 @@ const c = {
     textMuted: '\x1b[38;5;245m',      // Subtitle / hints
     textDark: '\x1b[38;5;240m',       // Dividers
     
+    enterAltScreen: '\x1b[?1049h',
+    exitAltScreen: '\x1b[?1049l',
     clearScreen: '\x1b[2J\x1b[H',
     cursorHome: '\x1b[H',
     clearToEndOfLine: '\x1b[K',
@@ -177,15 +179,15 @@ export async function runInteractiveDashboard() {
     if (selectedIndex === -1) selectedIndex = items.findIndex(it => it.type === 'account') || 1;
     if (selectedIndex === -1) selectedIndex = 1;
 
-    // Initial clear screen only once
-    process.stdout.write(c.clearScreen + c.hideCursor);
+    // Enter alternate screen buffer & hide cursor for 100% flicker-free & isolated TUI
+    process.stdout.write(c.enterAltScreen + c.hideCursor);
 
     // Flicker-free render function using virtual buffer and cursor home
     function render() {
-        let buf = c.cursorHome;
+        let buf = c.hideCursor + c.cursorHome;
 
-        // Header Title
-        buf += `${c.brandGreen}+ Accounts Dashboard (atc v2.9.1)${c.reset}${c.clearToEndOfLine}\n\n`;
+        // Header Title (clean, no unwanted '+' symbols)
+        buf += `${c.brandGreen}Accounts Dashboard (atc v2.9.1)${c.reset}${c.clearToEndOfLine}\n\n`;
 
         const liveMap = new Map();
         if (proxyHealth && Array.isArray(proxyHealth.accounts)) {
@@ -293,9 +295,8 @@ export async function runInteractiveDashboard() {
             buf += `${c.statusWarn}ℹ ${statusMessage}${c.reset}${c.clearToEndOfLine}\n`;
         }
         buf += `${c.textMuted}↑↓ Move | Enter Select | R Re-login | 1-9 Switch | Q Back${c.reset}${c.clearToEndOfLine}\n`;
-        buf += `${c.brandGreen}+${c.reset}${c.clearToEndOfLine}\n`;
 
-        // Clear any leftover lines below
+        // Clear any leftover lines below to prevent double text
         buf += c.clearToEndOfScreen;
 
         // Single write to stdout guarantees 0% screen flicker
@@ -309,11 +310,15 @@ export async function runInteractiveDashboard() {
     }
     process.stdin.resume();
 
+    const onResize = () => render();
+    process.stdout.on('resize', onResize);
+
     render();
 
     return new Promise((resolve) => {
         function cleanupAndExit() {
-            process.stdout.write(c.showCursor);
+            process.stdout.removeListener('resize', onResize);
+            process.stdout.write(c.exitAltScreen + c.showCursor);
             if (process.stdin.isTTY) {
                 process.stdin.setRawMode(false);
             }
@@ -353,7 +358,7 @@ export async function runInteractiveDashboard() {
                 const cur = items[selectedIndex];
                 if (cur && cur.type === 'account') {
                     const email = cur.account.email;
-                    process.stdout.write(c.showCursor);
+                    process.stdout.write(c.exitAltScreen + c.showCursor);
                     if (process.stdin.isTTY) process.stdin.setRawMode(false);
                     console.log(c.clearScreen);
                     await loginAccount({ targetEmail: email });
@@ -361,6 +366,7 @@ export async function runInteractiveDashboard() {
                     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
                     await new Promise(r => rl.once('line', r));
                     rl.close();
+                    process.stdout.write(c.enterAltScreen + c.hideCursor);
                     if (process.stdin.isTTY) process.stdin.setRawMode(true);
                     process.stdin.resume();
                     await refreshData();
