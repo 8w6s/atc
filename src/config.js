@@ -57,6 +57,10 @@ const DEFAULT_CONFIG = {
     // The backend hides newer models from outdated client versions.
     antigravityClientVersion: '',
     antigravityIdeVersion: '',
+    oauth: {
+        clientId: process.env.GOOGLE_OAUTH_CLIENT_ID || '',
+        clientSecret: process.env.GOOGLE_OAUTH_CLIENT_SECRET || ''
+    },
     // Account selection strategy configuration
     accountSelection: {
         strategy: 'hybrid',           // 'sticky' | 'round-robin' | 'hybrid'
@@ -147,6 +151,7 @@ export function getPublicConfig() {
 
     // Redact sensitive values
     if (publicConfig.apiKey) publicConfig.apiKey = '********';
+    if (publicConfig.oauth?.clientSecret) publicConfig.oauth.clientSecret = '********';
 
     return publicConfig;
 }

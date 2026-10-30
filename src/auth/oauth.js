@@ -248,6 +248,9 @@ function generatePKCE() {
  * @returns {{url: string, verifier: string, state: string}} Auth URL and PKCE data
  */
 export function getAuthorizationUrl(customRedirectUri = null) {
+    if (!OAUTH_CONFIG.clientId || !OAUTH_CONFIG.clientSecret) {
+        throw new Error('Google OAuth credentials not configured. Please define "oauth": { "clientId": "...", "clientSecret": "..." } in ~/.config/atc/config.json or set GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET.');
+    }
     const { verifier, challenge } = generatePKCE();
     const state = crypto.randomBytes(16).toString('hex');
 
@@ -520,6 +523,9 @@ Option 4: Exclude port from reservation (run as Administrator)
  * @returns {Promise<{accessToken: string, refreshToken: string, expiresIn: number}>} OAuth tokens
  */
 export async function exchangeCode(code, verifier) {
+    if (!OAUTH_CONFIG.clientId || !OAUTH_CONFIG.clientSecret) {
+        throw new Error('Google OAuth credentials not configured in ~/.config/atc/config.json.');
+    }
     const response = await throttledFetch(OAUTH_CONFIG.tokenUrl, {
         method: 'POST',
         headers: {
@@ -565,6 +571,9 @@ export async function exchangeCode(code, verifier) {
  * @returns {Promise<{accessToken: string, expiresIn: number}>} New access token
  */
 export async function refreshAccessToken(compositeRefresh) {
+    if (!OAUTH_CONFIG.clientId || !OAUTH_CONFIG.clientSecret) {
+        throw new Error('Google OAuth credentials not configured in ~/.config/atc/config.json.');
+    }
     // Parse the composite refresh token to extract the actual OAuth token
     const parts = parseRefreshParts(compositeRefresh);
 
