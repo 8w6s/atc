@@ -25,7 +25,6 @@ import { onboardUser, getDefaultTierId } from '../account-manager/onboarding.js'
 function renderAuthHtml({ success, title, subtitle, hint }) {
     const accentColor = success ? '#10b981' : '#ef4444';
     const accentBg = success ? 'rgba(16, 185, 129, 0.12)' : 'rgba(239, 68, 68, 0.12)';
-    const glowColor = success ? 'rgba(16, 185, 129, 0.25)' : 'rgba(239, 68, 68, 0.25)';
     const iconSvg = success
         ? `<svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>`
         : `<svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>`;
@@ -49,7 +48,7 @@ function renderAuthHtml({ success, title, subtitle, hint }) {
             padding: 24px;
         }
         .card {
-            background: rgba(18, 24, 38, 0.82);
+            background: rgba(18, 24, 38, 0.88);
             backdrop-filter: blur(24px);
             -webkit-backdrop-filter: blur(24px);
             border: 1px solid rgba(255, 255, 255, 0.08);
@@ -58,7 +57,7 @@ function renderAuthHtml({ success, title, subtitle, hint }) {
             max-width: 460px;
             width: 100%;
             text-align: center;
-            box-shadow: 0 30px 60px -15px rgba(0, 0, 0, 0.8), 0 0 45px ${glowColor};
+            box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.7);
             animation: fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1);
         }
         @keyframes fadeIn {
@@ -70,12 +69,11 @@ function renderAuthHtml({ success, title, subtitle, hint }) {
             height: 80px;
             margin: 0 auto 24px;
             background: ${accentBg};
-            border: 1.5px solid ${accentColor}44;
+            border: 1.5px solid ${accentColor}33;
             border-radius: 50%;
             display: flex;
             align-items: center;
             justify-content: center;
-            box-shadow: 0 0 25px ${glowColor};
         }
         .badge {
             display: inline-flex;
@@ -97,7 +95,7 @@ function renderAuthHtml({ success, title, subtitle, hint }) {
             height: 6px;
             border-radius: 50%;
             background: ${accentColor};
-            box-shadow: 0 0 8px ${accentColor};
+            box-shadow: 0 0 6px ${accentColor};
         }
         h1 {
             font-size: 24px;
@@ -160,12 +158,29 @@ function renderAuthHtml({ success, title, subtitle, hint }) {
         <p class="subtitle">${subtitle}</p>
         <div class="divider"></div>
         <p class="hint">${hint}</p>
-        <button class="btn" onclick="window.close()">Close Window</button>
-        ${success ? '<p class="footer-note" id="timer">Closing tab in 3 seconds...</p>' : ''}
+        <button class="btn" onclick="attemptCloseOrRedirect()">Close Window</button>
+        ${success ? '<p class="footer-note" id="timer">Closing tab in 5 seconds...</p>' : ''}
     </div>
-    ${success ? `
     <script>
-        let s = 3;
+        function attemptCloseOrRedirect() {
+            try {
+                window.open('', '_self', '');
+                window.close();
+            } catch (e) {}
+
+            setTimeout(() => {
+                if (document.referrer && !document.referrer.includes(window.location.host)) {
+                    window.location.href = document.referrer;
+                } else if (window.history.length > 1) {
+                    window.history.back();
+                } else {
+                    window.location.href = 'about:blank';
+                }
+            }, 300);
+        }
+
+        ${success ? `
+        let s = 5;
         const el = document.getElementById('timer');
         const iv = setInterval(() => {
             s--;
@@ -173,10 +188,11 @@ function renderAuthHtml({ success, title, subtitle, hint }) {
                 if (el) el.textContent = 'Closing tab in ' + s + ' second' + (s > 1 ? 's...' : '...');
             } else {
                 clearInterval(iv);
-                window.close();
+                attemptCloseOrRedirect();
             }
         }, 1000);
-    </script>` : ''}
+        ` : ''}
+    </script>
 </body>
 </html>`;
 }

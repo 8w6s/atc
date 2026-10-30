@@ -441,6 +441,7 @@ async function recordNewAccount(result, accounts, settings, activeIndex) {
         accounts[existingIndex].refreshToken = result.refreshToken;
         accounts[existingIndex].isInvalid = false;
         accounts[existingIndex].invalidReason = null;
+        accounts[existingIndex].verifyUrl = null;
         accounts[existingIndex].enabled = true;
         accounts[existingIndex].addedAt = new Date().toISOString();
         console.log(`\n${c.green}✓${c.reset} Refreshed credentials for existing account: ${c.bold}${result.email}${c.reset}`);
@@ -565,4 +566,35 @@ export function showModelMappings() {
     }
     console.log(`${c.gray}${'─'.repeat(60)}${c.reset}`);
     console.log(`Total: ${c.bold}${entries.length}${c.reset} model aliases configured.\n`);
+}
+
+/**
+ * Open Google Security Verification URL in default browser
+ */
+export async function verifyAccount(account) {
+    if (!account || !account.verifyUrl) {
+        console.log(`\n${c.yellow}No Google Verification URL required for this account.${c.reset}\n`);
+        return;
+    }
+    console.log(`\n${c.bold}${c.brightCyan}=== Google Security Verification: ${account.email} ===${c.reset}\n`);
+    console.log(`Google requires completing a security check or accepting Terms for this account.`);
+    console.log(`Opening verification link in your browser:\n`);
+    console.log(`   ${c.cyan}${account.verifyUrl}${c.reset}\n`);
+    openBrowser(account.verifyUrl);
+    console.log(`After completing verification in the browser, press Enter to probe and restore account.`);
+    const rl = createInterface({ input: stdin, output: stdout });
+    await new Promise(r => rl.once('line', r));
+    rl.close();
+
+    const { accounts, settings, activeIndex } = await loadAccounts(ACCOUNT_CONFIG_PATH);
+    const idx = accounts.findIndex(a => a.email.toLowerCase() === account.email.toLowerCase());
+    if (idx !== -1) {
+        accounts[idx].isInvalid = false;
+        accounts[idx].invalidReason = null;
+        accounts[idx].verifyUrl = null;
+        await saveAccounts(ACCOUNT_CONFIG_PATH, accounts, settings, activeIndex);
+    }
+    const port = getProxyPort();
+    await notifyProxyReload(port);
+    console.log(`\n${c.green}✓${c.reset} Verification marked complete. Refreshing account status...\n`);
 }

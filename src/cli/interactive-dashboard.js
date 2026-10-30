@@ -12,7 +12,8 @@ import {
     switchAccount,
     toggleAccount,
     removeAccount,
-    showModelMappings
+    showModelMappings,
+    verifyAccount
 } from './terminal-manager.js';
 
 // Calibrated ANSI color palette for high contrast and readability on dark terminals
@@ -22,6 +23,8 @@ const c = {
     dim: '\x1b[2m',
 
     // Calibrated 256-color tones
+    brandCyan: '\x1b[1;38;5;45m',     // Vivid sky cyan for primary title
+    brandMint: '\x1b[38;5;49m',       // Soft mint for versioning
     brandGreen: '\x1b[38;5;48m',      // Emerald green for title / border
     actionGreen: '\x1b[38;5;42m',     // Soft readable green for actions
     activeBright: '\x1b[1;38;5;120m', // Highlighted text when selected
@@ -182,7 +185,7 @@ export async function runInteractiveDashboard() {
         let buf = c.hideCursor + c.disableWrap + c.cursorHome;
 
         // Header Title
-        buf += `${c.brandGreen}Accounts Dashboard (atc v2.9.1)${c.reset}${c.clearToEndOfLine}\n`;
+        buf += `${c.brandCyan}Antigravity to Claude Code${c.reset} ${c.textMuted}(${c.brandMint}atc v1.0.0${c.textMuted})${c.reset}${c.clearToEndOfLine}\n`;
 
         const liveMap = new Map();
         if (proxyHealth && Array.isArray(proxyHealth.accounts)) {
@@ -203,6 +206,9 @@ export async function runInteractiveDashboard() {
 
             if (it.type === 'header') {
                 buf += `${c.textBright}${it.label}${c.reset}${c.clearToEndOfLine}\n`;
+                if (it.label === 'Saved Accounts') {
+                    buf += `    ${c.textDark}Account / Email                 Plan      Status${c.reset}${c.clearToEndOfLine}\n`;
+                }
                 continue;
             }
 
@@ -226,26 +232,35 @@ export async function runInteractiveDashboard() {
                 const lim = limitsMap.get(acc.email) || {};
 
                 const isInvalid = acc.isInvalid || live.status === 'invalid';
+                const hasVerifyUrl = !!acc.verifyUrl;
                 const isLimited = Object.values(acc.modelRateLimits || {}).some(
                     l => l.isRateLimited && l.resetTime > Date.now()
                 ) || (live.rateLimitCooldownRemaining > 0);
 
-                const planTier = lim.subscription?.tier || acc.subscription?.tier || 'free';
-                const planBadge = formatPlanBadge(planTier);
+                // Column 1: Account / Email padded to 32 chars
+                const rawEmail = `${idx}. ${acc.email}`;
+                const paddedEmail = rawEmail.padEnd(32, ' ');
+                const emailStr = isSelected
+                    ? `${c.activeBright}${paddedEmail}${c.reset}`
+                    : `${c.textNormal}${paddedEmail}${c.reset}`;
 
-                let badges = [planBadge];
-                if (it.isCurrent) badges.push(`${c.statusCurrent}[current]${c.reset}`);
-                if (!acc.enabled) badges.push(`${c.statusMuted}[disabled]${c.reset}`);
-                else if (isInvalid) badges.push(`${c.statusDanger}[invalid]${c.reset}`);
-                else if (isLimited) badges.push(`${c.statusWarn}[rate-limited]${c.reset}`);
-                else badges.push(`${c.statusOk}[ok]${c.reset}`);
+                // Column 2: Plan Badge padded to 10 chars
+                const planTier = lim.subscription?.tier || acc.subscription?.tier || 'unknown';
+                const planBadgeRawLen = planTier.length + 2; // e.g. [pro] is 5
+                const planPad = ' '.repeat(Math.max(1, 10 - planBadgeRawLen));
+                const planStr = formatPlanBadge(planTier) + planPad;
+
+                // Column 3: Status / Role Badges
+                let statusBadges = [];
+                if (it.isCurrent) statusBadges.push(`${c.statusCurrent}[current]${c.reset}`);
+                if (!acc.enabled) statusBadges.push(`${c.statusMuted}[disabled]${c.reset}`);
+                else if (hasVerifyUrl) statusBadges.push(`${c.statusDanger}[verify-required]${c.reset}`);
+                else if (isInvalid) statusBadges.push(`${c.statusDanger}[invalid]${c.reset}`);
+                else if (isLimited) statusBadges.push(`${c.statusWarn}[rate-limited]${c.reset}`);
+                else statusBadges.push(`${c.statusOk}[ok]${c.reset}`);
 
                 let pointer = isSelected ? `${c.cursorGreen}> ` : `  ${c.textDark}o `;
-                let emailStr = isSelected
-                    ? `${c.activeBright}${idx}. ${acc.email}${c.reset}`
-                    : `${c.textNormal}${idx}. ${acc.email}${c.reset}`;
-
-                buf += `${pointer}${emailStr} ${badges.join(' ')}${c.clearToEndOfLine}\n`;
+                buf += `${pointer}${emailStr} ${planStr} ${statusBadges.join(' ')}${c.clearToEndOfLine}\n`;
 
                 if (isSelected) {
                     const models = live.models || lim.models || {};
@@ -265,7 +280,9 @@ export async function runInteractiveDashboard() {
                         if (diff > 0) resetStr = ` ${c.textDark}|${c.reset} ${c.textMuted}Resets:${c.reset} in ${formatDuration(diff)}`;
                     }
 
-                    if (isInvalid) {
+                    if (hasVerifyUrl) {
+                        detailsLine = `${c.textMuted}Details:${c.reset} ${timeAgo} ${c.textDark}|${c.reset} ${c.statusDanger}Google check needed - press V to verify in browser, or R to re-login${c.reset}`;
+                    } else if (isInvalid) {
                         detailsLine = `${c.textMuted}Details:${c.reset} ${timeAgo} ${c.textDark}|${c.reset} ${c.statusDanger}invalid - press R to re-login${c.reset}`;
                     } else {
                         detailsLine = `${c.textMuted}Details:${c.reset} ${timeAgo} ${c.textDark}|${c.reset} ${usageColor}${usedPct}% used${c.reset} ${c.textDark}(${remainingPct}% left)${c.reset}${resetStr}`;
@@ -282,7 +299,7 @@ export async function runInteractiveDashboard() {
         }
 
         // Fixed Footer line (no trailing newline to guarantee no terminal auto-scroll)
-        buf += `${c.textMuted}↑↓ Move | Enter Select | 1-9 Switch | R Re-login | T Toggle | D Delete | Q Back${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
+        buf += `${c.textMuted}↑↓ Move | Enter Select | 1-9 Switch | V Verify | R Re-login | T Toggle | D Delete | Q Back${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
 
         process.stdout.write(buf);
     }
@@ -331,6 +348,31 @@ export async function runInteractiveDashboard() {
                 return;
             }
 
+            // 'V' or 'v': Open Google verification link for accounts needing check
+            if (str === 'v' || str === 'V') {
+                const cur = items[selectedIndex];
+                if (cur && cur.type === 'account') {
+                    if (cur.account.verifyUrl) {
+                        process.stdout.write(c.exitAltScreen + c.enableWrap + c.showCursor);
+                        if (process.stdin.isTTY) process.stdin.setRawMode(false);
+                        console.log(c.clearScreen);
+                        await verifyAccount(cur.account);
+                        process.stdout.write(c.enterAltScreen + c.disableWrap + c.hideCursor);
+                        if (process.stdin.isTTY) process.stdin.setRawMode(true);
+                        process.stdin.resume();
+                        await refreshData();
+                        items = getItems();
+                        statusMessage = `Verified account ${cur.account.email}.`;
+                        render();
+                        return;
+                    } else {
+                        statusMessage = `Account ${cur.account.email} does not require Google verification.`;
+                        render();
+                        return;
+                    }
+                }
+            }
+
             // 'R' or 'r': Re-login account under cursor
             if (str === 'r' || str === 'R') {
                 const cur = items[selectedIndex];
@@ -340,10 +382,8 @@ export async function runInteractiveDashboard() {
                     if (process.stdin.isTTY) process.stdin.setRawMode(false);
                     console.log(c.clearScreen);
                     await loginAccount({ targetEmail: email });
-                    console.log(`\n${c.textMuted}Press Enter to return to dashboard...${c.reset}`);
-                    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-                    await new Promise(r => rl.once('line', r));
-                    rl.close();
+                    console.log(`\n${c.actionGreen}✓ Automatically returning to dashboard in 1s...${c.reset}`);
+                    await new Promise(r => setTimeout(r, 1000));
                     process.stdout.write(c.enterAltScreen + c.disableWrap + c.hideCursor);
                     if (process.stdin.isTTY) process.stdin.setRawMode(true);
                     process.stdin.resume();
@@ -592,10 +632,8 @@ export async function runInteractiveDashboard() {
                         if (process.stdin.isTTY) process.stdin.setRawMode(false);
                         console.log(c.clearScreen);
                         await checkAccounts();
-                        console.log(`\n${c.textMuted}Press Enter to return to dashboard...${c.reset}`);
-                        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-                        await new Promise(r => rl.once('line', r));
-                        rl.close();
+                        console.log(`\n${c.actionGreen}✓ Automatically returning to dashboard in 1s...${c.reset}`);
+                        await new Promise(r => setTimeout(r, 1000));
                         process.stdout.write(c.enterAltScreen + c.disableWrap + c.hideCursor);
                         if (process.stdin.isTTY) process.stdin.setRawMode(true);
                         process.stdin.resume();
@@ -610,10 +648,8 @@ export async function runInteractiveDashboard() {
                         if (process.stdin.isTTY) process.stdin.setRawMode(false);
                         console.log(c.clearScreen);
                         await loginAccount();
-                        console.log(`\n${c.textMuted}Press Enter to return to dashboard...${c.reset}`);
-                        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-                        await new Promise(r => rl.once('line', r));
-                        rl.close();
+                        console.log(`\n${c.actionGreen}✓ Automatically returning to dashboard in 1s...${c.reset}`);
+                        await new Promise(r => setTimeout(r, 1000));
                         process.stdout.write(c.enterAltScreen + c.disableWrap + c.hideCursor);
                         if (process.stdin.isTTY) process.stdin.setRawMode(true);
                         process.stdin.resume();
