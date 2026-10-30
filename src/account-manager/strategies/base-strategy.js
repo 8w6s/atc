@@ -15,6 +15,8 @@ import { isAccountCoolingDown } from '../rate-limits.js';
  */
 
 export class BaseStrategy {
+    #runtimeBlockedEmails = null;
+
     /**
      * Create a new BaseStrategy
      * @param {Object} config - Strategy configuration
@@ -24,6 +26,10 @@ export class BaseStrategy {
             throw new Error('BaseStrategy is abstract and cannot be instantiated directly');
         }
         this.config = config;
+    }
+
+    setRuntimeBlockedEmails(emailSet) {
+        this.#runtimeBlockedEmails = emailSet instanceof Set && emailSet.size > 0 ? emailSet : null;
     }
 
     /**
@@ -78,6 +84,10 @@ export class BaseStrategy {
 
         // Skip disabled accounts
         if (account.enabled === false) return false;
+
+        if (this.#runtimeBlockedEmails && account.email && this.#runtimeBlockedEmails.has(account.email)) {
+            return false;
+        }
 
         // Check if account is cooling down (matches opencode-antigravity-auth)
         if (isAccountCoolingDown(account)) return false;

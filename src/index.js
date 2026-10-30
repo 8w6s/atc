@@ -54,17 +54,23 @@ if (isFallbackEnabled) {
 // Export fallback flag for server to use
 export const FALLBACK_ENABLED = isFallbackEnabled;
 
-const PORT = process.env.PORT || DEFAULT_PORT;
-const HOST = process.env.HOST || '0.0.0.0';
+/*
+ * Namespace env overrides under ATC_PORT / ATC_HOST so ambient PORT or HOST
+ * variables exported by unrelated dev environments or IDE shells cannot hijack
+ * the proxy port or expose loopback endpoints to LAN.
+ */
+const PORT = parseInt(process.env.ATC_PORT, 10) || config?.port || DEFAULT_PORT;
+const HOST = process.env.ATC_HOST || config?.bindHost || '127.0.0.1';
 
-if (process.env.HOST) {
-    logger.info(`[Startup] Using HOST environment variable: ${process.env.HOST}`);
+if (process.env.ATC_HOST) {
+    logger.info(`[Startup] Using ATC_HOST environment variable: ${process.env.ATC_HOST}`);
 }
 
 // Home directory for account storage
 const HOME_DIR = os.homedir();
 const CONFIG_DIR = path.join(HOME_DIR, '.config', 'atc');
 const LOCK_FILE = path.join(CONFIG_DIR, 'daemon.lock');
+const PID_FILE = path.join(CONFIG_DIR, 'server.pid');
 
 function acquireLock() {
     try {
@@ -72,15 +78,18 @@ function acquireLock() {
             fs.mkdirSync(CONFIG_DIR, { recursive: true });
         }
         fs.writeFileSync(LOCK_FILE, process.pid.toString(), 'utf-8');
+        fs.writeFileSync(PID_FILE, process.pid.toString(), 'utf-8');
     } catch {}
 }
 
 function releaseLock() {
     try {
-        if (fs.existsSync(LOCK_FILE)) {
-            const cur = fs.readFileSync(LOCK_FILE, 'utf-8');
-            if (parseInt(cur, 10) === process.pid) {
-                fs.unlinkSync(LOCK_FILE);
+        for (const f of [LOCK_FILE, PID_FILE]) {
+            if (fs.existsSync(f)) {
+                const cur = fs.readFileSync(f, 'utf-8');
+                if (parseInt(cur, 10) === process.pid) {
+                    fs.unlinkSync(f);
+                }
             }
         }
     } catch {}
@@ -135,8 +144,8 @@ const server = app.listen(PORT, HOST, () => {
     }
 
     const environmentSection = `║  Environment Variables:                                      ║
-║    PORT                Server port (default: 8080)           ║
-║    HOST                Bind address (default: 0.0.0.0)       ║
+║    ATC_PORT            Server port (default: 43128)          ║
+║    ATC_HOST            Bind address (default: 127.0.0.1)     ║
 ║    HTTP_PROXY          Route requests through a proxy        ║
 ║    CLAUDE_CONFIG_PATH  Path to .claude dir (for systemd)     ║
 ║    See README.md for detailed configuration examples         ║`

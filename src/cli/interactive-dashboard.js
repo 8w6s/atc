@@ -255,7 +255,7 @@ function getShimmerTitle() {
 
 export async function runInteractiveDashboard(options = {}) {
     let accountsData = await loadAccounts(ACCOUNT_CONFIG_PATH);
-    const port = getProxyPort();
+    let port = getProxyPort();
 
     let proxyHealth = null;
     let proxyLimits = null;
@@ -283,6 +283,7 @@ export async function runInteractiveDashboard(options = {}) {
             setStatus(forceLive ? 'Probing live quotas sequentially (anti-burst mode)...' : 'Reloading accounts & cached proxy state...', 0);
         }
         reloadConfig();
+        port = getProxyPort();
         currentStrategy = config?.accountSelection?.strategy || 'pipelined';
 
         try {
@@ -628,10 +629,17 @@ export async function runInteractiveDashboard(options = {}) {
 
         async function openEngineSettings() {
             await runSubScreen(async () => {
+                reloadConfig();
+                let singleLock = !!config?.singleAccountLock;
+                let quotaFloorPct = Math.round((config?.globalQuotaThreshold ?? 0.10) * 100);
+                let hourlyCap = config?.hourlyAccountCap ?? 120;
+                let pacerMs = config?.pacerDelayMs ?? 250;
                 let thresholdPct = Math.round((config?.accountSelection?.stepThreshold || 0.05) * 100);
                 let reqCap = config?.accountSelection?.requestThreshold || 20;
                 let minStaySec = config?.accountSelection?.minStaySec ?? 180;
-                let cooldown = config?.switchAccountDelayMs || 5000;
+                let cooldown = config?.switchAccountDelayMs ?? 5000;
+                let maxRetriesVal = config?.maxRetries ?? 2;
+                let streamTimeoutSec = config?.upstreamTimeoutSec ?? 300;
                 let quotaTtlSec = config?.quotaRefreshTtlSec ?? 300;
                 let loginTimeout = config?.loginTimeoutSec || 120;
                 let proxyPort = config?.port || 43128;
@@ -642,6 +650,45 @@ export async function runInteractiveDashboard(options = {}) {
                 let notice = '';
 
                 const settingsMeta = [
+                    {
+                        id: 'singleLock',
+                        label: 'Single-Account Lock',
+                        isBoolean: true,
+                        desc: 'Hard-locks all traffic to the active account; disables automatic multi-account rotation'
+                    },
+                    {
+                        id: 'quotaFloor',
+                        label: 'Global Quota Floor',
+                        unit: '%',
+                        isNumeric: true,
+                        desc: 'Safety reserve % where healthy pool stops draining an account before hitting 0% hard 429',
+                        min: 0, max: 50, step: 5,
+                        safeMin: 5, safeMax: 25,
+                        warnLow: '0%: accounts can drain all the way to 0% hard 429 exhaustion',
+                        warnHigh: 'Above 25%: leaves a large portion of 5h quota unused before rotating'
+                    },
+                    {
+                        id: 'hourlyCap',
+                        label: 'Hourly Cap / Account',
+                        unit: '/h',
+                        isNumeric: true,
+                        desc: 'Circuit breaker limiting successful requests per hour per account (0 = unlimited)',
+                        min: 0, max: 600, step: 10,
+                        safeMin: 30, safeMax: 240,
+                        warnLow: '0 or very low: 0 disables runaway loop protection; <30 may cap heavy coding sessions',
+                        warnHigh: 'Above 240/h: permits sustained high-velocity automated bursts on one consumer account'
+                    },
+                    {
+                        id: 'pacerMs',
+                        label: 'Per-Account Burst Pacer',
+                        unit: 'ms',
+                        isNumeric: true,
+                        desc: 'Minimum stagger gap between parallel subagent requests on the same account (0ms when idle)',
+                        min: 0, max: 5000, step: 50,
+                        safeMin: 150, safeMax: 1000,
+                        warnLow: 'Below 150ms: parallel Claude Code subagents hit Google simultaneously in a tight spike',
+                        warnHigh: 'Above 1000ms: parallel subagent startups queue noticeably slower'
+                    },
                     {
                         id: 'threshold',
                         label: 'Quota Rotation Threshold',
@@ -680,11 +727,33 @@ export async function runInteractiveDashboard(options = {}) {
                         label: 'Switch Delay Cooldown',
                         unit: 'ms',
                         isNumeric: true,
-                        desc: 'Cooldown delay in milliseconds before switching account on error',
+                        desc: 'Mandatory jittered pause in milliseconds before failing over to next account on error',
                         min: 500, max: 30000, step: 500,
                         safeMin: 2000, safeMax: 10000,
-                        warnLow: 'Below 2000ms: rapid failovers may trigger Google rate limit firewalls',
-                        warnHigh: 'Above 10000ms: sluggish error recovery time for user requests'
+                        warnLow: 'Below 2000ms: rapid failovers across consumer accounts look like automated proxy hopping',
+                        warnHigh: 'Above 10000ms: slower failover recovery when an account hits rate limit'
+                    },
+                    {
+                        id: 'maxRetries',
+                        label: 'Max Failover Retries',
+                        unit: '',
+                        isNumeric: true,
+                        desc: 'Maximum failover attempts per request before returning error to client',
+                        min: 0, max: 5, step: 1,
+                        safeMin: 1, safeMax: 3,
+                        warnLow: '0 retries: transient network blip immediately fails the turn',
+                        warnHigh: 'Above 3 retries: fans a failing request across too many accounts in one turn'
+                    },
+                    {
+                        id: 'streamTimeout',
+                        label: 'Active Stream Timeout',
+                        unit: 's',
+                        isNumeric: true,
+                        desc: 'Socket timeout for active thinking/streaming responses before aborting hung connection',
+                        min: 60, max: 900, step: 30,
+                        safeMin: 120, safeMax: 600,
+                        warnLow: 'Below 120s: deep thinking models may be cut off mid-thought',
+                        warnHigh: 'Above 600s: dead upstream sockets take very long to release'
                     },
                     {
                         id: 'quotaTtl',
@@ -713,7 +782,7 @@ export async function runInteractiveDashboard(options = {}) {
                         label: 'Proxy Listen Port',
                         unit: '',
                         isNumeric: true,
-                        desc: 'Local HTTP proxy listen port (requires proxy restart to take effect)',
+                        desc: 'Local HTTP proxy listen port (auto-syncs ANTHROPIC_BASE_URL; run atc restart to rebind)',
                         min: 1024, max: 65535, step: 1,
                         safeMin: 1024, safeMax: 65535,
                         warnLow: 'Ports below 1024 require root/administrator privileges',
@@ -728,24 +797,29 @@ export async function runInteractiveDashboard(options = {}) {
                     },
                     {
                         id: 'reset',
-                        label: 'Reset All to Defaults',
+                        label: 'Reset All to Safe Defaults',
                         unit: '',
-                        desc: 'Restore recommended safe defaults (5% quota, 20 reqs, 180s stay, 5000ms cooldown, 300s TTL, 120s login)'
+                        desc: 'Restore anti-burst safe defaults (10% floor, 120/h cap, 250ms pacer, 180s stay, 5000ms switch)'
                     },
                     {
                         id: 'save',
                         label: 'Save & Return to Dashboard',
                         unit: '',
-                        desc: 'Save all parameters to ~/.config/atc/config.json and Claude Code settings'
+                        desc: 'Save all parameters to ~/.config/atc/config.json, sync Claude Code, and hot-reload daemon'
                     }
                 ];
 
                 function getValNum(idx) {
                     const id = settingsMeta[idx]?.id;
+                    if (id === 'quotaFloor') return quotaFloorPct;
+                    if (id === 'hourlyCap') return hourlyCap;
+                    if (id === 'pacerMs') return pacerMs;
                     if (id === 'threshold') return thresholdPct;
                     if (id === 'reqCap') return reqCap;
                     if (id === 'minStay') return minStaySec;
                     if (id === 'cooldown') return cooldown;
+                    if (id === 'maxRetries') return maxRetriesVal;
+                    if (id === 'streamTimeout') return streamTimeoutSec;
                     if (id === 'quotaTtl') return quotaTtlSec;
                     if (id === 'loginTimeout') return loginTimeout;
                     if (id === 'port') return proxyPort;
@@ -756,10 +830,15 @@ export async function runInteractiveDashboard(options = {}) {
                     const meta = settingsMeta[idx];
                     if (!meta?.isNumeric) return;
                     const clamped = Math.max(meta.min, Math.min(meta.max, num));
-                    if (meta.id === 'threshold') thresholdPct = clamped;
+                    if (meta.id === 'quotaFloor') quotaFloorPct = clamped;
+                    else if (meta.id === 'hourlyCap') hourlyCap = clamped;
+                    else if (meta.id === 'pacerMs') pacerMs = clamped;
+                    else if (meta.id === 'threshold') thresholdPct = clamped;
                     else if (meta.id === 'reqCap') reqCap = clamped;
                     else if (meta.id === 'minStay') minStaySec = clamped;
                     else if (meta.id === 'cooldown') cooldown = clamped;
+                    else if (meta.id === 'maxRetries') maxRetriesVal = clamped;
+                    else if (meta.id === 'streamTimeout') streamTimeoutSec = clamped;
                     else if (meta.id === 'quotaTtl') quotaTtlSec = clamped;
                     else if (meta.id === 'loginTimeout') loginTimeout = clamped;
                     else if (meta.id === 'port') proxyPort = clamped;
@@ -769,6 +848,7 @@ export async function runInteractiveDashboard(options = {}) {
                     const meta = settingsMeta[idx];
                     if (!meta?.isNumeric) return null;
                     const val = getValNum(idx);
+                    if (meta.id === 'hourlyCap' && val === 0) return meta.warnLow;
                     if (val < meta.safeMin) return meta.warnLow;
                     if (val > meta.safeMax) return meta.warnHigh;
                     return null;
@@ -776,10 +856,16 @@ export async function runInteractiveDashboard(options = {}) {
 
                 function getDisplayVal(idx) {
                     const id = settingsMeta[idx]?.id;
+                    if (id === 'singleLock') return singleLock ? 'ON (Locked)' : 'OFF';
+                    if (id === 'quotaFloor') return quotaFloorPct + '%';
+                    if (id === 'hourlyCap') return hourlyCap === 0 ? 'OFF (Unlimited)' : `${hourlyCap}/h`;
+                    if (id === 'pacerMs') return pacerMs + 'ms';
                     if (id === 'threshold') return thresholdPct + '%';
                     if (id === 'reqCap') return reqCap + ' reqs';
                     if (id === 'minStay') return minStaySec + 's';
                     if (id === 'cooldown') return cooldown + 'ms';
+                    if (id === 'maxRetries') return maxRetriesVal.toString();
+                    if (id === 'streamTimeout') return streamTimeoutSec + 's';
                     if (id === 'quotaTtl') return quotaTtlSec + 's';
                     if (id === 'loginTimeout') return loginTimeout + 's';
                     if (id === 'port') return proxyPort.toString();
@@ -790,25 +876,42 @@ export async function runInteractiveDashboard(options = {}) {
                 function renderScreen() {
                     let out = c.clearScreen + c.cursorHome;
                     out += `${c.brandGreen}╭─────────────────────────────────────────────────────────────────╮${c.reset}\n`;
-                    out += `${c.brandGreen}│  atc Engine Settings & Parameters                               │${c.reset}\n`;
+                    out += `${c.brandGreen}│  atc Engine & Anti-Burst Safety Settings                        │${c.reset}\n`;
                     out += `${c.brandGreen}╰─────────────────────────────────────────────────────────────────╯${c.reset}\n\n`;
 
-                    for (let i = 0; i < settingsMeta.length; i++) {
+                    const termRows = process.stdout.rows || 28;
+                    const maxVisible = Math.max(8, Math.min(settingsMeta.length, termRows - 10));
+                    let startIdx = 0;
+                    if (settingsMeta.length > maxVisible) {
+                        startIdx = Math.max(0, Math.min(activeSettingIdx - Math.floor(maxVisible / 2), settingsMeta.length - maxVisible));
+                    }
+                    const endIdx = Math.min(settingsMeta.length, startIdx + maxVisible);
+
+                    if (startIdx > 0) {
+                        out += `  ${c.textMuted}↑ (${startIdx} more above)${c.reset}${c.clearToEndOfLine}\n`;
+                    }
+
+                    for (let i = startIdx; i < endIdx; i++) {
                         const meta = settingsMeta[i];
                         const isSel = i === activeSettingIdx;
                         const pointer = isSel ? `\x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
                         const warn = getWarning(i);
 
                         let line = '';
-                        if (meta.isNumeric || meta.isText) {
+                        if (meta.isNumeric || meta.isText || meta.isBoolean) {
                             let valBox = '';
                             if (isSel && isFocusEditing) {
                                 valBox = `\x1b[1;38;5;226;48;5;236m[ ${editBuffer || ''}_ ]\x1b[0m \x1b[38;5;220m✎ editing\x1b[0m`;
                             } else {
                                 const displayStr = getDisplayVal(i);
-                                valBox = isSel
-                                    ? `\x1b[1;38;5;120m[${displayStr}]\x1b[0m`
-                                    : `\x1b[38;5;147m[${displayStr}]\x1b[0m`;
+                                if (meta.isBoolean) {
+                                    const badgeColor = singleLock ? '\x1b[1;38;5;214m' : '\x1b[38;5;120m';
+                                    valBox = `${badgeColor}[${displayStr}]\x1b[0m`;
+                                } else {
+                                    valBox = isSel
+                                        ? `\x1b[1;38;5;120m[${displayStr}]\x1b[0m`
+                                        : `\x1b[38;5;147m[${displayStr}]\x1b[0m`;
+                                }
                             }
 
                             let warnBadge = '';
@@ -828,6 +931,10 @@ export async function runInteractiveDashboard(options = {}) {
                         out += `${pointer}${line}${c.clearToEndOfLine}\n`;
                     }
 
+                    if (endIdx < settingsMeta.length) {
+                        out += `  ${c.textMuted}↓ (${settingsMeta.length - endIdx} more below)${c.reset}${c.clearToEndOfLine}\n`;
+                    }
+
                     out += `\n`;
                     const curMeta = settingsMeta[activeSettingIdx];
                     const activeWarn = getWarning(activeSettingIdx);
@@ -843,13 +950,13 @@ export async function runInteractiveDashboard(options = {}) {
                     if (isFocusEditing) {
                         out += `${c.textMuted}Type Value | Backspace Delete | Enter/ESC Confirm${c.reset}${c.clearToEndOfLine}`;
                     } else {
-                        out += `${c.textMuted}↑↓ Move | Enter Edit/Select | ←→ Adjust Numbers | ESC Return${c.reset}${c.clearToEndOfLine}`;
+                        out += `${c.textMuted}↑↓ Move | Enter Edit/Toggle | ←→ Adjust | ESC Save & Return${c.reset}${c.clearToEndOfLine}`;
                     }
 
                     process.stdout.write(out);
                 }
 
-                function saveAllSettings() {
+                async function saveAllSettings() {
                     const accSel = {
                         ...(config.accountSelection || {}),
                         stepThreshold: thresholdPct / 100,
@@ -857,8 +964,14 @@ export async function runInteractiveDashboard(options = {}) {
                         minStaySec
                     };
                     saveConfig({
+                        singleAccountLock: singleLock,
+                        globalQuotaThreshold: quotaFloorPct / 100,
+                        hourlyAccountCap: hourlyCap,
+                        pacerDelayMs: pacerMs,
                         accountSelection: accSel,
                         switchAccountDelayMs: cooldown,
+                        maxRetries: maxRetriesVal,
+                        upstreamTimeoutSec: streamTimeoutSec,
                         quotaRefreshTtlSec: quotaTtlSec,
                         loginTimeoutSec: loginTimeout,
                         port: proxyPort,
@@ -867,7 +980,15 @@ export async function runInteractiveDashboard(options = {}) {
                     const cs = readClaudeSettings();
                     cs.env = cs.env || {};
                     cs.env.ANTHROPIC_API_KEY = secretKey;
+                    cs.env.ANTHROPIC_BASE_URL = `http://localhost:${proxyPort}`;
                     writeClaudeSettings(cs);
+                    port = proxyPort;
+                    try {
+                        await fetch(`http://127.0.0.1:${port}/reload`, {
+                            method: 'POST',
+                            signal: AbortSignal.timeout(1500)
+                        });
+                    } catch {}
                 }
 
                 await new Promise((resolve) => {
@@ -892,9 +1013,8 @@ export async function runInteractiveDashboard(options = {}) {
                                 return;
                             }
 
-                            saveAllSettings();
                             cleanup();
-                            resolve();
+                            saveAllSettings().finally(resolve);
                             return;
                         }
 
@@ -969,6 +1089,13 @@ export async function runInteractiveDashboard(options = {}) {
                             return;
                         }
 
+                        if ((key.name === 'left' || key.name === 'right' || key.name === 'space') && activeMeta?.isBoolean) {
+                            singleLock = !singleLock;
+                            notice = `Single-Account Lock ${singleLock ? 'ENABLED (auto-rotation disabled)' : 'DISABLED'}`;
+                            renderScreen();
+                            return;
+                        }
+
                         if (key.name === 'left' && activeMeta?.isNumeric) {
                             notice = '';
                             const cur = getValNum(activeSettingIdx);
@@ -987,6 +1114,13 @@ export async function runInteractiveDashboard(options = {}) {
 
                         if (key.name === 'return' || key.name === 'enter') {
                             notice = '';
+                            if (activeMeta?.isBoolean) {
+                                singleLock = !singleLock;
+                                notice = `Single-Account Lock ${singleLock ? 'ENABLED (auto-rotation disabled)' : 'DISABLED'}`;
+                                renderScreen();
+                                return;
+                            }
+
                             if (activeMeta?.isNumeric || activeMeta?.isText) {
                                 isFocusEditing = true;
                                 editBuffer = activeMeta.isText ? secretKey : getValNum(activeSettingIdx).toString();
@@ -995,23 +1129,28 @@ export async function runInteractiveDashboard(options = {}) {
                             }
 
                             if (activeMeta?.id === 'reset') {
+                                singleLock = false;
+                                quotaFloorPct = 10;
+                                hourlyCap = 120;
+                                pacerMs = 250;
                                 thresholdPct = 5;
                                 reqCap = 20;
                                 minStaySec = 180;
                                 cooldown = 5000;
+                                maxRetriesVal = 2;
+                                streamTimeoutSec = 300;
                                 quotaTtlSec = 300;
                                 loginTimeout = 120;
-                                proxyPort = 43128;
+                                proxyPort = port || 43128;
                                 secretKey = 'atc-local-key';
-                                notice = 'Reset all settings to recommended safe defaults';
+                                notice = 'Reset all settings to recommended anti-burst safe defaults';
                                 renderScreen();
                                 return;
                             }
 
                             if (activeMeta?.id === 'save') {
-                                saveAllSettings();
                                 cleanup();
-                                resolve();
+                                saveAllSettings().finally(resolve);
                                 return;
                             }
                         }
@@ -1025,7 +1164,7 @@ export async function runInteractiveDashboard(options = {}) {
                     renderScreen();
                 });
 
-                setStatus(`Saved Engine Settings & Parameters.`, 2000);
+                setStatus(`Saved Engine Settings & synced daemon.`, 2000);
             });
         }
 
@@ -1120,6 +1259,7 @@ export async function runInteractiveDashboard(options = {}) {
 
                 if (cur.type === 'action') {
                     if (cur.id === 'lb_strategy') {
+                        reloadConfig();
                         const stratCycle = getStrategyCycle();
                         const curIdx = stratCycle.findIndex(s => s.id === currentStrategy);
                         const nextObj = stratCycle[(curIdx + 1) % stratCycle.length];
@@ -1134,6 +1274,7 @@ export async function runInteractiveDashboard(options = {}) {
 
                     if (cur.id === 'custom_project') {
                         await runSubScreen(async () => {
+                            reloadConfig();
                             let customProj = config?.customProjectId || '';
                             let selectedIdx = 0;
                             let notice = '';
@@ -1225,9 +1366,7 @@ export async function runInteractiveDashboard(options = {}) {
                                                 notice = `Saved Custom GCP Project ID: ${trimmed}`;
                                             } else {
                                                 customProj = '';
-                                                const next = { ...config };
-                                                delete next.customProjectId;
-                                                saveConfig(next);
+                                                saveConfig({ customProjectId: undefined });
                                                 notice = 'Reset to default automatic project routing';
                                             }
                                             if (process.stdin.isTTY) process.stdin.setRawMode(true);
@@ -1239,9 +1378,7 @@ export async function runInteractiveDashboard(options = {}) {
 
                                         if (selectedIdx === 2) {
                                             customProj = '';
-                                            const next = { ...config };
-                                            delete next.customProjectId;
-                                            saveConfig(next);
+                                            saveConfig({ customProjectId: undefined });
                                             notice = 'Reset to default automatic project routing';
                                             renderScreen();
                                             return;
@@ -1266,7 +1403,8 @@ export async function runInteractiveDashboard(options = {}) {
 
                     if (cur.id === 'model_mapping') {
                         await runSubScreen(async () => {
-                            const claudeSettings = readClaudeSettings();
+                            reloadConfig();
+                            let claudeSettings = readClaudeSettings();
                             claudeSettings.env = claudeSettings.env || {};
                             let selectedIdx = 0;
                             let notice = '';
@@ -1428,8 +1566,11 @@ export async function runInteractiveDashboard(options = {}) {
                                     if (!key) return;
 
                                     if (key.ctrl && key.name === 'r') {
+                                        reloadConfig();
+                                        claudeSettings = readClaudeSettings();
+                                        claudeSettings.env = claudeSettings.env || {};
                                         process.stdout.write(c.clearScreen + c.cursorHome);
-                                        notice = 'Model Mappings reloaded.';
+                                        notice = 'Model Mappings reloaded from disk.';
                                         renderScreen();
                                         return;
                                     }

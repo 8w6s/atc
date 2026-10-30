@@ -11,6 +11,7 @@ import { fileURLToPath } from 'url';
 import { sendMessage, sendMessageStream, listModels, getModelQuotas, getSubscriptionTier, isValidModel } from './cloudcode/index.js';
 import { config, reloadConfig } from './config.js';
 import { getPackageVersion, formatDuration, sleep } from './utils/helpers.js';
+import { estimateAnthropicInputTokens } from './utils/token-counter.js';
 import { resetVersionCache } from './utils/version-detector.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -112,6 +113,27 @@ app.use('/v1', (req, res, next) => {
 
 // Setup usage statistics middleware
 usageStats.setupMiddleware(app);
+
+function isLoopbackRequest(req) {
+    const addr = req.socket?.remoteAddress || req.ip || '';
+    return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+}
+
+function requireLocalControl(req, res, next) {
+    if (isLoopbackRequest(req)) return next();
+    if (config.apiKey) {
+        const authHeader = req.headers['authorization'];
+        const xApiKey = req.headers['x-api-key'];
+        const provided = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : xApiKey;
+        if (provided === config.apiKey) return next();
+    }
+    return res.status(403).json({
+        type: 'error',
+        error: { type: 'permission_error', message: 'Control endpoints are restricted to local loopback.' }
+    });
+}
+
+app.use(['/api/shutdown', '/reload', '/api/accounts/reload', '/account-limits', '/api/telemetry', '/api/stats'], requireLocalControl);
 
 /**
  * Silent handler for Claude Code CLI root POST requests
@@ -404,10 +426,18 @@ app.get('/health', async (req, res) => {
 
         res.json({
             status: 'ok',
+            pid: process.pid,
+            uptimeSec: Math.round(process.uptime()),
             timestamp: new Date().toISOString(),
             latencyMs: Date.now() - start,
             activeEmail,
             activeIndex,
+            strategy: accountManager.getStrategyName(),
+            singleAccountLock: !!config.singleAccountLock,
+            pacerDelayMs: config.pacerDelayMs ?? 250,
+            globalQuotaThreshold: config.globalQuotaThreshold ?? 0.10,
+            hourlyAccountCap: config.hourlyAccountCap ?? 120,
+            capabilities: ['isolated-tls', 'pacer', 'count-tokens', 'telemetry'],
             summary: status.summary,
             counts: {
                 total: status.total,
@@ -867,13 +897,18 @@ app.get('/v1/models', async (req, res) => {
  * Uses local tokenization with official tokenizers (@anthropic-ai/tokenizer for Claude, @lenml/tokenizer-gemini for Gemini)
  */
 app.post('/v1/messages/count_tokens', (req, res) => {
-    res.status(501).json({
-        type: 'error',
-        error: {
-            type: 'not_implemented',
-            message: 'Token counting is not implemented. Use /v1/messages with max_tokens or configure your client to skip token counting.'
-        }
-    });
+    try {
+        const inputTokens = estimateAnthropicInputTokens(req.body || {});
+        res.json({ input_tokens: inputTokens });
+    } catch (err) {
+        res.status(400).json({
+            type: 'error',
+            error: {
+                type: 'invalid_request_error',
+                message: err.message || 'Failed to estimate input tokens'
+            }
+        });
+    }
 });
 
 /**
@@ -886,6 +921,11 @@ app.post('/v1/messages/count_tokens', (req, res) => {
  * POST /v1/messages
  */
 app.post('/v1/messages', async (req, res) => {
+    const reqStartMs = Date.now();
+    let originalRequestedModel = req.body?.model || 'claude-3-5-sonnet-20241022';
+    let resolvedModelId = originalRequestedModel;
+    let selectedAccountEmail = null;
+
     try {
         // Ensure account manager is initialized
         await ensureInitialized();
@@ -905,7 +945,7 @@ app.post('/v1/messages', async (req, res) => {
         } = req.body;
 
         // Resolve model mapping if configured
-        const originalRequestedModel = model;
+        originalRequestedModel = model;
         let requestedModel = model || 'claude-3-5-sonnet-20241022';
         const modelMapping = config.modelMapping || {};
 
@@ -940,25 +980,28 @@ app.post('/v1/messages', async (req, res) => {
         // Strip client context annotations like [1m] or [200k] for backend routing and validation
         const cleanModel = (requestedModel || '').replace(/\[\d+[kmbKMB]?\]$/, '');
         const modelId = cleanModel;
+        resolvedModelId = modelId;
         req.body.model = cleanModel;
 
-        // Validate model ID before processing
-        const { account: validationAccount } = accountManager.selectAccount();
-        if (validationAccount) {
-            const token = await accountManager.getTokenForAccount(validationAccount);
-            const projectId = validationAccount.subscription?.projectId || null;
-            const valid = await isValidModel(modelId, token, projectId, validationAccount.email);
+        /*
+         * Only expire timestamps whose Google-supplied resetTime has genuinely elapsed.
+         * Never wipe active rate-limit state across all accounts on every incoming request:
+         * doing so turns a legitimate cooldown into a repeated 429 storm across the pool.
+         */
+        accountManager.clearExpiredLimits();
 
-            if (!valid) {
-                throw new Error(`invalid_request_error: Invalid model: ${modelId}. Use /v1/models to see available models.`);
+        // Validate unfamiliar model IDs without mutating strategy rotation state
+        const isKnownFamilyPrefix = modelId.startsWith('claude-') || modelId.startsWith('gemini-');
+        if (!isKnownFamilyPrefix) {
+            const validationAccount = accountManager.getCurrentAccount();
+            if (validationAccount && !validationAccount.isInvalid) {
+                const token = await accountManager.getTokenForAccount(validationAccount);
+                const projectId = validationAccount.subscription?.projectId || null;
+                const valid = await isValidModel(modelId, token, projectId, validationAccount.email);
+                if (!valid) {
+                    throw new Error(`invalid_request_error: Invalid model: ${modelId}. Use /v1/models to see available models.`);
+                }
             }
-        }
-
-        // Optimistic Retry: If ALL accounts are rate-limited for this model, reset them to force a fresh check.
-        // If we have some available accounts, we try them first.
-        if (accountManager.isAllRateLimited(modelId)) {
-            logger.warn(`[Server] All accounts rate-limited for ${modelId}. Resetting state for optimistic retry.`);
-            accountManager.resetAllRateLimits();
         }
 
         // Validate required fields
@@ -1005,21 +1048,22 @@ app.post('/v1/messages', async (req, res) => {
             });
         }
 
+        const estimatedInTok = estimateAnthropicInputTokens(req.body);
+        const onAccountSelected = (email, actualModel) => {
+            selectedAccountEmail = email;
+            if (actualModel) resolvedModelId = actualModel;
+        };
+
         if (stream) {
-            // Handle streaming response
-            // Do NOT flush headers immediately. We need to wait for the first chunk
-            // to ensure we don't send a 200 OK if the upstream fails immediately (e.g. 429/503).
+            let ttftMs = null;
+            let reportedInTok = 0;
+            let reportedOutTok = 0;
 
             try {
-                // Initialize the generator
-                const generator = sendMessageStream(request, accountManager, FALLBACK_ENABLED);
-                
-                // BUFFERING STRATEGY:
-                // Pull the first event *before* sending headers. 
-                // If this throws, we can safely send a 4xx/5xx error JSON.
+                const generator = sendMessageStream(request, accountManager, FALLBACK_ENABLED, onAccountSelected);
                 const firstResult = await generator.next();
+                ttftMs = Date.now() - reqStartMs;
 
-                // If we get here, the stream started successfully.
                 res.status(200);
                 res.setHeader('Content-Type', 'text/event-stream');
                 res.setHeader('Cache-Control', 'no-cache');
@@ -1027,7 +1071,19 @@ app.post('/v1/messages', async (req, res) => {
                 res.setHeader('X-Accel-Buffering', 'no');
                 res.flushHeaders();
 
+                const captureUsage = (event) => {
+                    if (!event) return;
+                    if (event.type === 'message_start' && event.message?.usage) {
+                        reportedInTok = event.message.usage.input_tokens || reportedInTok;
+                        reportedOutTok = event.message.usage.output_tokens || reportedOutTok;
+                    } else if (event.type === 'message_delta' && event.usage) {
+                        if (event.usage.input_tokens) reportedInTok = event.usage.input_tokens;
+                        if (event.usage.output_tokens) reportedOutTok = event.usage.output_tokens;
+                    }
+                };
+
                 const formatEventForClient = (event) => {
+                    captureUsage(event);
                     if (originalRequestedModel && event && event.type === 'message_start' && event.message) {
                         return {
                             ...event,
@@ -1040,27 +1096,46 @@ app.post('/v1/messages', async (req, res) => {
                     return event;
                 };
 
-                // If the generator isn't done, send the first chunk
                 if (!firstResult.done) {
                     const evt = formatEventForClient(firstResult.value);
                     res.write(`event: ${evt.type}\ndata: ${JSON.stringify(evt)}\n\n`);
                     if (res.flush) res.flush();
                 }
 
-                // Continue with the rest of the stream
                 for await (const event of generator) {
                     const evt = formatEventForClient(event);
                     res.write(`event: ${evt.type}\ndata: ${JSON.stringify(evt)}\n\n`);
                     if (res.flush) res.flush();
                 }
-                
+
+                usageStats.recordTelemetry({
+                    reqModel: originalRequestedModel || modelId,
+                    targetModel: resolvedModelId,
+                    account: selectedAccountEmail,
+                    status: 200,
+                    durationMs: Date.now() - reqStartMs,
+                    ttftMs,
+                    inputTokens: reportedInTok || estimatedInTok,
+                    outputTokens: reportedOutTok
+                });
+
                 res.end();
 
             } catch (error) {
-                // If we haven't sent headers yet, we can send a proper error status
                 if (!res.headersSent) {
                     logger.error('[API] Initial stream error:', error);
                     const { errorType, statusCode, errorMessage } = parseError(error);
+                    usageStats.recordTelemetry({
+                        reqModel: originalRequestedModel || modelId,
+                        targetModel: resolvedModelId,
+                        account: selectedAccountEmail,
+                        status: statusCode,
+                        durationMs: Date.now() - reqStartMs,
+                        ttftMs,
+                        inputTokens: estimatedInTok,
+                        outputTokens: 0,
+                        errorType
+                    });
 
                     if (statusCode === 429) {
                         let retrySec = 60;
@@ -1081,11 +1156,20 @@ app.post('/v1/messages', async (req, res) => {
                         }
                     });
                 }
-                
-                // If headers were already sent (should only happen if error occurs mid-stream),
-                // we have to fallback to SSE error event
+
                 logger.error('[API] Mid-stream error:', error);
-                const { errorType, errorMessage } = parseError(error);
+                const { errorType, statusCode, errorMessage } = parseError(error);
+                usageStats.recordTelemetry({
+                    reqModel: originalRequestedModel || modelId,
+                    targetModel: resolvedModelId,
+                    account: selectedAccountEmail,
+                    status: statusCode,
+                    durationMs: Date.now() - reqStartMs,
+                    ttftMs,
+                    inputTokens: reportedInTok || estimatedInTok,
+                    outputTokens: reportedOutTok,
+                    errorType
+                });
 
                 res.write(`event: error\ndata: ${JSON.stringify({
                     type: 'error',
@@ -1095,8 +1179,18 @@ app.post('/v1/messages', async (req, res) => {
             }
 
         } else {
-            // Handle non-streaming response
-            const response = await sendMessage(request, accountManager, FALLBACK_ENABLED);
+            const response = await sendMessage(request, accountManager, FALLBACK_ENABLED, onAccountSelected);
+            const usage = response?.usage || {};
+            usageStats.recordTelemetry({
+                reqModel: originalRequestedModel || modelId,
+                targetModel: resolvedModelId,
+                account: selectedAccountEmail,
+                status: 200,
+                durationMs: Date.now() - reqStartMs,
+                ttftMs: Date.now() - reqStartMs,
+                inputTokens: usage.input_tokens || estimatedInTok,
+                outputTokens: usage.output_tokens || 0
+            });
             if (originalRequestedModel && response) {
                 response.model = originalRequestedModel;
             }
@@ -1107,14 +1201,25 @@ app.post('/v1/messages', async (req, res) => {
         logger.error('[API] Error:', error);
 
         let { errorType, statusCode, errorMessage } = parseError(error);
+        usageStats.recordTelemetry({
+            reqModel: originalRequestedModel || 'unknown',
+            targetModel: resolvedModelId || 'unknown',
+            account: selectedAccountEmail,
+            status: statusCode,
+            durationMs: Date.now() - reqStartMs,
+            ttftMs: null,
+            inputTokens: 0,
+            outputTokens: 0,
+            errorType
+        });
 
-        // For auth errors, try to refresh token
+        // For auth errors, clear only the affected account's cache
         if (errorType === 'authentication_error') {
-            logger.warn('[API] Token might be expired, attempting refresh...');
+            logger.warn('[API] Token might be expired, clearing affected account cache...');
             try {
-                accountManager.clearProjectCache();
-                accountManager.clearTokenCache();
-                await forceRefresh();
+                accountManager.clearProjectCache(selectedAccountEmail);
+                accountManager.clearTokenCache(selectedAccountEmail);
+                if (!selectedAccountEmail) await forceRefresh();
                 errorMessage = 'Token was expired and has been refreshed. Please retry your request.';
             } catch (refreshError) {
                 errorMessage = 'Could not refresh token. Make sure Antigravity is running.';

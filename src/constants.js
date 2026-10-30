@@ -121,7 +121,7 @@ export const DEFAULT_PROJECT_ID = 'rising-fact-p41fc';
 export const TOKEN_REFRESH_INTERVAL_MS = config?.tokenCacheTtlMs || (5 * 60 * 1000); // From config or 5 minutes
 export const REQUEST_BODY_LIMIT = config?.requestBodyLimit || '50mb';
 export const ANTIGRAVITY_AUTH_PORT = 9092;
-export const DEFAULT_PORT = config?.port || 8080;
+export const DEFAULT_PORT = config?.port || 43128;
 
 // Multi-account configuration
 export const ACCOUNT_CONFIG_PATH = config?.accountConfigPath || join(

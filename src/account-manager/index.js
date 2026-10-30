@@ -34,7 +34,10 @@ import {
     clearTokenCache as clearToken
 } from './credentials.js';
 import { createStrategy, getStrategyLabel, DEFAULT_STRATEGY } from './strategies/index.js';
+import { seedModelCacheFromAccounts } from '../cloudcode/model-api.js';
 import { logger } from '../utils/logger.js';
+
+const ONE_HOUR_MS = 60 * 60 * 1000;
 
 export class AccountManager {
     #accounts = [];
@@ -48,6 +51,7 @@ export class AccountManager {
     // Per-account caches
     #tokenCache = new Map(); // email -> { token, extractedAt }
     #projectCache = new Map(); // email -> projectId
+    #hourlyWindow = new Map(); // email -> number[] (timestamps within last 60m)
 
     constructor(configPath = ACCOUNT_CONFIG_PATH, strategyName = null) {
         this.#configPath = configPath;
@@ -90,6 +94,7 @@ export class AccountManager {
 
         // Clear any expired rate limits
         this.clearExpiredLimits();
+        seedModelCacheFromAccounts(this.#accounts);
 
         this.#initialized = true;
     }
@@ -126,8 +131,91 @@ export class AccountManager {
      * @param {string} [modelId] - Optional model ID
      * @returns {Array<Object>} Array of available account objects
      */
+    getHourlyRequestCount(email) {
+        if (!email) return 0;
+        const key = email.toLowerCase();
+        const arr = this.#hourlyWindow.get(key);
+        if (!arr || arr.length === 0) return 0;
+        const cutoff = Date.now() - ONE_HOUR_MS;
+        let firstValid = 0;
+        while (firstValid < arr.length && arr[firstValid] <= cutoff) {
+            firstValid++;
+        }
+        if (firstValid > 0) {
+            arr.splice(0, firstValid);
+        }
+        return arr.length;
+    }
+
+    #recordHourlyRequest(email) {
+        if (!email) return;
+        const key = email.toLowerCase();
+        const count = this.getHourlyRequestCount(email);
+        const arr = this.#hourlyWindow.get(key) || [];
+        if (count === 0 && arr.length === 0) {
+            this.#hourlyWindow.set(key, [Date.now()]);
+        } else {
+            arr.push(Date.now());
+        }
+    }
+
+    #getQuotaFractionForModel(account, modelId) {
+        const models = account?.quota?.models;
+        if (!models || typeof models !== 'object') return null;
+        const q = (modelId && models[modelId]) || models['gemini-3.8-flash-high'] || Object.values(models)[0];
+        return typeof q?.remainingFraction === 'number' ? q.remainingFraction : null;
+    }
+
+    #computeRuntimeBlockedEmails(modelId = null) {
+        const blocked = new Set();
+        const hourlyCap = Number(config?.hourlyAccountCap) || 0;
+        const quotaFloor = Math.max(0, Math.min(0.95, Number(config?.globalQuotaThreshold) || 0));
+
+        const rawAvail = getAvailable(this.#accounts, modelId);
+
+        if (hourlyCap > 0) {
+            for (const acc of rawAvail) {
+                if (this.getHourlyRequestCount(acc.email) >= hourlyCap) {
+                    blocked.add(acc.email);
+                }
+            }
+        }
+
+        if (quotaFloor > 0) {
+            const unblockedAvail = rawAvail.filter(a => !blocked.has(a.email));
+            const hasAboveFloor = unblockedAvail.some(a => {
+                const frac = this.#getQuotaFractionForModel(a, modelId);
+                return frac === null || frac > quotaFloor;
+            });
+            if (hasAboveFloor) {
+                for (const acc of unblockedAvail) {
+                    const frac = this.#getQuotaFractionForModel(acc, modelId);
+                    if (frac !== null && frac <= quotaFloor) {
+                        blocked.add(acc.email);
+                    }
+                }
+            }
+        }
+
+        return blocked;
+    }
+
     getAvailableAccounts(modelId = null) {
-        return getAvailable(this.#accounts, modelId);
+        if (config?.singleAccountLock) {
+            const locked = this.getCurrentAccount();
+            if (!locked) return [];
+            const avail = getAvailable([locked], modelId);
+            if (avail.length === 0) return [];
+            const hourlyCap = Number(config?.hourlyAccountCap) || 0;
+            if (hourlyCap > 0 && this.getHourlyRequestCount(locked.email) >= hourlyCap) {
+                return [];
+            }
+            return avail;
+        }
+        const raw = getAvailable(this.#accounts, modelId);
+        const hourlyCap = Number(config?.hourlyAccountCap) || 0;
+        if (hourlyCap <= 0) return raw;
+        return raw.filter(acc => this.getHourlyRequestCount(acc.email) < hourlyCap);
     }
 
     /**
@@ -182,14 +270,33 @@ export class AccountManager {
             throw new Error('AccountManager not initialized. Call initialize() first.');
         }
 
-        const result = this.#strategy.selectAccount(this.#accounts, modelId, {
-            currentIndex: this.#currentIndex,
-            onSave: () => this.saveToDisk(),
-            ...options
-        });
+        if (config?.singleAccountLock) {
+            const idx = this.#currentIndex >= this.#accounts.length ? 0 : this.#currentIndex;
+            const locked = this.#accounts[idx] || null;
+            const hourlyCap = Number(config?.hourlyAccountCap) || 0;
+            const capHit = locked && hourlyCap > 0 && this.getHourlyRequestCount(locked.email) >= hourlyCap;
+            if (locked && !capHit && this.#strategy.isAccountUsable(locked, modelId)) {
+                locked.lastUsed = Date.now();
+                this.saveToDisk();
+                return { account: locked, waitMs: 0 };
+            }
+            return { account: null, waitMs: 0 };
+        }
 
-        this.#currentIndex = result.index;
-        return { account: result.account, waitMs: result.waitMs || 0 };
+        const blockedEmails = this.#computeRuntimeBlockedEmails(modelId);
+        this.#strategy.setRuntimeBlockedEmails?.(blockedEmails);
+        try {
+            const result = this.#strategy.selectAccount(this.#accounts, modelId, {
+                currentIndex: this.#currentIndex,
+                onSave: () => this.saveToDisk(),
+                ...options
+            });
+
+            this.#currentIndex = result.index;
+            return { account: result.account, waitMs: result.waitMs || 0 };
+        } finally {
+            this.#strategy.setRuntimeBlockedEmails?.(null);
+        }
     }
 
     /**
@@ -201,8 +308,8 @@ export class AccountManager {
         if (this.#strategy) {
             this.#strategy.onSuccess(account, modelId);
         }
-        // Reset consecutive failures on success (matches opencode-antigravity-auth)
         if (account?.email) {
+            this.#recordHourlyRequest(account.email);
             resetFailures(this.#accounts, account.email);
         }
     }

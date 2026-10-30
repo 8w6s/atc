@@ -44,8 +44,9 @@ const c = {
  * Read current proxy port from config or environment
  */
 export function getProxyPort() {
-    if (process.env.PORT) {
-        return parseInt(process.env.PORT, 10);
+    if (process.env.ATC_PORT) {
+        const envPort = parseInt(process.env.ATC_PORT, 10);
+        if (!isNaN(envPort) && envPort > 0) return envPort;
     }
     const configPath = join(CONFIG_DIR, 'config.json');
     if (existsSync(configPath)) {

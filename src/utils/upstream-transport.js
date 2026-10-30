@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import https from 'https';
 import { Readable } from 'stream';
 import zlib from 'zlib';
+import { config } from '../config.js';
 
 /*
  * Google Frontend (GFE) correlates requests sharing a keep-alive TLS socket and
@@ -26,6 +27,41 @@ function clearIdleTimeout(socket) {
 }
 
 const agentPools = new Map();
+const accountPacerNextAt = new Map();
+
+function waitForPacerSlot(poolKey, gapMs, signal) {
+    if (!gapMs || gapMs <= 0) return Promise.resolve();
+    const now = Date.now();
+    const prevNext = accountPacerNextAt.get(poolKey) || 0;
+    const scheduledAt = Math.max(now, prevNext);
+    const jitteredGap = Math.round(gapMs * (0.85 + Math.random() * 0.35));
+    accountPacerNextAt.set(poolKey, scheduledAt + jitteredGap);
+
+    if (accountPacerNextAt.size > MAX_POOLS * 2) {
+        for (const [k, ts] of accountPacerNextAt.entries()) {
+            if (ts <= now) accountPacerNextAt.delete(k);
+        }
+    }
+
+    const delayMs = scheduledAt - now;
+    if (delayMs <= 0) return Promise.resolve();
+
+    return new Promise((resolve, reject) => {
+        if (signal?.aborted) {
+            reject(signal.reason || new Error('Aborted'));
+            return;
+        }
+        const timer = setTimeout(() => {
+            if (signal) signal.removeEventListener('abort', onAbort);
+            resolve();
+        }, delayMs);
+        function onAbort() {
+            clearTimeout(timer);
+            reject(signal.reason || new Error('Aborted'));
+        }
+        if (signal) signal.addEventListener('abort', onAbort, { once: true });
+    });
+}
 
 function hashKey(prefix, value) {
     const digest = crypto.createHash('sha256').update(String(value)).digest('hex').slice(0, 24);
@@ -166,7 +202,7 @@ export function shouldUseUpstreamTransport(url, options) {
     }
 }
 
-export function upstreamFetch(url, options = {}) {
+export async function upstreamFetch(url, options = {}) {
     const parsedUrl = url instanceof URL ? url : new URL(String(url));
     const method = (options.method || 'GET').toUpperCase();
     const rawHeaders = options.headers || {};
@@ -177,6 +213,15 @@ export function upstreamFetch(url, options = {}) {
     const isLoopback = parsedUrl.hostname === '127.0.0.1' || parsedUrl.hostname === 'localhost';
     const testTlsOptions = isLoopback && options._testTlsOptions ? options._testTlsOptions : null;
     const poolKey = resolvePoolKey(options, authHeader, options.body);
+
+    const configuredPacerMs = Number.isFinite(config?.pacerDelayMs) ? config.pacerDelayMs : 250;
+    const effectivePacerMs = testTlsOptions
+        ? (options._testPacerMs || 0)
+        : (options.skipPacer ? 0 : configuredPacerMs);
+    if (effectivePacerMs > 0) {
+        await waitForPacerSlot(poolKey, effectivePacerMs, options.signal);
+    }
+
     const agent = getIsolatedAgent(poolKey, testTlsOptions);
 
     return new Promise((resolve, reject) => {
@@ -240,7 +285,8 @@ export function upstreamFetch(url, options = {}) {
             }
         );
 
-        const activeTimeoutMs = options.timeoutMs || ACTIVE_REQUEST_TIMEOUT_MS;
+        const configuredTimeoutMs = Math.max(15000, (Number(config?.upstreamTimeoutSec) || 300) * 1000);
+        const activeTimeoutMs = options.timeoutMs || configuredTimeoutMs;
         req.on('socket', (socket) => {
             clearIdleTimeout(socket);
             socket.setTimeout(activeTimeoutMs);
@@ -266,4 +312,5 @@ export function clearUpstreamPools() {
         entry.agent.destroy();
     }
     agentPools.clear();
+    accountPacerNextAt.clear();
 }

@@ -380,6 +380,24 @@ async function populateModelCache(token, projectId = null, accountKey = null) {
  * @param {string} [projectId] - Optional project ID
  * @returns {Promise<boolean>} True if model is valid
  */
+export function seedModelCacheFromAccounts(accounts = []) {
+    if (!Array.isArray(accounts) || modelCache.validModels.size > 0) return;
+    const ids = new Set();
+    for (const acc of accounts) {
+        const models = acc?.quota?.models;
+        if (!models || typeof models !== 'object') continue;
+        for (const modelId of Object.keys(models)) {
+            if (isSupportedModel(modelId)) {
+                ids.add(modelId);
+            }
+        }
+    }
+    if (ids.size >= 3) {
+        modelCache.validModels = ids;
+        modelCache.lastFetched = Date.now();
+    }
+}
+
 export async function isValidModel(modelId, token, projectId = null, accountKey = null) {
     try {
         // Populate cache if needed

@@ -30,7 +30,7 @@ import {
     extractCodeFromInput
 } from '../auth/oauth.js';
 
-const SERVER_PORT = process.env.PORT || DEFAULT_PORT;
+const SERVER_PORT = parseInt(process.env.ATC_PORT, 10) || config?.port || DEFAULT_PORT;
 
 /**
  * Check if the Antigravity Proxy server is running

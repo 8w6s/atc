@@ -1,4 +1,5 @@
 import { BaseStrategy } from './base-strategy.js';
+import { config as globalConfig } from '../../config.js';
 import { logger } from '../../utils/logger.js';
 
 /*
@@ -49,10 +50,11 @@ export class PipelinedStrategy extends BaseStrategy {
 
         let shouldRotate = false;
         if (isCurrentUsable) {
+            const floorBypass = Math.max(this.#lowQuotaBypass, (Number(globalConfig?.globalQuotaThreshold) || 0) + 0.05);
             const state = this.#getOrCreateState(currentAccount, modelId);
             const currentFraction = this.#getQuotaFraction(currentAccount, modelId);
             const elapsedMs = Date.now() - state.lastRotatedAt;
-            const isLowQuota = currentFraction !== null && currentFraction < this.#lowQuotaBypass;
+            const isLowQuota = currentFraction !== null && currentFraction < floorBypass;
             const staySatisfied = elapsedMs >= state.minStayMs || isLowQuota;
 
             if (staySatisfied) {

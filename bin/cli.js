@@ -21,6 +21,12 @@ import {
   showModelMappings,
   showBackendModels
 } from '../src/cli/terminal-manager.js';
+import {
+  runDoctor,
+  showTelemetryStats,
+  showLiveLogs,
+  toggleSingleAccountLock
+} from '../src/cli/diagnostics.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -101,9 +107,10 @@ function printBox(contentLines, width = 67) {
   console.log(bottom);
 }
 
-// PID file location for background process management
+// PID & config file locations for background process management
 const CONFIG_DIR = join(process.env.HOME || process.env.USERPROFILE || '', '.config', 'atc');
 const PID_FILE = join(CONFIG_DIR, 'server.pid');
+const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -194,7 +201,58 @@ function cleanupPidFile() {
  * Get current port from environment or default
  */
 function getPort() {
-  return process.env.PORT || 43128;
+  if (process.env.ATC_PORT) {
+    const envPort = parseInt(process.env.ATC_PORT, 10);
+    if (!isNaN(envPort) && envPort > 0) return envPort;
+  }
+  if (existsSync(CONFIG_FILE)) {
+    try {
+      const cfg = JSON.parse(readFileSync(CONFIG_FILE, 'utf-8'));
+      const cfgPort = parseInt(cfg.port, 10);
+      if (!isNaN(cfgPort) && cfgPort > 0) return cfgPort;
+    } catch {}
+  }
+  return 43128;
+}
+
+async function findNextFreePort(startPort = 43129) {
+  const { createServer } = await import('net');
+  for (let candidate = Math.max(1024, Number(startPort)); candidate < Number(startPort) + 50; candidate++) {
+    const busy = await isPortInUse(candidate);
+    if (busy) continue;
+    const canBind = await new Promise((resolve) => {
+      const srv = createServer();
+      srv.once('error', () => resolve(false));
+      srv.listen(candidate, '127.0.0.1', () => {
+        srv.close(() => resolve(true));
+      });
+    });
+    if (canBind) return candidate;
+  }
+  return null;
+}
+
+function persistRelocatedPort(newPort) {
+  ensureConfigDir();
+  let cfg = {};
+  if (existsSync(CONFIG_FILE)) {
+    try {
+      cfg = JSON.parse(readFileSync(CONFIG_FILE, 'utf-8'));
+    } catch {
+      cfg = {};
+    }
+  }
+  cfg.port = newPort;
+  writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf-8');
+  configureClaudeCode(newPort, cfg.apiKey);
+}
+
+async function fetchHealthJson(port = getPort(), timeoutMs = 2500) {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(timeoutMs) });
+    if (res.ok) return await res.json();
+  } catch {}
+  return null;
 }
 
 /**
@@ -242,33 +300,45 @@ async function checkProxyHealth(port = getPort(), timeoutMs = 10000) {
 /**
  * Start the server as a background process (or foreground with --log)
  */
-async function startServer() {
+async function startServer({ forceFresh = false } = {}) {
   const logMode = args.includes('--log');
-  const port = getPort();
+  let port = getPort();
 
   // Process-level Singleton: Check if port is already active
   const inUse = await isPortInUse(port);
   if (inUse) {
-    const isHealthy = await checkProxyHealth(port, 2000);
-    if (isHealthy) {
+    const healthJson = await fetchHealthJson(port, 2000);
+    const isModern = Array.isArray(healthJson?.capabilities) && healthJson.capabilities.includes('isolated-tls');
+
+    if (healthJson && isModern && !forceFresh) {
       if (!logMode) {
         console.log('');
         printBox([`  🛸 ${c.bold + c.bCyan}atc proxy is already in orbit${c.reset}`], 67);
         console.log('');
-        const pid = getServicePid();
+        const pid = healthJson.pid || getServicePid();
         if (pid) console.log(`   ${c.cyan}├─${c.reset} PID:       ${c.bYellow}${pid}${c.reset}`);
         console.log(`   ${c.cyan}├─${c.reset} Endpoint:  ${c.underline}http://localhost:${port}${c.reset}`);
         console.log(`   ${c.cyan}└─${c.reset} TUI:       Run "atc" or "atc dash"\n`);
       }
-      return { success: true, pid: getServicePid(), port, alreadyRunning: true };
-    } else {
-      console.log(`\n${c.yellow}▲ Port ${port} is occupied but health check failed.${c.reset}`);
-      console.log(`  Cleaning up any stale atc process...`);
-      await stopServer({ silent: true });
-      const stillInUse = await isPortInUse(port);
-      if (stillInUse) {
-        console.error(`\n${c.red}▲ Port ${port} is occupied by another application.${c.reset}`);
-        console.log(`  Please free port ${port} before starting atc.\n`);
+      return { success: true, pid: healthJson.pid || getServicePid(), port, alreadyRunning: true };
+    }
+
+    await stopServer({ silent: true, targetPort: port });
+    const stillInUse = await isPortInUse(port);
+    if (stillInUse) {
+      if (!process.env.ATC_PORT) {
+        const nextPort = await findNextFreePort(Number(port) + 1);
+        if (nextPort) {
+          persistRelocatedPort(nextPort);
+          console.log(`\n${c.yellow}▲ Port ${port} is held by an unmanageable/legacy process.${c.reset}`);
+          console.log(`  ${c.green}✓${c.reset} Auto-relocated atc proxy & Claude Code endpoint to port ${c.bYellow}${nextPort}${c.reset}.`);
+          port = nextPort;
+        } else {
+          console.error(`\n${c.red}▲ Port ${port} is occupied and no fallback port could be bound.${c.reset}\n`);
+          return { success: false, port };
+        }
+      } else {
+        console.error(`\n${c.red}▲ Port ${port} is occupied by another application.${c.reset}\n`);
         return { success: false, port };
       }
     }
@@ -305,7 +375,7 @@ async function startServer() {
   if (logMode) {
     const serverProcess = spawn(process.execPath, [serverScript, ...serverArgs], {
       stdio: 'inherit',
-      env: { ...process.env, PORT: port.toString() }
+      env: { ...process.env, ATC_PORT: port.toString() }
     });
 
     serverProcess.on('error', (error) => {
@@ -331,7 +401,7 @@ async function startServer() {
     stdio: ['ignore', logFd, logFd],
     windowsHide: true,
     shell: false,
-    env: { ...process.env, PORT: port.toString() }
+    env: { ...process.env, ATC_PORT: port.toString() }
   });
 
   serverProcess.on('error', (error) => {
@@ -367,8 +437,8 @@ async function startServer() {
 /**
  * Stop the running server gracefully
  */
-async function stopServer({ silent = false } = {}) {
-  const port = getPort();
+async function stopServer({ silent = false, targetPort = null } = {}) {
+  const port = targetPort || getPort();
   const pid = getServicePid();
   let stopped = false;
 
@@ -423,10 +493,8 @@ async function stopServer({ silent = false } = {}) {
 async function restartServer() {
   console.log(`\n${c.bCyan}♻️  Restarting atc proxy...${c.reset}`);
   await stopServer({ silent: true });
-  await startServer();
+  return await startServer({ forceFresh: true });
 }
-
-const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
 
 function isConfigInitialized() {
   if (!existsSync(CONFIG_FILE)) return false;
@@ -566,6 +634,10 @@ ${c.bold + c.bCyan}━━━ LIFECYCLE ━━━━━━━━━━━━━�
   ${c.cyan}stop${c.reset}                Shut down active proxy daemon
   ${c.cyan}restart${c.reset}             Restart proxy daemon
   ${c.cyan}daemon${c.reset}              Run deep health & latency diagnostic on daemon
+  ${c.cyan}doctor [--fix]${c.reset}      Audit anti-ban guards, port sync, and auto-repair
+  ${c.cyan}stats${c.reset}               Show 24h/7d request, token, and error telemetry
+  ${c.cyan}logs [-f]${c.reset}           Inspect or follow recent proxied model requests
+  ${c.cyan}lock [on|off]${c.reset}       Pin traffic to single active account (no rotation)
   ${c.cyan}uninstall${c.reset}           Completely remove atc from PC (clean/keep config)
 
 ${c.bold + c.bCyan}━━━ DASHBOARD & ACCOUNTS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}
@@ -609,7 +681,7 @@ const STARTUP_VBS = join(STARTUP_DIR, 'atc-proxy.vbs');
 const CLAUDE_DIR = join(process.env.HOME || process.env.USERPROFILE || '', '.claude');
 const CLAUDE_SETTINGS = join(CLAUDE_DIR, 'settings.json');
 
-function configureClaudeCode(port = 43128) {
+function configureClaudeCode(port = getPort(), apiKey = null) {
   if (!existsSync(CLAUDE_DIR)) {
     mkdirSync(CLAUDE_DIR, { recursive: true });
   }
@@ -623,7 +695,9 @@ function configureClaudeCode(port = 43128) {
   }
   settings.env = settings.env || {};
   settings.env.ANTHROPIC_BASE_URL = `http://localhost:${port}`;
-  if (!settings.env.ANTHROPIC_API_KEY) {
+  if (apiKey) {
+    settings.env.ANTHROPIC_API_KEY = apiKey;
+  } else if (!settings.env.ANTHROPIC_API_KEY) {
     settings.env.ANTHROPIC_API_KEY = 'atc-local-key';
   }
   writeFileSync(CLAUDE_SETTINGS, JSON.stringify(settings, null, 2), 'utf-8');
@@ -1052,6 +1126,28 @@ async function main() {
 
     case 'daemon':
       await daemonCheckCommand();
+      break;
+
+    case 'doctor':
+      await runDoctor({ fix: args.includes('--fix'), restartDaemon: () => restartServer() });
+      break;
+
+    case 'stats':
+    case 'telemetry':
+      await showTelemetryStats();
+      break;
+
+    case 'logs':
+    case 'tail': {
+      const follow = args.includes('-f') || args.includes('--follow');
+      const nIdx = args.indexOf('-n');
+      const limit = nIdx !== -1 && args[nIdx + 1] ? parseInt(args[nIdx + 1], 10) || 30 : 30;
+      await showLiveLogs({ limit, follow });
+      break;
+    }
+
+    case 'lock':
+      await toggleSingleAccountLock(args[1]);
       break;
 
     case 'settings':

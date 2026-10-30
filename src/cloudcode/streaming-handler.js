@@ -18,6 +18,7 @@ import {
     MAX_CAPACITY_RETRIES,
     BACKOFF_BY_ERROR_TYPE
 } from '../constants.js';
+import { config } from '../config.js';
 import { isRateLimitError, isAuthError, isEmptyResponseError, isAccountForbiddenError, AccountForbiddenError } from '../errors.js';
 import { formatDuration, sleep, isNetworkError, throttledFetch } from '../utils/helpers.js';
 import { logger } from '../utils/logger.js';
@@ -50,13 +51,23 @@ import crypto from 'crypto';
  * @yields {Object} Anthropic-format SSE events (message_start, content_block_start, content_block_delta, etc.)
  * @throws {Error} If max retries exceeded or no accounts available
  */
-export async function* sendMessageStream(anthropicRequest, accountManager, fallbackEnabled = false) {
+function getSwitchDelayWithJitter() {
+    const base = Number.isFinite(config?.switchAccountDelayMs) ? config.switchAccountDelayMs : SWITCH_ACCOUNT_DELAY_MS;
+    if (base <= 0) return 0;
+    return Math.round(base * (0.85 + Math.random() * 0.3));
+}
+
+export async function* sendMessageStream(anthropicRequest, accountManager, fallbackEnabled = false, onAccountSelected = null) {
     const rawModel = anthropicRequest.model || '';
     const model = rawModel.replace(/\[\d+[kmbKMB]?\]$/, '');
+    const singleLock = !!config?.singleAccountLock;
+    const cfgMaxRetries = Number.isFinite(config?.maxRetries) ? config.maxRetries : MAX_RETRIES;
+    const cfgMaxWaitMs = Number.isFinite(config?.maxWaitBeforeErrorMs) ? config.maxWaitBeforeErrorMs : MAX_WAIT_BEFORE_ERROR_MS;
+    const cfgMaxCapRetries = Number.isFinite(config?.maxCapacityRetries) ? config.maxCapacityRetries : MAX_CAPACITY_RETRIES;
 
-    // Retry loop with account failover
-    // Ensure we try at least as many times as there are accounts to cycle through everyone
-    const maxAttempts = Math.max(MAX_RETRIES, accountManager.getAccountCount() + 1);
+    const maxAttempts = singleLock
+        ? 1
+        : Math.max(1, Math.min(Math.max(1, accountManager.getAccountCount()), cfgMaxRetries + 1));
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
         // Clear any expired rate limits before picking
@@ -67,8 +78,6 @@ export async function* sendMessageStream(anthropicRequest, accountManager, fallb
 
         // If no accounts available, check if we should wait or throw error
         if (availableAccounts.length === 0) {
-            // All accounts invalid? Fail immediately — they need user intervention
-            // Invalid accounts won't self-recover, so waiting would be an infinite loop
             if (accountManager.isAllAccountsInvalid()) {
                 const invalidAccounts = accountManager.getInvalidAccounts();
                 const reasons = [...new Set(invalidAccounts.map(a => a.invalidReason).filter(Boolean))];
@@ -77,19 +86,34 @@ export async function* sendMessageStream(anthropicRequest, accountManager, fallb
                 );
             }
 
+            if (singleLock) {
+                const locked = accountManager.getCurrentAccount();
+                const lockedEmail = locked?.email || 'active account';
+                const limitInfo = locked ? accountManager.getRateLimitInfo(locked.email, model) : null;
+                if (limitInfo?.isRateLimited && limitInfo.waitMs > 0) {
+                    throw new Error(
+                        `RESOURCE_EXHAUSTED: Rate limited on ${model} (Single-Account Lock on ${lockedEmail}). Quota will reset after ${formatDuration(limitInfo.waitMs)}.`
+                    );
+                }
+                const hourlyCap = Number(config?.hourlyAccountCap) || 0;
+                if (locked && hourlyCap > 0 && accountManager.getHourlyRequestCount(locked.email) >= hourlyCap) {
+                    throw new Error(
+                        `RESOURCE_EXHAUSTED: Hourly request cap (${hourlyCap}/h) reached on locked account ${lockedEmail} for ${model}.`
+                    );
+                }
+            }
+
             if (accountManager.isAllRateLimited(model)) {
                 const minWaitMs = accountManager.getMinWaitTimeMs(model);
                 const resetTime = new Date(Date.now() + minWaitMs).toISOString();
 
-                // If wait time is too long (> 2 minutes), try fallback first, then throw error
-                if (minWaitMs > MAX_WAIT_BEFORE_ERROR_MS) {
-                    // Check if fallback is enabled and available
+                if (minWaitMs > cfgMaxWaitMs) {
                     if (fallbackEnabled) {
                         const fallbackModel = getFallbackModel(model);
                         if (fallbackModel) {
                             logger.warn(`[CloudCode] All accounts exhausted for ${model} (${formatDuration(minWaitMs)} wait). Attempting fallback to ${fallbackModel} (streaming)`);
                             const fallbackRequest = { ...anthropicRequest, model: fallbackModel };
-                            yield* sendMessageStream(fallbackRequest, accountManager, false);
+                            yield* sendMessageStream(fallbackRequest, accountManager, false, onAccountSelected);
                             return;
                         }
                     }
@@ -98,19 +122,22 @@ export async function* sendMessageStream(anthropicRequest, accountManager, fallb
                     );
                 }
 
-                // Wait for shortest reset time
                 const accountCount = accountManager.getAccountCount();
                 logger.warn(`[CloudCode] All ${accountCount} account(s) rate-limited. Waiting ${formatDuration(minWaitMs)}...`);
-                await sleep(minWaitMs + 500); // Add 500ms buffer
+                await sleep(minWaitMs + 500);
                 accountManager.clearExpiredLimits();
 
-                // CRITICAL FIX: Don't count waiting for rate limits as a failed attempt
-                // This prevents "Max retries exceeded" when we are just patiently waiting
                 attempt--;
-                continue; // Retry the loop
+                continue;
             }
 
-            // No accounts available and not rate-limited (shouldn't happen normally)
+            const hourlyCap = Number(config?.hourlyAccountCap) || 0;
+            if (hourlyCap > 0) {
+                throw new Error(
+                    `RESOURCE_EXHAUSTED: Hourly request cap (${hourlyCap}/h per account) reached on ${model}. Adjust Hourly Cap in "atc settings" if needed.`
+                );
+            }
+
             throw new Error('No accounts available');
         }
 
@@ -135,6 +162,10 @@ export async function* sendMessageStream(anthropicRequest, accountManager, fallb
         if (!account) {
             logger.warn(`[CloudCode] Strategy returned no account for ${model} (attempt ${attempt + 1}/${maxAttempts})`);
             continue;
+        }
+
+        if (typeof onAccountSelected === 'function') {
+            onAccountSelected(account.email, model);
         }
 
         try {
@@ -195,21 +226,17 @@ export async function* sendMessageStream(anthropicRequest, accountManager, fallb
                             const resetMs = parseResetTime(response, errorText);
                             const consecutiveFailures = accountManager.getConsecutiveFailures?.(account.email) || 0;
 
-                            // Check if capacity issue (NOT quota) - retry same endpoint with progressive backoff
                             if (isModelCapacityExhausted(errorText)) {
-                                if (capacityRetryCount < MAX_CAPACITY_RETRIES) {
-                                    // Progressive capacity backoff tiers
+                                if (capacityRetryCount < cfgMaxCapRetries) {
                                     const tierIndex = Math.min(capacityRetryCount, CAPACITY_BACKOFF_TIERS_MS.length - 1);
                                     const waitMs = resetMs || CAPACITY_BACKOFF_TIERS_MS[tierIndex];
                                     capacityRetryCount++;
                                     accountManager.incrementConsecutiveFailures(account.email);
-                                    logger.info(`[CloudCode] Model capacity exhausted, retry ${capacityRetryCount}/${MAX_CAPACITY_RETRIES} after ${formatDuration(waitMs)}...`);
+                                    logger.info(`[CloudCode] Model capacity exhausted, retry ${capacityRetryCount}/${cfgMaxCapRetries} after ${formatDuration(waitMs)}...`);
                                     await sleep(waitMs);
-                                    // Don't increment endpointIndex - retry same endpoint
                                     continue;
                                 }
-                                // Max capacity retries exceeded - treat as quota exhaustion
-                                logger.warn(`[CloudCode] Max capacity retries (${MAX_CAPACITY_RETRIES}) exceeded, switching account`);
+                                logger.warn(`[CloudCode] Max capacity retries (${cfgMaxCapRetries}) exceeded, switching account`);
                             }
 
                             // For very short rate limits (< 1 second), wait and retry same endpoint
@@ -229,16 +256,16 @@ export async function* sendMessageStream(anthropicRequest, accountManager, fallb
                         // Check for 503/529 MODEL_CAPACITY_EXHAUSTED - use progressive backoff like 429 capacity
                         // 529 = Site Overloaded (same treatment as 503)
                         if ((response.status === 503 || response.status === 529) && isModelCapacityExhausted(errorText)) {
-                            if (capacityRetryCount < MAX_CAPACITY_RETRIES) {
+                            if (capacityRetryCount < cfgMaxCapRetries) {
                                 const tierIndex = Math.min(capacityRetryCount, CAPACITY_BACKOFF_TIERS_MS.length - 1);
                                 const waitMs = CAPACITY_BACKOFF_TIERS_MS[tierIndex];
                                 capacityRetryCount++;
                                 accountManager.incrementConsecutiveFailures(account.email);
-                                logger.info(`[CloudCode] ${response.status} Model capacity exhausted, retry ${capacityRetryCount}/${MAX_CAPACITY_RETRIES} after ${formatDuration(waitMs)}...`);
+                                logger.info(`[CloudCode] ${response.status} Model capacity exhausted, retry ${capacityRetryCount}/${cfgMaxCapRetries} after ${formatDuration(waitMs)}...`);
                                 await sleep(waitMs);
                                 continue;
                             }
-                            logger.warn(`[CloudCode] Max capacity retries (${MAX_CAPACITY_RETRIES}) exceeded on ${response.status}, switching account`);
+                            logger.warn(`[CloudCode] Max capacity retries (${cfgMaxCapRetries}) exceeded on ${response.status}, switching account`);
                             accountManager.markRateLimited(account.email, BACKOFF_BY_ERROR_TYPE.MODEL_CAPACITY_EXHAUSTED, model);
                             throw new Error(`CAPACITY_EXHAUSTED: ${errorText}`);
                         }
@@ -409,24 +436,30 @@ export async function* sendMessageStream(anthropicRequest, accountManager, fallb
                 errLower.includes('quota will reset');
 
             if (isRateOrQuota) {
-                // Rate limited / Quota exhausted - notify strategy and continue to next account
                 accountManager.notifyRateLimit(account, model);
                 const resetMs = parseResetTime(null, error.message) || 60000;
                 accountManager.markRateLimited(account.email, resetMs, model);
-                logger.info(`[CloudCode] Account ${account.email} quota/rate-limited, rotating to next account in pool...`);
 
-                // CRITICAL FIX: If this is a duplicate rate limit (account was already known to be
-                // rate-limited), don't count it as a failed attempt. This prevents "Max retries exceeded"
-                // when thundering herd causes all accounts to be rate-limited and we're just cycling
-                // through known-bad accounts waiting for rate limits to expire.
+                if (singleLock || attempt + 1 >= maxAttempts) {
+                    throw new Error(
+                        `RESOURCE_EXHAUSTED: Rate limited on ${model}. Quota will reset after ${formatDuration(resetMs)}.`
+                    );
+                }
+
+                const switchDelay = getSwitchDelayWithJitter();
+                logger.info(`[CloudCode] Account ${account.email} quota/rate-limited, cooling ${switchDelay}ms before switching account...`);
+                if (switchDelay > 0) await sleep(switchDelay);
+
                 if (error.message?.includes('RATE_LIMITED_DEDUP')) {
                     attempt--;
                 }
                 continue;
             }
             if (isAuthError(error)) {
-                // Auth invalid - already marked, continue to next account
+                if (singleLock) throw error;
                 logger.warn(`[CloudCode] Account ${account.email} has invalid credentials, trying next...`);
+                const switchDelay = getSwitchDelayWithJitter();
+                if (switchDelay > 0) await sleep(switchDelay);
                 continue;
             }
             if (isAccountForbiddenError(error)) {
@@ -478,7 +511,7 @@ export async function* sendMessageStream(anthropicRequest, accountManager, fallb
         if (fallbackModel) {
             logger.warn(`[CloudCode] All retries exhausted for ${model}. Attempting fallback to ${fallbackModel} (streaming)`);
             const fallbackRequest = { ...anthropicRequest, model: fallbackModel };
-            yield* sendMessageStream(fallbackRequest, accountManager, false);
+            yield* sendMessageStream(fallbackRequest, accountManager, false, onAccountSelected);
             return;
         }
     }
