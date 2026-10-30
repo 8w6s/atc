@@ -663,8 +663,8 @@ ${c.bold + c.bCyan}━━━ OPTIONS ━━━━━━━━━━━━━━�
   ${c.yellow}-h, -H, --help${c.reset}      Show this help
   ${c.yellow}-v, --version${c.reset}       Show version
   ${c.yellow}--log${c.reset}               Run in foreground with live stream logs
-  ${c.yellow}--strategy=NAME${c.reset}     Load balancer strategy: pipelined (5%),
-                      hybrid, round-robin, sticky
+  ${c.yellow}--strategy=NAME${c.reset}     Load balancer strategy: locked, day-split, session,
+                      sticky, pipelined (5%), hybrid, round-robin
 `);
 }
 

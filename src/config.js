@@ -52,6 +52,7 @@ const DEFAULT_CONFIG = {
     maxAccounts: 10, // Maximum number of accounts allowed
     globalQuotaThreshold: 0.10, // 0 = disabled, 0.01-0.50 = safety quota floor before rotating away
     singleAccountLock: false, // Hard-lock traffic to active account (never auto-rotate)
+    showTips: true, // Show scrolling safety/operational tips banner on dashboard
     hourlyAccountCap: 120, // Soft hourly request cap per account (0 = unlimited)
     pacerDelayMs: 250, // Per-account burst stagger gap in ms (0ms latency when idle, spaces parallel bursts)
     upstreamTimeoutSec: 300, // Active upstream stream socket timeout in seconds

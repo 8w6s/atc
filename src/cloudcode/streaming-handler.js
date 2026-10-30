@@ -60,7 +60,7 @@ function getSwitchDelayWithJitter() {
 export async function* sendMessageStream(anthropicRequest, accountManager, fallbackEnabled = false, onAccountSelected = null) {
     const rawModel = anthropicRequest.model || '';
     const model = rawModel.replace(/\[\d+[kmbKMB]?\]$/, '');
-    const singleLock = !!config?.singleAccountLock;
+    const singleLock = Boolean(config?.singleAccountLock || accountManager?.isSingleAccountLocked?.());
     const cfgMaxRetries = Number.isFinite(config?.maxRetries) ? config.maxRetries : MAX_RETRIES;
     const cfgMaxWaitMs = Number.isFinite(config?.maxWaitBeforeErrorMs) ? config.maxWaitBeforeErrorMs : MAX_WAIT_BEFORE_ERROR_MS;
     const cfgMaxCapRetries = Number.isFinite(config?.maxCapacityRetries) ? config.maxCapacityRetries : MAX_CAPACITY_RETRIES;

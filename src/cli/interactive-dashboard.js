@@ -5,6 +5,7 @@ import { ACCOUNT_CONFIG_PATH } from '../constants.js';
 import { loadAccounts, saveAccounts } from '../account-manager/storage.js';
 import { config, saveConfig, reloadConfig } from '../config.js';
 import { getPackageVersion } from '../utils/helpers.js';
+import { SAFETY_TIPS, getTipTickerFrame } from './tips.js';
 import {
     getProxyPort,
     getServicePid,
@@ -135,11 +136,74 @@ function getAccountQuotaSummary(models = {}) {
 function getStrategyCycle() {
     const thresholdPct = Math.round((config?.accountSelection?.stepThreshold || 0.05) * 100);
     return [
-        { id: 'pipelined', label: `Pipelined Quota Shift ${thresholdPct}%`, desc: `Staggers accounts: shifts to next account every ${thresholdPct}% quota drop` },
-        { id: 'hybrid', label: 'Hybrid Score', desc: 'Balances health rating, quota availability, and token buckets' },
-        { id: 'round-robin', label: 'Round-Robin', desc: 'Cycles sequentially per request across ready accounts' },
-        { id: 'sticky', label: 'Sticky Cache', desc: 'Pins to current account until exhausted to maximize prompt caching' }
+        {
+            id: 'locked',
+            label: 'Single-Account Lock',
+            riskTag: 'safest',
+            riskColor: '\x1b[1;38;5;49m',
+            desc: 'Hard-pins 100% traffic to the active account; zero automatic multi-account hopping'
+        },
+        {
+            id: 'day-split',
+            label: 'Daily Primary + Standby',
+            riskTag: 'low-risk',
+            riskColor: '\x1b[38;5;120m',
+            desc: 'Exposes at most 1 primary + 1 standby account per calendar day; keeps remaining accounts dormant'
+        },
+        {
+            id: 'session',
+            label: 'Idle-Aware Session Shift',
+            riskTag: 'low-risk',
+            riskColor: '\x1b[38;5;120m',
+            desc: 'Never switches mid-conversation; rotates only after ~45m work + >=3m natural idle break'
+        },
+        {
+            id: 'sticky',
+            label: 'Sticky Drain-to-Floor',
+            riskTag: 'low-risk',
+            riskColor: '\x1b[38;5;120m',
+            desc: 'Stays on one account for hours until hitting Global Quota Floor or long rate-limit'
+        },
+        {
+            id: 'pipelined',
+            label: `Pipelined Quota Shift ${thresholdPct}%`,
+            riskTag: 'moderate',
+            riskColor: '\x1b[38;5;220m',
+            desc: `Rotates after ${thresholdPct}% quota drop + min stay floor to stagger 5h recovery across separate plans`
+        },
+        {
+            id: 'hybrid',
+            label: 'Hybrid Smart Score',
+            riskTag: 'elevated',
+            riskColor: '\x1b[38;5;208m',
+            desc: 'Scores health, token bucket, quota, and LRU; switches more frequently under heavy bursts'
+        },
+        {
+            id: 'round-robin',
+            label: 'Round-Robin',
+            riskTag: 'high-risk',
+            riskColor: '\x1b[1;38;5;196m',
+            desc: 'Cycles accounts on EVERY single request from one IP — breaks prompt cache & looks automated'
+        }
     ];
+}
+
+function wrapPlainText(text, maxWidth) {
+    const words = String(text || '').split(/\s+/).filter(Boolean);
+    if (words.length === 0) return [''];
+    const lines = [];
+    let cur = words[0];
+    for (let i = 1; i < words.length; i++) {
+        const w = words[i];
+        if (cur.length + 1 + w.length <= maxWidth) {
+            cur += ' ' + w;
+        } else {
+            lines.push(cur);
+            cur = w;
+        }
+    }
+    if (cur) lines.push(cur);
+    return lines;
 }
 
 
@@ -274,6 +338,9 @@ export async function runInteractiveDashboard(options = {}) {
         }
     }
     let currentStrategy = config?.accountSelection?.strategy || 'pipelined';
+    const dashboardStartMs = Date.now();
+    let tipsVisible = config?.showTips !== false;
+    let lastRenderedTipIdx = 0;
 
     async function refreshData(arg = false) {
         const forceLive = typeof arg === 'boolean' ? arg : !!arg?.forceLive;
@@ -285,6 +352,7 @@ export async function runInteractiveDashboard(options = {}) {
         reloadConfig();
         port = getProxyPort();
         currentStrategy = config?.accountSelection?.strategy || 'pipelined';
+        tipsVisible = config?.showTips !== false;
 
         try {
             await fetch(`http://127.0.0.1:${port}/reload`, {
@@ -336,12 +404,19 @@ export async function runInteractiveDashboard(options = {}) {
     function getItems() {
         const list = [];
         const stratCycle = getStrategyCycle();
-        const stratObj = stratCycle.find(s => s.id === currentStrategy) || stratCycle[0];
+        const effectiveStratId = config?.singleAccountLock ? 'locked' : currentStrategy;
+        const stratObj = stratCycle.find(s => s.id === effectiveStratId) || stratCycle.find(s => s.id === 'pipelined') || stratCycle[0];
         const customProject = config?.customProjectId || 'Default (auto)';
 
         list.push({ type: 'header', label: 'Quick Actions' });
         list.push({ type: 'action', id: 'add_account', label: 'Add New Account', desc: 'Link a new Google account via OAuth browser' });
-        list.push({ type: 'action', id: 'lb_strategy', label: `Load Balancer: [${stratObj.label}]`, desc: stratObj.desc });
+        list.push({
+            type: 'action',
+            id: 'lb_strategy',
+            label: `Load Balancer: [${stratObj.label}]`,
+            badgeStr: `${stratObj.riskColor}[${stratObj.riskTag}]${c.reset}`,
+            desc: `${stratObj.desc} (Enter to list all, ←/→ quick switch)`
+        });
         list.push({ type: 'action', id: 'custom_project', label: `Custom GCP Project: [${customProject}]`, desc: 'Configure custom Google Cloud Project ID for quotas' });
         list.push({ type: 'action', id: 'model_mapping', label: 'Model Mappings', desc: 'Configure Claude Code models, subagents, and environment overrides' });
         list.push({ type: 'action', id: 'pick_best', label: 'Pick Best Account', desc: 'Automatically switch to healthiest account with highest quota' });
@@ -385,6 +460,21 @@ export async function runInteractiveDashboard(options = {}) {
         // Header Title
         buf += `${getShimmerTitle()} ${c.textMuted}v${getPackageVersion()}${c.reset}${c.clearToEndOfLine}\n`;
 
+        // Scrolling Safety / Operational Tip Marquee Banner
+        if (tipsVisible && SAFETY_TIPS.length > 0) {
+            const termCols = Math.max(68, Math.min(process.stdout.columns || 96, 118));
+            const probeTip = SAFETY_TIPS[lastRenderedTipIdx] || SAFETY_TIPS[0];
+            const rawPrefixSample = `  TIP [${probeTip.badge} ${SAFETY_TIPS.length}/${SAFETY_TIPS.length}] `;
+            const rawSuffix = ' [Ctrl+D Detail | X Hide]';
+            const viewportCols = Math.max(22, termCols - rawPrefixSample.length - rawSuffix.length - 1);
+            const frame = getTipTickerFrame(SAFETY_TIPS, Date.now() - dashboardStartMs, viewportCols);
+            if (frame.tip) {
+                lastRenderedTipIdx = frame.index;
+                const badgeStr = `\x1b[1;38;5;220m[${frame.tip.badge} ${frame.index + 1}/${SAFETY_TIPS.length}]\x1b[0m`;
+                buf += `  \x1b[38;5;214m✦\x1b[0m ${badgeStr} \x1b[38;5;252m${frame.visibleText}\x1b[0m\x1b[38;5;242m${rawSuffix}\x1b[0m${c.clearToEndOfLine}\n`;
+            }
+        }
+
         const liveMap = new Map();
         if (proxyHealth && Array.isArray(proxyHealth.accounts)) {
             for (const a of proxyHealth.accounts) liveMap.set(a.email, a);
@@ -425,6 +515,10 @@ export async function runInteractiveDashboard(options = {}) {
                     } else {
                         text = `\x1b[38;5;252m${it.label}${c.reset}`;
                     }
+                }
+
+                if (it.badgeStr) {
+                    text += ` ${it.badgeStr}`;
                 }
 
                 buf += `${pointer}${text}${c.clearToEndOfLine}\n`;
@@ -563,7 +657,7 @@ export async function runInteractiveDashboard(options = {}) {
         }
 
         // Fixed Footer line (no trailing newline to guarantee no terminal auto-scroll)
-        buf += `${c.textMuted}↑↓ Move | Enter Select | 1-9 Switch | Ctrl+R Reload | V Verify | R Re-login | T Toggle | D Delete | Q Back${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
+        buf += `${c.textMuted}↑↓ Move | Enter Select | 1-9 Switch | Ctrl+D Tip | X Hide Tip | Ctrl+R Reload | V/R/T/D Acct | Q Back${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
 
         process.stdout.write(buf);
     }
@@ -631,6 +725,7 @@ export async function runInteractiveDashboard(options = {}) {
             await runSubScreen(async () => {
                 reloadConfig();
                 let singleLock = !!config?.singleAccountLock;
+                let showTipsToggle = config?.showTips !== false;
                 let quotaFloorPct = Math.round((config?.globalQuotaThreshold ?? 0.10) * 100);
                 let hourlyCap = config?.hourlyAccountCap ?? 120;
                 let pacerMs = config?.pacerDelayMs ?? 250;
@@ -655,6 +750,12 @@ export async function runInteractiveDashboard(options = {}) {
                         label: 'Single-Account Lock',
                         isBoolean: true,
                         desc: 'Hard-locks all traffic to the active account; disables automatic multi-account rotation'
+                    },
+                    {
+                        id: 'showTips',
+                        label: 'Safety Tips Banner',
+                        isBoolean: true,
+                        desc: 'Show scrolling anti-ban & operational tips marquee at top of dashboard (Ctrl+D for details)'
                     },
                     {
                         id: 'quotaFloor',
@@ -857,6 +958,7 @@ export async function runInteractiveDashboard(options = {}) {
                 function getDisplayVal(idx) {
                     const id = settingsMeta[idx]?.id;
                     if (id === 'singleLock') return singleLock ? 'ON (Locked)' : 'OFF';
+                    if (id === 'showTips') return showTipsToggle ? 'ON' : 'OFF';
                     if (id === 'quotaFloor') return quotaFloorPct + '%';
                     if (id === 'hourlyCap') return hourlyCap === 0 ? 'OFF (Unlimited)' : `${hourlyCap}/h`;
                     if (id === 'pacerMs') return pacerMs + 'ms';
@@ -905,7 +1007,10 @@ export async function runInteractiveDashboard(options = {}) {
                             } else {
                                 const displayStr = getDisplayVal(i);
                                 if (meta.isBoolean) {
-                                    const badgeColor = singleLock ? '\x1b[1;38;5;214m' : '\x1b[38;5;120m';
+                                    const boolVal = meta.id === 'showTips' ? showTipsToggle : singleLock;
+                                    const badgeColor = meta.id === 'singleLock'
+                                        ? (boolVal ? '\x1b[1;38;5;49m' : '\x1b[38;5;246m')
+                                        : (boolVal ? '\x1b[38;5;120m' : '\x1b[38;5;246m');
                                     valBox = `${badgeColor}[${displayStr}]\x1b[0m`;
                                 } else {
                                     valBox = isSel
@@ -965,6 +1070,7 @@ export async function runInteractiveDashboard(options = {}) {
                     };
                     saveConfig({
                         singleAccountLock: singleLock,
+                        showTips: showTipsToggle,
                         globalQuotaThreshold: quotaFloorPct / 100,
                         hourlyAccountCap: hourlyCap,
                         pacerDelayMs: pacerMs,
@@ -1090,8 +1196,13 @@ export async function runInteractiveDashboard(options = {}) {
                         }
 
                         if ((key.name === 'left' || key.name === 'right' || key.name === 'space') && activeMeta?.isBoolean) {
-                            singleLock = !singleLock;
-                            notice = `Single-Account Lock ${singleLock ? 'ENABLED (auto-rotation disabled)' : 'DISABLED'}`;
+                            if (activeMeta.id === 'showTips') {
+                                showTipsToggle = !showTipsToggle;
+                                notice = `Safety Tips Banner ${showTipsToggle ? 'ENABLED' : 'HIDDEN'}`;
+                            } else {
+                                singleLock = !singleLock;
+                                notice = `Single-Account Lock ${singleLock ? 'ENABLED (auto-rotation disabled)' : 'DISABLED'}`;
+                            }
                             renderScreen();
                             return;
                         }
@@ -1115,8 +1226,13 @@ export async function runInteractiveDashboard(options = {}) {
                         if (key.name === 'return' || key.name === 'enter') {
                             notice = '';
                             if (activeMeta?.isBoolean) {
-                                singleLock = !singleLock;
-                                notice = `Single-Account Lock ${singleLock ? 'ENABLED (auto-rotation disabled)' : 'DISABLED'}`;
+                                if (activeMeta.id === 'showTips') {
+                                    showTipsToggle = !showTipsToggle;
+                                    notice = `Safety Tips Banner ${showTipsToggle ? 'ENABLED' : 'HIDDEN'}`;
+                                } else {
+                                    singleLock = !singleLock;
+                                    notice = `Single-Account Lock ${singleLock ? 'ENABLED (auto-rotation disabled)' : 'DISABLED'}`;
+                                }
                                 renderScreen();
                                 return;
                             }
@@ -1130,6 +1246,7 @@ export async function runInteractiveDashboard(options = {}) {
 
                             if (activeMeta?.id === 'reset') {
                                 singleLock = false;
+                                showTipsToggle = true;
                                 quotaFloorPct = 10;
                                 hourlyCap = 120;
                                 pacerMs = 250;
@@ -1168,6 +1285,195 @@ export async function runInteractiveDashboard(options = {}) {
             });
         }
 
+        async function applyStrategyChoice(nextObj) {
+            reloadConfig();
+            currentStrategy = nextObj.id;
+            const accSel = { ...(config.accountSelection || {}), strategy: currentStrategy };
+            const updates = { accountSelection: accSel };
+            if (currentStrategy === 'locked') {
+                updates.singleAccountLock = true;
+            } else if (config?.singleAccountLock) {
+                updates.singleAccountLock = false;
+            }
+            saveConfig(updates);
+            try {
+                await fetch(`http://127.0.0.1:${port}/reload`, {
+                    method: 'POST',
+                    signal: AbortSignal.timeout(1500)
+                });
+            } catch {}
+            items = getItems();
+            setStatus(`Load Balancer -> ${nextObj.label} [${nextObj.riskTag}]`, 2500);
+        }
+
+        async function openLoadBalancerSelector() {
+            await runSubScreen(async () => {
+                reloadConfig();
+                const stratCycle = getStrategyCycle();
+                const effectiveId = config?.singleAccountLock ? 'locked' : currentStrategy;
+                let selIdx = Math.max(0, stratCycle.findIndex((s) => s.id === effectiveId));
+                let chosen = null;
+
+                function renderScreen() {
+                    let out = c.clearScreen + c.cursorHome;
+                    out += `${c.brandGreen}╭─────────────────────────────────────────────────────────────────╮${c.reset}\n`;
+                    out += `${c.brandGreen}│  Load Balancer Mode & Anti-Ban Risk Profile                     │${c.reset}\n`;
+                    out += `${c.brandGreen}╰─────────────────────────────────────────────────────────────────╯${c.reset}\n\n`;
+
+                    for (let i = 0; i < stratCycle.length; i++) {
+                        const st = stratCycle[i];
+                        const isSel = i === selIdx;
+                        const isActive = st.id === effectiveId;
+                        const pointer = isSel ? `\x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
+                        const activeMark = isActive ? ` ${c.statusCurrent}[active]${c.reset}` : '';
+                        const nameStyled = isSel
+                            ? `\x1b[1;38;5;255m${st.label.padEnd(28, ' ')}${c.reset}`
+                            : `\x1b[38;5;250m${st.label.padEnd(28, ' ')}${c.reset}`;
+                        const riskStyled = `${st.riskColor}[${st.riskTag}]${c.reset}`;
+                        out += `${pointer}${nameStyled} ${riskStyled}${activeMark}${c.clearToEndOfLine}\n`;
+                    }
+
+                    const curSt = stratCycle[selIdx];
+                    const wrapCols = Math.max(54, Math.min((process.stdout.columns || 86) - 6, 82));
+                    const wrappedDesc = wrapPlainText(curSt.desc, wrapCols);
+                    out += `\n${c.textMuted}───────────────────────────────────────────────────────────────────${c.reset}\n`;
+                    out += `${c.textMuted}Risk Profile:${c.reset} ${curSt.riskColor}[${curSt.riskTag}]${c.reset}\n`;
+                    for (const dl of wrappedDesc) {
+                        out += `  ${c.textNormal}${dl}${c.reset}${c.clearToEndOfLine}\n`;
+                    }
+                    out += `\n${c.textMuted}↑↓ Move | Enter Apply & Reload Daemon | ESC Cancel${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
+                    process.stdout.write(out);
+                }
+
+                await new Promise((resolve) => {
+                    if (process.stdin.isTTY) process.stdin.setRawMode(true);
+                    readline.emitKeypressEvents(process.stdin);
+
+                    function onKey(str, key) {
+                        if (!key) return;
+                        if (key.name === 'escape' || key.name === 'q' || (key.ctrl && key.name === 'c')) {
+                            process.stdin.removeListener('keypress', onKey);
+                            resolve();
+                            return;
+                        }
+                        if (key.name === 'up' || key.name === 'k') {
+                            selIdx = (selIdx - 1 + stratCycle.length) % stratCycle.length;
+                            renderScreen();
+                            return;
+                        }
+                        if (key.name === 'down' || key.name === 'j') {
+                            selIdx = (selIdx + 1) % stratCycle.length;
+                            renderScreen();
+                            return;
+                        }
+                        if (key.name === 'return' || key.name === 'enter') {
+                            chosen = stratCycle[selIdx];
+                            process.stdin.removeListener('keypress', onKey);
+                            resolve();
+                        }
+                    }
+
+                    process.stdin.on('keypress', onKey);
+                    renderScreen();
+                });
+
+                if (chosen) {
+                    await applyStrategyChoice(chosen);
+                }
+            });
+        }
+
+        async function openTipDetails(initialTipIdx = 0) {
+            if (!SAFETY_TIPS.length) return;
+            await runSubScreen(async () => {
+                let tipIdx = Math.max(0, Math.min(SAFETY_TIPS.length - 1, initialTipIdx));
+                let bannerNotice = '';
+
+                function renderScreen() {
+                    const tip = SAFETY_TIPS[tipIdx];
+                    const wrapCols = Math.max(54, Math.min((process.stdout.columns || 88) - 6, 84));
+                    let out = c.clearScreen + c.cursorHome;
+                    out += `${c.brandGreen}╭─────────────────────────────────────────────────────────────────╮${c.reset}\n`;
+                    out += `${c.brandGreen}│  atc Safety & Operational Guide (Tip ${String(tipIdx + 1).padStart(2, ' ')} of ${String(SAFETY_TIPS.length).padEnd(2, ' ')})                  │${c.reset}\n`;
+                    out += `${c.brandGreen}╰─────────────────────────────────────────────────────────────────╯${c.reset}\n\n`;
+
+                    out += `  \x1b[1;38;5;220m[${tip.badge}]\x1b[0m \x1b[1;38;5;255m${tip.title}${c.reset}${c.clearToEndOfLine}\n\n`;
+
+                    for (const line of wrapPlainText(tip.summary, wrapCols)) {
+                        out += `  \x1b[38;5;153m${line}${c.reset}${c.clearToEndOfLine}\n`;
+                    }
+                    out += `\n`;
+
+                    for (const pt of tip.points || []) {
+                        const wrapped = wrapPlainText(pt, wrapCols - 2);
+                        wrapped.forEach((wl, idx) => {
+                            const prefix = idx === 0 ? `  \x1b[38;5;48m•\x1b[0m ` : `    `;
+                            out += `${prefix}${c.textNormal}${wl}${c.reset}${c.clearToEndOfLine}\n`;
+                        });
+                    }
+
+                    if (Array.isArray(tip.sources) && tip.sources.length > 0) {
+                        out += `\n  ${c.textMuted}Verified Sources:${c.reset}\n`;
+                        for (const src of tip.sources) {
+                            out += `  ${c.textMuted}- ${src}${c.reset}${c.clearToEndOfLine}\n`;
+                        }
+                    }
+
+                    out += `\n${c.textMuted}───────────────────────────────────────────────────────────────────${c.reset}\n`;
+                    if (bannerNotice) {
+                        out += `  ${c.statusWarn}ℹ ${bannerNotice}${c.reset}${c.clearToEndOfLine}\n`;
+                    } else {
+                        out += `  ${c.textMuted}Dashboard Banner: ${tipsVisible ? '\x1b[38;5;120mVISIBLE\x1b[0m' : '\x1b[38;5;242mHIDDEN\x1b[0m'}${c.textMuted} (edit src/cli/tips.js to add custom tips)${c.reset}${c.clearToEndOfLine}\n`;
+                    }
+                    out += `  ${c.textMuted}←/→ Prev/Next Tip | X Toggle Banner | Enter / Ctrl+D / ESC Return${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
+                    process.stdout.write(out);
+                }
+
+                await new Promise((resolve) => {
+                    if (process.stdin.isTTY) process.stdin.setRawMode(true);
+                    readline.emitKeypressEvents(process.stdin);
+
+                    function onKey(str, key) {
+                        if (!key) return;
+                        if (
+                            key.name === 'escape' ||
+                            key.name === 'return' ||
+                            key.name === 'enter' ||
+                            key.name === 'q' ||
+                            (key.ctrl && (key.name === 'c' || key.name === 'd'))
+                        ) {
+                            process.stdin.removeListener('keypress', onKey);
+                            resolve();
+                            return;
+                        }
+                        if (key.name === 'left' || key.name === 'up' || key.name === 'p' || key.name === 'k') {
+                            bannerNotice = '';
+                            tipIdx = (tipIdx - 1 + SAFETY_TIPS.length) % SAFETY_TIPS.length;
+                            renderScreen();
+                            return;
+                        }
+                        if (key.name === 'right' || key.name === 'down' || key.name === 'n' || key.name === 'j') {
+                            bannerNotice = '';
+                            tipIdx = (tipIdx + 1) % SAFETY_TIPS.length;
+                            renderScreen();
+                            return;
+                        }
+                        if (!key.ctrl && !key.meta && key.name === 'x') {
+                            tipsVisible = !tipsVisible;
+                            saveConfig({ showTips: tipsVisible });
+                            bannerNotice = tipsVisible
+                                ? 'Dashboard scrolling banner re-enabled.'
+                                : 'Dashboard scrolling banner hidden.';
+                            renderScreen();
+                        }
+                    }
+
+                    process.stdin.on('keypress', onKey);
+                    renderScreen();
+                });
+            });
+        }
+
         if (options && options.initialScreen === 'settings') {
             setTimeout(() => {
                 openEngineSettings().catch(() => {});
@@ -1187,6 +1493,38 @@ export async function runInteractiveDashboard(options = {}) {
                 process.stdout.write(c.clearScreen + c.cursorHome);
                 await refreshData(true);
                 items = getItems();
+                render();
+                return;
+            }
+
+            // Ctrl+D: open detailed view for currently scrolling safety tip
+            if (key.ctrl && key.name === 'd') {
+                await openTipDetails(lastRenderedTipIdx);
+                return;
+            }
+
+            // X: dismiss scrolling tip banner
+            if (!key.ctrl && !key.meta && key.name === 'x') {
+                if (tipsVisible) {
+                    tipsVisible = false;
+                    saveConfig({ showTips: false });
+                    setStatus('Tip banner hidden. Press Ctrl+D anytime for details, or re-enable in Settings.', 2500);
+                } else {
+                    tipsVisible = true;
+                    saveConfig({ showTips: true });
+                    setStatus('Safety tips banner re-enabled.', 2000);
+                }
+                return;
+            }
+
+            // Quick ←/→ cycle when standing on Load Balancer row
+            if ((key.name === 'left' || key.name === 'right') && items[selectedIndex]?.id === 'lb_strategy') {
+                const stratCycle = getStrategyCycle();
+                const effectiveId = config?.singleAccountLock ? 'locked' : currentStrategy;
+                const curIdx = Math.max(0, stratCycle.findIndex((s) => s.id === effectiveId));
+                const step = key.name === 'right' ? 1 : -1;
+                const nextObj = stratCycle[(curIdx + step + stratCycle.length) % stratCycle.length];
+                await applyStrategyChoice(nextObj);
                 render();
                 return;
             }
@@ -1259,16 +1597,7 @@ export async function runInteractiveDashboard(options = {}) {
 
                 if (cur.type === 'action') {
                     if (cur.id === 'lb_strategy') {
-                        reloadConfig();
-                        const stratCycle = getStrategyCycle();
-                        const curIdx = stratCycle.findIndex(s => s.id === currentStrategy);
-                        const nextObj = stratCycle[(curIdx + 1) % stratCycle.length];
-                        currentStrategy = nextObj.id;
-                        const accSel = { ...(config.accountSelection || {}), strategy: currentStrategy };
-                        saveConfig({ accountSelection: accSel });
-                        setStatus(`Strategy set to: ${nextObj.label}.`, 2000);
-                        items = getItems();
-                        render();
+                        await openLoadBalancerSelector();
                         return;
                     }
 
@@ -2004,8 +2333,8 @@ export async function runInteractiveDashboard(options = {}) {
                 }
             }
 
-            // Keyboard Shortcuts
-            if (key.name === 'v') {
+            // Keyboard Shortcuts (guarded against Ctrl/Alt chord collisions such as Ctrl+D / Ctrl+R)
+            if (!key.ctrl && !key.meta && key.name === 'v') {
                 const cur = items[selectedIndex];
                 if (cur && cur.type === 'account') {
                     const acc = cur.account;
@@ -2025,7 +2354,7 @@ export async function runInteractiveDashboard(options = {}) {
                 return;
             }
 
-            if (key.name === 'r') {
+            if (!key.ctrl && !key.meta && key.name === 'r') {
                 const cur = items[selectedIndex];
                 if (cur && cur.type === 'account') {
                     const accNum = cur.accountIndex + 1;
@@ -2040,7 +2369,7 @@ export async function runInteractiveDashboard(options = {}) {
                 return;
             }
 
-            if (key.name === 't') {
+            if (!key.ctrl && !key.meta && key.name === 't') {
                 const cur = items[selectedIndex];
                 if (cur && cur.type === 'account') {
                     const accNum = cur.accountIndex + 1;
@@ -2053,7 +2382,7 @@ export async function runInteractiveDashboard(options = {}) {
                 return;
             }
 
-            if (key.name === 'd') {
+            if (!key.ctrl && !key.meta && key.name === 'd') {
                 const cur = items[selectedIndex];
                 if (cur && cur.type === 'account') {
                     const accNum = cur.accountIndex + 1;

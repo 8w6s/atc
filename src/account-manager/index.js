@@ -5,7 +5,7 @@
  */
 
 import { ACCOUNT_CONFIG_PATH } from '../constants.js';
-import { config } from '../config.js';
+import { config, reloadConfig } from '../config.js';
 import { loadAccounts, loadDefaultAccount, saveAccounts } from './storage.js';
 import {
     isAllRateLimited as checkAllRateLimited,
@@ -104,9 +104,14 @@ export class AccountManager {
      * Useful when accounts.json is modified externally (e.g., by WebUI)
      */
     async reload() {
+        reloadConfig();
         this.#initialized = false;
         await this.initialize();
         logger.info('[AccountManager] Accounts reloaded from disk');
+    }
+
+    isSingleAccountLocked() {
+        return Boolean(config?.singleAccountLock || this.#strategyName === 'locked');
     }
 
     /**
@@ -201,7 +206,7 @@ export class AccountManager {
     }
 
     getAvailableAccounts(modelId = null) {
-        if (config?.singleAccountLock) {
+        if (this.isSingleAccountLocked()) {
             const locked = this.getCurrentAccount();
             if (!locked) return [];
             const avail = getAvailable([locked], modelId);
@@ -270,7 +275,7 @@ export class AccountManager {
             throw new Error('AccountManager not initialized. Call initialize() first.');
         }
 
-        if (config?.singleAccountLock) {
+        if (this.isSingleAccountLocked()) {
             const idx = this.#currentIndex >= this.#accounts.length ? 0 : this.#currentIndex;
             const locked = this.#accounts[idx] || null;
             const hourlyCap = Number(config?.hourlyAccountCap) || 0;

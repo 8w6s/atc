@@ -8,6 +8,9 @@ import { StickyStrategy } from './sticky-strategy.js';
 import { RoundRobinStrategy } from './round-robin-strategy.js';
 import { HybridStrategy } from './hybrid-strategy.js';
 import { PipelinedStrategy } from './pipelined-strategy.js';
+import { LockedStrategy } from './locked-strategy.js';
+import { SessionStrategy } from './session-strategy.js';
+import { DaySplitStrategy } from './day-split-strategy.js';
 import { logger } from '../../utils/logger.js';
 import {
     SELECTION_STRATEGIES,
@@ -29,6 +32,23 @@ export function createStrategy(strategyName, config = {}) {
     const name = (strategyName || DEFAULT_STRATEGY).toLowerCase();
 
     switch (name) {
+        case 'locked':
+        case 'single':
+        case 'lock':
+            logger.debug('[Strategy] Creating LockedStrategy');
+            return new LockedStrategy(config);
+
+        case 'day-split':
+        case 'daysplit':
+        case 'daily':
+            logger.debug('[Strategy] Creating DaySplitStrategy');
+            return new DaySplitStrategy(config);
+
+        case 'session':
+        case 'session-shift':
+            logger.debug('[Strategy] Creating SessionStrategy');
+            return new SessionStrategy(config);
+
         case 'pipelined':
         case 'pipelined-5pct':
         case 'pipeline':
@@ -80,6 +100,10 @@ export function getStrategyLabel(name) {
 export { StickyStrategy } from './sticky-strategy.js';
 export { RoundRobinStrategy } from './round-robin-strategy.js';
 export { HybridStrategy } from './hybrid-strategy.js';
+export { PipelinedStrategy } from './pipelined-strategy.js';
+export { LockedStrategy } from './locked-strategy.js';
+export { SessionStrategy } from './session-strategy.js';
+export { DaySplitStrategy } from './day-split-strategy.js';
 export { BaseStrategy } from './base-strategy.js';
 
 // Re-export trackers
