@@ -14,21 +14,35 @@ import {
     showModelMappings
 } from './terminal-manager.js';
 
-// ANSI escape sequences
+// Refined ANSI color palette for high contrast and readability on dark terminals
 const c = {
     reset: '\x1b[0m',
     bold: '\x1b[1m',
     dim: '\x1b[2m',
-    green: '\x1b[32m',
-    brightGreen: '\x1b[92m',
-    yellow: '\x1b[33m',
-    brightYellow: '\x1b[93m',
-    red: '\x1b[31m',
-    brightRed: '\x1b[91m',
-    cyan: '\x1b[36m',
-    brightCyan: '\x1b[96m',
-    gray: '\x1b[90m',
-    white: '\x1b[37m',
+
+    // Calibrated 256-color tones
+    brandGreen: '\x1b[38;5;48m',      // Emerald green for title / border
+    actionGreen: '\x1b[38;5;42m',     // Soft readable green for actions
+    activeBright: '\x1b[1;38;5;120m', // Highlighted text when selected
+    cursorGreen: '\x1b[1;38;5;48m',   // Cursor arrow
+    
+    // Status tones
+    statusOk: '\x1b[38;5;42m',        // [ok]
+    statusCurrent: '\x1b[1;38;5;48m', // [current]
+    statusWarn: '\x1b[38;5;214m',     // [rate-limited] warm amber
+    statusDanger: '\x1b[38;5;196m',   // [invalid] crisp red
+    statusMuted: '\x1b[38;5;244m',    // [disabled] slate gray
+    
+    // Progress bar tones
+    barFill: '\x1b[38;5;42m',         // ##########
+    barEmpty: '\x1b[38;5;240m',        // ----------
+    
+    // UI neutrals
+    textBright: '\x1b[38;5;254m',     // High-contrast off-white
+    textNormal: '\x1b[38;5;250m',     // Normal body text
+    textMuted: '\x1b[38;5;245m',      // Subtitle / hints
+    textDark: '\x1b[38;5;240m',       // Dividers
+    
     clearScreen: '\x1b[2J\x1b[H',
     hideCursor: '\x1b[?25l',
     showCursor: '\x1b[?25h'
@@ -40,12 +54,12 @@ function formatBar(ratio, width = 10) {
     const empty = width - filled;
     const bar = '#'.repeat(filled);
     const dash = '-'.repeat(empty);
-    if (ratio >= 0.5) {
-        return `${c.brightGreen}${bar}${c.gray}${dash}${c.reset}`;
-    } else if (ratio >= 0.2) {
-        return `${c.brightYellow}${bar}${c.gray}${dash}${c.reset}`;
-    }
-    return `${c.brightRed}${bar}${c.gray}${dash}${c.reset}`;
+
+    let fillColor = c.barFill;
+    if (ratio < 0.2) fillColor = c.statusDanger;
+    else if (ratio < 0.5) fillColor = c.statusWarn;
+
+    return `${fillColor}${bar}${c.barEmpty}${dash}${c.reset}`;
 }
 
 function formatDuration(ms) {
@@ -124,15 +138,16 @@ export async function runInteractiveDashboard() {
     }
 
     let items = getItems();
-    // Default focus on first saved account or first action
-    let selectedIndex = items.findIndex(it => it.type === 'account') || 1;
+    // Default focus on active account or first item
+    let selectedIndex = items.findIndex(it => it.type === 'account' && it.isCurrent);
+    if (selectedIndex === -1) selectedIndex = items.findIndex(it => it.type === 'account') || 1;
     if (selectedIndex === -1) selectedIndex = 1;
 
     function render() {
         process.stdout.write(c.clearScreen + c.hideCursor);
 
-        // Header
-        console.log(`${c.brightGreen}+ Accounts Dashboard (atc v2.9.1)${c.reset}\n`);
+        // Header Title
+        console.log(`${c.brandGreen}+ Accounts Dashboard (atc v2.9.1)${c.reset}\n`);
 
         const liveMap = new Map();
         if (proxyHealth && Array.isArray(proxyHealth.accounts)) {
@@ -141,21 +156,26 @@ export async function runInteractiveDashboard() {
             }
         }
 
-        // Render each item
+        // Render sections
         for (let i = 0; i < items.length; i++) {
             const it = items[i];
             const isSelected = i === selectedIndex;
 
             if (it.type === 'header') {
-                console.log(`${c.bold}${it.label}${c.reset}`);
+                console.log(`${c.textBright}${it.label}${c.reset}`);
                 continue;
             }
 
             if (it.type === 'action') {
-                let pointer = isSelected ? `${c.brightGreen}> ` : `  ${c.gray}o `;
-                let text = isSelected ? `${c.bold}${c.brightGreen}${it.label}${c.reset}` : `${c.green}${it.label}${c.reset}`;
+                let pointer = isSelected ? `${c.cursorGreen}> ` : `  ${c.textDark}o `;
+                let text = isSelected
+                    ? `${c.activeBright}${it.label}${c.reset}`
+                    : `${c.actionGreen}${it.label}${c.reset}`;
+
                 if (it.id === 'delete_current') {
-                    text = isSelected ? `${c.bold}${c.brightRed}${it.label}${c.reset}` : `${c.red}${it.label}${c.reset}`;
+                    text = isSelected
+                        ? `${c.bold}${c.statusDanger}${it.label}${c.reset}`
+                        : `${c.statusDanger}${it.label}${c.reset}`;
                 }
                 console.log(`${pointer}${text}`);
                 continue;
@@ -172,20 +192,20 @@ export async function runInteractiveDashboard() {
                 ) || (live.rateLimitCooldownRemaining > 0);
 
                 let badges = [];
-                if (it.isCurrent) badges.push(`${c.brightGreen}[current]${c.reset}`);
-                if (!acc.enabled) badges.push(`${c.gray}[disabled]${c.reset}`);
-                else if (isInvalid) badges.push(`${c.brightRed}[invalid]${c.reset}`);
-                else if (isLimited) badges.push(`${c.brightYellow}[rate-limited]${c.reset}`);
-                else badges.push(`${c.green}[ok]${c.reset}`);
+                if (it.isCurrent) badges.push(`${c.statusCurrent}[current]${c.reset}`);
+                if (!acc.enabled) badges.push(`${c.statusMuted}[disabled]${c.reset}`);
+                else if (isInvalid) badges.push(`${c.statusDanger}[invalid]${c.reset}`);
+                else if (isLimited) badges.push(`${c.statusWarn}[rate-limited]${c.reset}`);
+                else badges.push(`${c.statusOk}[ok]${c.reset}`);
 
-                let pointer = isSelected ? `${c.brightGreen}> ` : `  ${c.gray}o `;
+                let pointer = isSelected ? `${c.cursorGreen}> ` : `  ${c.textDark}o `;
                 let emailStr = isSelected
-                    ? `${c.bold}${c.brightGreen}${idx}. ${acc.email}${c.reset}`
-                    : `${c.bold}${idx}. ${acc.email}${c.reset}`;
+                    ? `${c.activeBright}${idx}. ${acc.email}${c.reset}`
+                    : `${c.textNormal}${idx}. ${acc.email}${c.reset}`;
 
                 console.log(`${pointer}${emailStr} ${badges.join(' ')}`);
 
-                // If selected, display detailed limits progress bars like screenshot
+                // Dynamic details pane when hovered
                 if (isSelected) {
                     const models = live.models || {};
                     const high = models['gemini-3.8-flash-high'] || {};
@@ -200,20 +220,20 @@ export async function runInteractiveDashboard() {
                     const medBar = formatBar(medFrac, 10);
                     const timeAgo = formatTimeAgo(acc.lastUsed);
 
-                    let statusTag = isLimited ? `${c.brightYellow}rate-limited${c.reset}` : `${c.brightGreen}active${c.reset}`;
-                    if (isInvalid) statusTag = `${c.brightRed}invalid${c.reset}`;
+                    let statusTag = isLimited ? `${c.statusWarn}rate-limited${c.reset}` : `${c.statusOk}active${c.reset}`;
+                    if (isInvalid) statusTag = `${c.statusDanger}invalid (press R to re-login)${c.reset}`;
 
-                    console.log(`  ${c.gray}Last used:${c.reset} ${timeAgo} | ${c.gray}High:${c.reset} ${highBar} ${highPct} | ${c.gray}Med:${c.reset} ${medBar} ${medPct} | ${statusTag}`);
+                    console.log(`  ${c.textMuted}Last used:${c.reset} ${timeAgo} ${c.textDark}|${c.reset} ${c.textMuted}High:${c.reset} ${highBar} ${highPct} ${c.textDark}|${c.reset} ${c.textMuted}Med:${c.reset} ${medBar} ${medPct} ${c.textDark}|${c.reset} ${statusTag}`);
                 }
             }
         }
 
         console.log('');
         if (statusMessage) {
-            console.log(`${c.brightYellow}ℹ ${statusMessage}${c.reset}`);
+            console.log(`${c.statusWarn}ℹ ${statusMessage}${c.reset}`);
         }
-        console.log(`${c.gray}↑↓ Move | Enter Select | 1-9 Switch | Q Back${c.reset}`);
-        console.log(`${c.brightGreen}+${c.reset}`);
+        console.log(`${c.textMuted}↑↓ Move | Enter Select | R Re-login | 1-9 Switch | Q Back${c.reset}`);
+        console.log(`${c.brandGreen}+${c.reset}`);
     }
 
     // Set up interactive raw terminal input
@@ -260,6 +280,33 @@ export async function runInteractiveDashboard() {
                     render();
                 }
                 return;
+            }
+
+            // 'R' or 'r': Re-login account currently under cursor
+            if (str === 'r' || str === 'R') {
+                const cur = items[selectedIndex];
+                if (cur && cur.type === 'account') {
+                    const email = cur.account.email;
+                    process.stdout.write(c.showCursor);
+                    if (process.stdin.isTTY) process.stdin.setRawMode(false);
+                    console.log(c.clearScreen);
+                    await loginAccount({ targetEmail: email });
+                    console.log(`\n${c.textMuted}Press Enter to return to dashboard...${c.reset}`);
+                    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+                    await new Promise(r => rl.once('line', r));
+                    rl.close();
+                    if (process.stdin.isTTY) process.stdin.setRawMode(true);
+                    process.stdin.resume();
+                    await refreshData();
+                    items = getItems();
+                    statusMessage = `Refreshed credentials for ${email}.`;
+                    render();
+                    return;
+                } else {
+                    statusMessage = 'Move cursor to an account in Saved Accounts to re-login.';
+                    render();
+                    return;
+                }
             }
 
             // Arrow keys navigation
@@ -338,7 +385,7 @@ export async function runInteractiveDashboard() {
 
                     if (cur.id === 'check_problem') {
                         const problems = accountsData.accounts.filter(a => a.isInvalid);
-                        statusMessage = `Problem accounts: ${problems.length} invalid.`;
+                        statusMessage = `Problem accounts: ${problems.length} invalid. Focus and press R to re-login.`;
                         render();
                         return;
                     }
@@ -348,7 +395,7 @@ export async function runInteractiveDashboard() {
                         if (process.stdin.isTTY) process.stdin.setRawMode(false);
                         console.log(c.clearScreen);
                         showModelMappings();
-                        console.log(`${c.gray}Press Enter to return to dashboard...${c.reset}`);
+                        console.log(`${c.textMuted}Press Enter to return to dashboard...${c.reset}`);
                         const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
                         await new Promise(r => rl.once('line', r));
                         rl.close();
@@ -363,7 +410,7 @@ export async function runInteractiveDashboard() {
                         if (process.stdin.isTTY) process.stdin.setRawMode(false);
                         console.log(c.clearScreen);
                         await checkAccounts();
-                        console.log(`${c.gray}Press Enter to return to dashboard...${c.reset}`);
+                        console.log(`${c.textMuted}Press Enter to return to dashboard...${c.reset}`);
                         const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
                         await new Promise(r => rl.once('line', r));
                         rl.close();
@@ -380,7 +427,7 @@ export async function runInteractiveDashboard() {
                         if (process.stdin.isTTY) process.stdin.setRawMode(false);
                         console.log(c.clearScreen);
                         await loginAccount();
-                        console.log(`${c.gray}Press Enter to return to dashboard...${c.reset}`);
+                        console.log(`${c.textMuted}Press Enter to return to dashboard...${c.reset}`);
                         const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
                         await new Promise(r => rl.once('line', r));
                         rl.close();
@@ -393,7 +440,6 @@ export async function runInteractiveDashboard() {
                     }
 
                     if (cur.id === 'toggle_current') {
-                        // Toggle account under cursor if focused on account, or active account
                         const accItem = items.find((it, idx) => idx === selectedIndex && it.type === 'account') ||
                                         items.find(it => it.type === 'account' && it.isCurrent);
                         if (accItem) {

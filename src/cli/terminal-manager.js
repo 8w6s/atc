@@ -383,9 +383,15 @@ export async function checkAccounts() {
  */
 export async function loginAccount(options = {}) {
     const noBrowser = !!options.noBrowser;
+    const targetEmail = options.targetEmail || null;
     const { accounts, settings, activeIndex } = await loadAccounts(ACCOUNT_CONFIG_PATH);
 
-    console.log(`\n${c.bold}${c.brightCyan}=== Antigravity Account Login ===${c.reset}\n`);
+    if (targetEmail) {
+        console.log(`\n${c.bold}${c.brightCyan}=== Re-authenticating: ${targetEmail} ===${c.reset}\n`);
+        console.log(`Please select or log in to ${c.bold}${targetEmail}${c.reset} in the browser.\n`);
+    } else {
+        console.log(`\n${c.bold}${c.brightCyan}=== Antigravity Account Login ===${c.reset}\n`);
+    }
 
     const { url, verifier, state } = getAuthorizationUrl();
 
