@@ -1,6 +1,6 @@
 {
   "name": "@8w6s/atc",
-  "version": "1.0.1",
+  "version": "1.0.0",
   "description": "atc (Antigravity to Claude) - Multi-account terminal manager and API proxy",
   "main": "src/index.js",
   "type": "module",
