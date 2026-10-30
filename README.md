@@ -2,36 +2,45 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-**atc** is a terminal-first proxy and multi-account manager that exposes a fully Anthropic-compatible Messages API backed by Google Cloud Code (Antigravity). It routes **Claude Code CLI** and compatible agent tools through a pooled cluster of Google accounts with intelligent load balancing, quota tracking, and live health monitoring.
+**atc** is a high-performance developer tool that bridges **Claude Code CLI** to Google Cloud Code's underlying Antigravity infrastructure. Rather than serving as a simple background proxy, **atc** is built around three distinct, decoupled subsystems: a streaming **API Proxy Engine**, an intelligent **Multi-Account Pool & Quota Scheduler**, and a terminal-native **TUI/CLI Management Interface**.
 
 ---
 
-## Key Features
-
-- **Dashboard-First TUI (`atc`)**: Interactive terminal dashboard with zero-flicker double buffering, arrow-key navigation, instant account switching (`1`-`9`), and in-place OAuth re-login (`R`).
-- **Multi-Account Pool Management**: Rotate requests across multiple Google accounts to bypass single-account rate limits. Automatically discovers subscription tiers (`[pro]`, `[free]`, `[ultra]`) and live 5h & weekly quota metrics.
-- **Pipelined Quota Rotation**: Automatically staggers usage across accounts by shifting traffic upon each configured quota drop threshold (default 5%), allowing 5-hour quota pools to recover in parallel.
-- **Antigravity Model Catalog (`atc models`)**: Introspects available Gemini and Claude backend models from the highest-tier account in your pool.
-- **Flagship Flex Mode (`atc flex`)**: Instantly binds Claude Code CLI to Anthropic flagship tiers (`claude-3-7-sonnet-20250219`, `claude-3-opus-20240229`) silently backed by Google Gemini 3.8 infrastructure.
-- **Deep Daemon Diagnostics (`atc daemon`)**: Live health checks, PID verification, and HTTP ping latency measurements.
-- **Zero-Downtime Hot Reload**: Add, re-authenticate, toggle, or switch accounts without restarting the background daemon. Changes reload instantly in-memory.
-- **Complete Messages API Emulation**: Full streaming SSE response converter, tool use / function calling, and thinking block handling.
-
----
-
-## Architecture
+## The Three Core Pillars
 
 ```text
-┌─────────────────────────┐          ┌───────────────────────────┐          ┌──────────────────────────┐
-│     Claude Code CLI     │ ───────▶ │     atc Proxy Daemon      │ ───────▶ │  Google Cloud Code API   │
-│ (Anthropic Messages API)│ :43128   │  (Account Pool & Routing) │          │(daily-cloudcode-pa / v1) │
-└─────────────────────────┘          └─────────────┬─────────────┘          └──────────────────────────┘
-                                                   │
-                                     ┌─────────────▼─────────────┐
-                                     │     atc Terminal TUI      │
-                                     │  (Interactive Dashboard)  │
-                                     └───────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                                   THREE CORE PILLARS                                   │
+├──────────────────────────┬─────────────────────────────┬───────────────────────────────┤
+│   1. API Proxy Engine    │  2. Account Pool & Quotas   │   3. TUI & CLI Controller     │
+│  - Anthropic Messages API│  - Multi-account rotation   │  - Zero-flicker TUI dashboard │
+│  - SSE stream translation│  - Pipelined Quota Shift 5% │  - Direct CLI commands        │
+│  - Thinking block & tools│  - 5h & weekly telemetry    │  - Instant hot reload         │
+│  - Google Cloud Code RPC │  - Plan tier auto-detection │  - Flagship model flex setup  │
+└────────────┬─────────────┴──────────────┬──────────────┴───────────────┬───────────────┘
+             │                            │                              │
+             ▼                            ▼                              ▼
+┌─────────────────────────┐  ┌───────────────────────────┐  ┌───────────────────────────┐
+│     Claude Code CLI     │  │     Google Account Pool   │  │   Interactive Dashboard   │
+│ (http://localhost:43128)│  │ [ultra] / [pro] / [plus]  │  │  (atc / atc models / ...) │
+└─────────────────────────┘  └───────────────────────────┘  └───────────────────────────┘
 ```
+
+### 1. API Proxy Engine (Protocol & Message Adapter)
+- **Anthropic Messages Emulation**: Exposes a standard HTTP Messages API (`/v1/messages`) that seamlessly receives requests from Claude Code CLI.
+- **Bi-Directional Streaming Adapter**: Translates Google Cloud Code RPC streaming chunks into standard Server-Sent Events (SSE) events (`content_block_start`, `content_block_delta`, `message_delta`, `message_stop`).
+- **Advanced Capabilities Support**: Full support for tool use / function calling, native thinking blocks, and dynamic context windows.
+
+### 2. Account Pool & Quota Scheduler (Resource Optimization)
+- **Pipelined Quota Rotation**: Automatically staggers usage across accounts by shifting traffic upon each configured quota drop threshold (default 5%), allowing 5-hour quota pools to recover in parallel without user friction.
+- **Subscription Tier Auto-Discovery**: Automatically probes and labels accounts (`[ultra]`, `[pro]`, `[plus]`, `[free]`).
+- **Telemetry & Quota Tracking**: Continuously monitors both short-term 5-hour caps and long-term weekly quotas across all linked accounts.
+- **Automatic Failover & Cooldown**: Instantly shifts traffic away from rate-limited or invalid accounts to healthy candidates.
+
+### 3. TUI & CLI Management (Control Plane)
+- **Zero-Flicker Terminal TUI**: High-contrast, double-buffered terminal dashboard with instant account switching (`1`-`9`), OAuth re-authentication (`R`), and engine tuning.
+- **Zero-Downtime Hot Reloading**: Modifications to accounts or settings take effect immediately in the running proxy daemon without service interruptions.
+- **Developer Command Suite**: Purpose-built CLI shortcuts (`atc models`, `atc flex`, `atc daemon`, `atc accounts`, `atc defuse`, `atc settings`).
 
 ---
 
