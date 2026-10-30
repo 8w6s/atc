@@ -744,7 +744,7 @@ async function defuseCommand() {
 
 async function flexCommand() {
   console.log('');
-  printBox([`  ✨ ${c.bold + c.bCyan}Claude Code Flagship Flex Mode${c.reset}`], 67);
+  printBox([`  ⚡ ${c.bold + c.bCyan}Claude Code Flagship Model Mapping${c.reset}`], 67);
   console.log('');
 
   // 1. Update ~/.config/atc/config.json with premier model mappings
@@ -782,14 +782,12 @@ async function flexCommand() {
   claudeSettings.env.CLAUDE_CODE_SUBAGENT = 'claude-3-5-haiku-20241022';
   writeFileSync(CLAUDE_SETTINGS, JSON.stringify(claudeSettings, null, 2), 'utf-8');
 
-  console.log(`${c.green}✓${c.reset} ${c.bold + c.bGreen}Flex configuration locked and loaded!${c.reset}\n`);
-  console.log(`  Claude Code bindings mapped to Anthropic flagship tiers:`);
-  console.log(`  ${c.cyan}•${c.reset} Main Model (ANTHROPIC_MODEL)    : ${c.bYellow}claude-3-7-sonnet-20250219${c.reset}`);
-  console.log(`  ${c.cyan}•${c.reset} Default Sonnet                  : ${c.bYellow}claude-3-7-sonnet-20250219${c.reset}`);
-  console.log(`  ${c.cyan}•${c.reset} Default Opus                    : ${c.bYellow}claude-3-opus-20240229${c.reset}`);
-  console.log(`  ${c.cyan}•${c.reset} Fast Subagent                   : ${c.bYellow}claude-3-5-haiku-20241022${c.reset}\n`);
-  console.log(`  ${c.gray}Behind the scenes:${c.reset} Requests invisibly routed to Google Gemini 3.8 infrastructure.`);
-  console.log(`  ${c.gray}Flex away:${c.reset} Your Claude Code CLI now displays pristine flagship badges with zero API bills!\n`);
+  console.log(`${c.green}✓${c.reset} ${c.bold}Claude Code model variables updated:${c.reset}\n`);
+  console.log(`  ${c.cyan}•${c.reset} ANTHROPIC_MODEL         : ${c.bYellow}claude-3-7-sonnet-20250219${c.reset} → gemini-3.8-flash-high`);
+  console.log(`  ${c.cyan}•${c.reset} ANTHROPIC_DEFAULT_SONNET: ${c.bYellow}claude-3-7-sonnet-20250219${c.reset} → gemini-3.8-flash-high`);
+  console.log(`  ${c.cyan}•${c.reset} ANTHROPIC_DEFAULT_OPUS  : ${c.bYellow}claude-3-opus-20240229${c.reset}     → gemini-3.8-flash-high`);
+  console.log(`  ${c.cyan}•${c.reset} CLAUDE_CODE_SUBAGENT    : ${c.bYellow}claude-3-5-haiku-20241022${c.reset}  → gemini-3.1-flash-lite\n`);
+  console.log(`  Mappings saved to ~/.config/atc/config.json and ~/.claude/settings.json.\n`);
 }
 
 async function daemonCheckCommand() {

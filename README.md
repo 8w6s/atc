@@ -2,73 +2,91 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-**atc** is a high-performance developer tool that bridges **Claude Code CLI** to Google Cloud Code's underlying Antigravity infrastructure. Rather than serving as a simple background proxy, **atc** is built around three distinct, decoupled subsystems: a streaming **API Proxy Engine**, an intelligent **Multi-Account Pool & Quota Scheduler**, and a terminal-native **TUI/CLI Management Interface**.
+`atc` is a local proxy daemon and multi-account pool manager that connects **Claude Code CLI** to Google Cloud Code backend models. It exposes an Anthropic-compatible Messages API while handling OAuth authentication, load balancing, and quota tracking across multiple Google accounts.
 
 ---
 
-## The Three Core Pillars
+## Architecture
+
+The system consists of three decoupled components:
 
 ```text
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│                                   THREE CORE PILLARS                                   │
-├──────────────────────────┬─────────────────────────────┬───────────────────────────────┤
-│   1. API Proxy Engine    │  2. Account Pool & Quotas   │   3. TUI & CLI Controller     │
-│  - Anthropic Messages API│  - Multi-account rotation   │  - Zero-flicker TUI dashboard │
-│  - SSE stream translation│  - Pipelined Quota Shift 5% │  - Direct CLI commands        │
-│  - Thinking block & tools│  - 5h & weekly telemetry    │  - Instant hot reload         │
-│  - Google Cloud Code RPC │  - Plan tier auto-detection │  - Flagship model flex setup  │
-└────────────┬─────────────┴──────────────┬──────────────┴───────────────┬───────────────┘
-             │                            │                              │
-             ▼                            ▼                              ▼
-┌─────────────────────────┐  ┌───────────────────────────┐  ┌───────────────────────────┐
-│     Claude Code CLI     │  │     Google Account Pool   │  │   Interactive Dashboard   │
-│ (http://localhost:43128)│  │ [ultra] / [pro] / [plus]  │  │  (atc / atc models / ...) │
-└─────────────────────────┘  └───────────────────────────┘  └───────────────────────────┘
+┌─────────────────────────┐
+│     Claude Code CLI     │
+│ (http://localhost:43128)│
+└────────────┬────────────┘
+             │ HTTP /v1/messages
+             ▼
+┌────────────────────────────────────────────────────────┐
+│                   atc Proxy Daemon                     │
+│ ┌────────────────────────────────────────────────────┐ │
+│ │ 1. Protocol Adapter (src/cloudcode)                │ │
+│ │    • Anthropic schema -> Cloud Code RPC payload    │ │
+│ │    • Cloud Code chunk stream -> Anthropic SSE      │ │
+│ │    • Tool calls & thinking block preservation      │ │
+│ └────────────────────────────────────────────────────┘ │
+│ ┌────────────────────────────────────────────────────┐ │
+│ │ 2. Account Pool & Balancer (src/account-manager)   │ │
+│ │    • OAuth token refresh & cache                   │ │
+│ │    • 5h-cap and weekly quota telemetry             │ │
+│ │    • Rotation strategies: pipelined / round-robin  │ │
+│ └────────────────────────────────────────────────────┘ │
+└────────────┬─────────────────────────────▲─────────────┘
+             │ gRPC/REST                   │ IPC / reload
+             ▼                             │
+┌─────────────────────────┐   ┌────────────┴─────────────┐
+│  Google Cloud Code API  │   │  3. CLI & TUI Interface  │
+│ (daily-cloudcode-pa/v1) │   │     (src/cli, bin/cli)   │
+└─────────────────────────┘   └──────────────────────────┘
 ```
 
-### 1. API Proxy Engine (Protocol & Message Adapter)
-- **Anthropic Messages Emulation**: Exposes a standard HTTP Messages API (`/v1/messages`) that seamlessly receives requests from Claude Code CLI.
-- **Bi-Directional Streaming Adapter**: Translates Google Cloud Code RPC streaming chunks into standard Server-Sent Events (SSE) events (`content_block_start`, `content_block_delta`, `message_delta`, `message_stop`).
-- **Advanced Capabilities Support**: Full support for tool use / function calling, native thinking blocks, and dynamic context windows.
+### 1. Proxy Core (`src/cloudcode`, `src/proxy`)
+- Exposes `POST /v1/messages` on `http://127.0.0.1:43128`.
+- Translates Anthropic request schemas into Google Cloud Code internal RPC payloads.
+- Converts upstream streaming chunks into standard Server-Sent Events (`message_start`, `content_block_start`, `content_block_delta`, `message_delta`, `message_stop`).
+- Forwards tool call signatures, image buffers, and thinking parameters.
 
-### 2. Account Pool & Quota Scheduler (Resource Optimization)
-- **Pipelined Quota Rotation**: Automatically staggers usage across accounts by shifting traffic upon each configured quota drop threshold (default 5%), allowing 5-hour quota pools to recover in parallel without user friction.
-- **Subscription Tier Auto-Discovery**: Automatically probes and labels accounts (`[ultra]`, `[pro]`, `[plus]`, `[free]`).
-- **Telemetry & Quota Tracking**: Continuously monitors both short-term 5-hour caps and long-term weekly quotas across all linked accounts.
-- **Automatic Failover & Cooldown**: Instantly shifts traffic away from rate-limited or invalid accounts to healthy candidates.
+### 2. Account Pool & Balancer (`src/account-manager`)
+- Manages credentials and refresh tokens stored in `~/.config/atc/accounts.json`.
+- Detects subscription tiers (`ultra`, `pro`, `plus`, `free`) and project IDs.
+- Tracks model-level quota metrics: 5-hour rolling limits and weekly caps.
+- Selection strategies:
+  - `pipelined` (default): Rotates to the next available account after a configurable quota drop (default 5%) to let exhausted pools recover in parallel.
+  - `round-robin`: Cycles accounts sequentially per request.
+  - `hybrid`: Weights remaining quota fraction against recent error rates.
+  - `sticky`: Pins to the active account until rate-limited.
+- Automatically isolates rate-limited or invalid credentials.
 
-### 3. TUI & CLI Management (Control Plane)
-- **Zero-Flicker Terminal TUI**: High-contrast, double-buffered terminal dashboard with instant account switching (`1`-`9`), OAuth re-authentication (`R`), and engine tuning.
-- **Zero-Downtime Hot Reloading**: Modifications to accounts or settings take effect immediately in the running proxy daemon without service interruptions.
-- **Developer Command Suite**: Purpose-built CLI shortcuts (`atc models`, `atc flex`, `atc daemon`, `atc accounts`, `atc defuse`, `atc settings`).
+### 3. TUI & CLI Management (`src/cli`, `bin/cli.js`)
+- Alternate-screen terminal dashboard with live quota bars and in-place OAuth login (`R`).
+- Hot-reloads configuration into daemon memory without dropped connections.
+- Standalone CLI commands for scripting and direct pool operations.
 
 ---
 
 ## Quick Start
 
-### 1. Installation
-
-From the project root:
+### 1. Install
 
 ```bash
 # Install dependencies
 pnpm install --allow-build=better-sqlite3
 
-# Link CLI command globally
+# Link binary globally
 npm link --force
 ```
 
-### 2. Automatic Initialization
+### 2. Initialize
 
-Run `atc init` to configure Claude Code settings and Windows boot startup automatically:
+Configures `~/.claude/settings.json` and optionally sets up background auto-start on Windows boot:
 
 ```bash
 atc init
 ```
 
-### 3. Open the Dashboard
+### 3. Launch Dashboard
 
-Simply run `atc` without arguments to launch the isolated TUI:
+Run `atc` without arguments to open the terminal UI:
 
 ```bash
 atc
@@ -76,62 +94,62 @@ atc
 
 ---
 
-## CLI Command Reference
+## CLI Reference
 
-### Lifecycle & Management
+### Daemon & Lifecycle
 
 | Command | Description |
 | :--- | :--- |
-| `atc` | Open the interactive TUI dashboard (default) |
-| `atc init` | One-touch setup: configure Claude Code and Windows startup |
-| `atc reinit` | Repair configuration and restart proxy daemon instance |
-| `atc defuse` | Safely remove Windows startup and Claude Code proxy bindings |
-| `atc uninstall` | Completely uninstall atc from PC (with option to keep or purge configs) |
-| `atc start [--log]` | Launch proxy daemon (background by default, or foreground live logs) |
-| `atc stop` | Shut down active proxy daemon |
+| `atc` | Open interactive TUI dashboard (default) |
+| `atc init` | Initial setup: configure Claude Code settings and Windows startup |
+| `atc reinit` | Re-sync configuration and restart daemon |
+| `atc defuse` | Remove Windows startup shortcut and Claude Code proxy settings |
+| `atc uninstall` | Remove daemon, configuration, and optionally purge `~/.config/atc` |
+| `atc start [--log]` | Start proxy daemon (background by default; `--log` runs in foreground) |
+| `atc stop` | Stop running proxy daemon |
 | `atc restart` | Restart proxy daemon |
-| `atc daemon` | Run deep health, latency, and account pool diagnostic on daemon |
+| `atc daemon` | Check daemon process, port binding, and HTTP health latency |
 
-### Accounts & Quotas
+### Accounts & Quota
 
 | Command | Description |
 | :--- | :--- |
-| `atc accounts` | List all saved accounts with index numbers, tiers, 5h-Cap, and weekly quotas |
-| `atc add [--no-browser]` | Link a new Google account via OAuth browser flow or manual URL |
-| `atc remove <id \| email>` | Remove an account from the pool by index (1-9) or email |
-| `atc switch <id \| email>` | Switch active routing account from the command line |
-| `atc toggle <id \| email>` | Enable or disable an account in the rotation pool |
-| `atc check` | Probe all accounts and refresh live quota metrics |
+| `atc accounts` | List configured accounts with ID, plan tier, 5h-cap, and weekly status |
+| `atc add [--no-browser]` | Add Google account via OAuth browser flow or manual URL |
+| `atc remove <id \| email>` | Remove account from pool by index (1-based) or email |
+| `atc switch <id \| email>` | Switch active routing account |
+| `atc toggle <id \| email>` | Enable or disable account in rotation pool |
+| `atc check` | Probe all accounts and refresh quota cache |
 
 ### Models & Settings
 
 | Command | Description |
 | :--- | :--- |
-| `atc models [--refresh]` | Probe and list available Antigravity backend models from top-tier account |
-| `atc mapid` | Display current Claude alias → backend model mappings |
-| `atc flex` | Auto-bind Claude 3.7 Sonnet & Opus to Google backend models |
-| `atc settings` / `atc config` | Directly open proxy engine settings and custom secret API key |
+| `atc models [--refresh]` | Probe backend models available to the highest-tier account in pool |
+| `atc mapid` | Print active model alias mappings |
+| `atc flex` | Configure Claude Code environment variables for flagship model IDs |
+| `atc settings` / `atc config` | Open proxy engine settings screen directly |
 
 ---
 
-## Dashboard Controls & Hotkeys
+## TUI Keybindings
 
 | Key | Action |
 | :--- | :--- |
-| `↑` / `↓` (or `k` / `j`) | Navigate between actions and accounts |
-| `Enter` | Select action, switch active account, or edit parameter |
-| `1` – `9` | Instant one-touch switch to account number |
-| `V` / `v` | Open Google Security Verification URL if account flagged |
-| `R` / `r` | In-place OAuth re-login for the highlighted account |
-| `T` / `t` | Toggle account enabled / disabled in rotation pool |
-| `D` / `d` | Delete account from pool with confirmation |
-| `Q` / `Esc` / `Ctrl+C` | Exit dashboard back to terminal |
+| `↑` / `↓` (`k` / `j`) | Navigate items |
+| `Enter` | Select action, switch account, or edit field |
+| `1` – `9` | Switch directly to account index |
+| `V` | Open Google verification URL in browser |
+| `R` | Re-authenticate selected account via OAuth |
+| `T` | Toggle selected account enabled / disabled |
+| `D` | Delete selected account |
+| `Esc` / `q` / `Ctrl+C` | Exit dashboard |
 
 ---
 
-## Claude Code CLI Configuration
+## Claude Code Configuration
 
-When running `atc init` or `atc flex`, Claude Code is automatically configured in `%USERPROFILE%\.claude\settings.json` (Windows) or `~/.claude/settings.json` (macOS / Linux):
+`atc init` writes the following settings to `%USERPROFILE%\.claude\settings.json` (Windows) or `~/.claude/settings.json` (macOS/Linux):
 
 ```json
 {
@@ -147,7 +165,7 @@ When running `atc init` or `atc flex`, Claude Code is automatically configured i
 }
 ```
 
-Once configured, simply run Claude Code normally:
+Once configured, run Claude Code:
 
 ```bash
 claude
@@ -157,4 +175,4 @@ claude
 
 ## License
 
-MIT License. See [LICENSE](LICENSE) for details.
+MIT
