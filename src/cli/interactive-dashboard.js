@@ -501,7 +501,7 @@ export async function runInteractiveDashboard(options = {}) {
             }
 
             if (it.type === 'action') {
-                let pointer = isSelected ? `\x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
+                let pointer = isSelected ? `  \x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
                 let text = '';
                 if (isSelected) {
                     text = `\x1b[1;38;5;255m${it.label}${c.reset}`;
@@ -618,7 +618,7 @@ export async function runInteractiveDashboard(options = {}) {
                 // Column 6: Role / Active tag
                 const currentBadge = it.isCurrent ? ` ${c.statusCurrent}[current]${c.reset}` : '';
 
-                let pointer = isSelected ? `\x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
+                let pointer = isSelected ? `  \x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
                 buf += `${pointer}${emailStr} ${planStr} ${fiveCol}${weekCol}${statusStr}${currentBadge}${c.clearToEndOfLine}\n`;
 
                 if (isSelected) {
@@ -637,11 +637,11 @@ export async function runInteractiveDashboard(options = {}) {
                         : 'Weekly: 100%';
 
                     if (hasVerifyUrl) {
-                        detailsLine = `${c.textMuted}Details:${c.reset} ${timeAgo} ${c.textDark}|${c.reset} ${c.statusDanger}Google check needed - press V to verify in browser, or R to re-login${c.reset}`;
+                        detailsLine = `${c.textMuted}Details:${c.reset} ${timeAgo} ${c.textDark}|${c.reset} ${c.statusDanger}Google check needed - press [V] to verify in browser, or [Space] for Account Menu${c.reset}`;
                     } else if (isBanned) {
                         detailsLine = `${c.textMuted}Details:${c.reset} ${timeAgo} ${c.textDark}|${c.reset} ${c.statusDanger}ToS / service restricted by Google - auto-refresh locked${c.reset}`;
                     } else if (isInvalid) {
-                        detailsLine = `${c.textMuted}Details:${c.reset} ${timeAgo} ${c.textDark}|${c.reset} ${c.statusDanger}invalid - press R to re-login${c.reset}`;
+                        detailsLine = `${c.textMuted}Details:${c.reset} ${timeAgo} ${c.textDark}|${c.reset} ${c.statusDanger}Token invalid - press [R] to re-login, or [Space] for Account Menu${c.reset}`;
                     } else {
                         detailsLine = `${c.textMuted}Details:${c.reset} ${timeAgo} ${c.textDark}|${c.reset} ${fiveStr} ${c.textDark}|${c.reset} ${weekStr}`;
                     }
@@ -656,8 +656,78 @@ export async function runInteractiveDashboard(options = {}) {
             buf += `${detailsLine || `${c.textMuted}Select an option or account above`}${c.reset}${c.clearToEndOfLine}\n`;
         }
 
+        /*
+         * Fixed 2-line context-aware shortcut bar so account keys (Verify,
+         * Re-login, Enable/Disable, Delete, Manage Menu) read as plain words
+         * instead of cryptic "V/R/T/D Acct" abbreviations without shifting row count.
+         */
+        const termWidth = process.stdout.columns || 100;
+        const fmtKey = (k, lbl) => `\x1b[38;5;252m[${k}]\x1b[0m \x1b[38;5;244m${lbl}\x1b[0m`;
+        const sep = `\x1b[38;5;239m · \x1b[0m`;
+        const selectedItem = items[selectedIndex];
+
+        let contextBar = '';
+        if (selectedItem?.type === 'account') {
+            const toggleWord = selectedItem.account?.enabled === false ? 'Enable' : 'Disable';
+            const hasVerify = !!(selectedItem.account?.verifyUrl || liveMap.get(selectedItem.account?.email)?.verifyUrl);
+            const verifyLabel = termWidth >= 114 ? 'Verify Browser' : 'Verify';
+            const verifyKey = hasVerify
+                ? `\x1b[1;38;5;214m[V]\x1b[0m \x1b[38;5;220m${verifyLabel}\x1b[0m`
+                : fmtKey('V', verifyLabel);
+            if (termWidth >= 114) {
+                contextBar = `\x1b[38;5;110mAccount:\x1b[0m ${[
+                    fmtKey('Enter', 'Set Active'),
+                    fmtKey('Space', 'Manage Menu'),
+                    fmtKey('R', 'Re-login'),
+                    fmtKey('T', toggleWord),
+                    verifyKey,
+                    fmtKey('D', 'Delete')
+                ].join(sep)}`;
+            } else {
+                const prefix = termWidth >= 92 ? `\x1b[38;5;110mAccount:\x1b[0m ` : '';
+                contextBar = `${prefix}${[
+                    fmtKey('Enter', 'Use'),
+                    fmtKey('Space', 'Menu'),
+                    fmtKey('R', 'Re-login'),
+                    fmtKey('T', toggleWord),
+                    verifyKey,
+                    fmtKey('D', 'Delete')
+                ].join(sep)}`;
+            }
+        } else if (selectedItem?.id === 'lb_strategy') {
+            contextBar = `\x1b[38;5;110mMode:\x1b[0m    ${[
+                fmtKey('Enter', 'Open Mode Selector & Risk Guide'),
+                fmtKey('←/→', 'Cycle Mode Inline')
+            ].join(sep)}`;
+        } else {
+            contextBar = `\x1b[38;5;110mAction:\x1b[0m  ${[
+                fmtKey('Enter', 'Open Selected Option'),
+                fmtKey('1-9', 'Switch Active Account')
+            ].join(sep)}`;
+        }
+        buf += `${contextBar}${c.clearToEndOfLine}\n`;
+
+        const tipToggleLabel = tipsVisible ? 'Hide Tip' : 'Show Tip';
+        const globalBar = termWidth >= 102
+            ? [
+                fmtKey('↑↓', 'Move'),
+                fmtKey('1-9', 'Switch Account'),
+                fmtKey('Ctrl+D', 'Safety Guide'),
+                fmtKey('X', tipToggleLabel),
+                fmtKey('Ctrl+R', 'Reload'),
+                fmtKey('Q', 'Quit')
+            ].join(sep)
+            : [
+                fmtKey('↑↓', 'Move'),
+                fmtKey('1-9', 'Switch'),
+                fmtKey('Ctrl+D', 'Guide'),
+                fmtKey('X', tipToggleLabel),
+                fmtKey('Ctrl+R', 'Reload'),
+                fmtKey('Q', 'Quit')
+            ].join(sep);
+
         // Fixed Footer line (no trailing newline to guarantee no terminal auto-scroll)
-        buf += `${c.textMuted}↑↓ Move | Enter Select | 1-9 Switch | Ctrl+D Tip | X Hide Tip | Ctrl+R Reload | V/R/T/D Acct | Q Back${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
+        buf += `${globalBar}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
 
         process.stdout.write(buf);
     }
@@ -996,7 +1066,7 @@ export async function runInteractiveDashboard(options = {}) {
                     for (let i = startIdx; i < endIdx; i++) {
                         const meta = settingsMeta[i];
                         const isSel = i === activeSettingIdx;
-                        const pointer = isSel ? `\x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
+                        const pointer = isSel ? `  \x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
                         const warn = getWarning(i);
 
                         let line = '';
@@ -1324,7 +1394,7 @@ export async function runInteractiveDashboard(options = {}) {
                         const st = stratCycle[i];
                         const isSel = i === selIdx;
                         const isActive = st.id === effectiveId;
-                        const pointer = isSel ? `\x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
+                        const pointer = isSel ? `  \x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
                         const activeMark = isActive ? ` ${c.statusCurrent}[active]${c.reset}` : '';
                         const nameStyled = isSel
                             ? `\x1b[1;38;5;255m${st.label.padEnd(28, ' ')}${c.reset}`
@@ -1624,7 +1694,7 @@ export async function runInteractiveDashboard(options = {}) {
                                 for (let i = 0; i < items.length; i++) {
                                     const it = items[i];
                                     const isSel = i === selectedIdx;
-                                    const pointer = isSel ? `\x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
+                                    const pointer = isSel ? `  \x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
                                     const val = it.getVal();
 
                                     let line = '';
@@ -1853,7 +1923,7 @@ export async function runInteractiveDashboard(options = {}) {
                                         continue;
                                     }
 
-                                    const pointer = isSel ? `\x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
+                                    const pointer = isSel ? `  \x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
                                     let line = '';
 
                                     if (it.type === 'env_var') {
@@ -2243,7 +2313,7 @@ export async function runInteractiveDashboard(options = {}) {
                                 for (let i = 0; i < problems.length; i++) {
                                     const p = problems[i];
                                     const isSel = i === selectedProblemIdx;
-                                    const pointer = isSel ? `\x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
+                                    const pointer = isSel ? `  \x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
 
                                     let badge = '';
                                     if (p.hasVerifyUrl) badge = `${c.statusDanger}[verify-req]${c.reset}`;
@@ -2333,23 +2403,226 @@ export async function runInteractiveDashboard(options = {}) {
                 }
             }
 
+            const getAccountVerifyUrl = (acc) => {
+                if (!acc) return null;
+                if (acc.verifyUrl) return acc.verifyUrl;
+                const liveAcc = Array.isArray(proxyHealth?.accounts)
+                    ? proxyHealth.accounts.find((a) => a.email === acc.email)
+                    : null;
+                return liveAcc?.verifyUrl || null;
+            };
+
+            const doVerifyAccount = async (cur) => {
+                const verifyUrl = getAccountVerifyUrl(cur.account);
+                if (verifyUrl) {
+                    try {
+                        const { exec } = await import('child_process');
+                        const startCmd = process.platform === 'win32' ? `start "" "${verifyUrl}"` : `open "${verifyUrl}"`;
+                        exec(startCmd);
+                        setStatus(`Opened Google verification link for Account ${cur.accountIndex + 1}.`, 2500);
+                    } catch {
+                        setStatus('Could not launch browser automatically. Verification URL is stored on account.', 2500);
+                    }
+                } else {
+                    setStatus(`Account ${cur.accountIndex + 1} has no pending Google verification link.`, 2200);
+                }
+            };
+
+            const doReloginAccount = async (cur) => {
+                const accNum = cur.accountIndex + 1;
+                await runSubScreen(async () => {
+                    console.log(`${c.actionGreen}Re-authenticating Account ${accNum} (${cur.account.email})...${c.reset}\n`);
+                    await loginAccount();
+                    console.log(`\n${c.actionGreen}✓ Re-authentication finished. Returning in 1.5s...${c.reset}`);
+                    await new Promise(r => setTimeout(r, 1500));
+                    setStatus(`Account ${accNum} re-authentication completed.`, 2000);
+                });
+            };
+
+            const doToggleAccount = async (cur) => {
+                const accNum = cur.accountIndex + 1;
+                const newStatus = await toggleAccount(accNum.toString());
+                setStatus(`Account ${accNum} (${cur.account.email}): ${newStatus}.`, 2000);
+                await refreshData();
+                items = getItems();
+                render();
+            };
+
+            const doDeleteAccount = async (cur) => {
+                const accNum = cur.accountIndex + 1;
+                await runSubScreen(async () => {
+                    console.log(`${c.statusDanger}Are you sure you want to delete Account ${accNum} (${cur.account.email})?${c.reset}`);
+                    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+                    const confirm = await new Promise(r => rl.question('Type "yes" to confirm deletion: ', r));
+                    rl.close();
+                    if (confirm.trim().toLowerCase() === 'yes') {
+                        await removeAccount(accNum.toString());
+                        console.log(`\n${c.actionGreen}✓ Account deleted. Returning to dashboard in 1.5s...${c.reset}`);
+                        await new Promise(r => setTimeout(r, 1500));
+                        setStatus(`Deleted Account ${accNum}.`, 2000);
+                    } else {
+                        setStatus('Account deletion cancelled.', 2000);
+                    }
+                });
+            };
+
+            const openAccountActionsMenu = async (cur) => {
+                const acc = cur.account;
+                const accNum = cur.accountIndex + 1;
+                const verifyUrl = getAccountVerifyUrl(acc);
+                const isDisabled = acc.enabled === false;
+                let pickedAction = null;
+
+                await runSubScreen(async () => {
+                    const menuItems = [
+                        {
+                            id: 'switch',
+                            keyHint: 'Enter',
+                            label: cur.isCurrent ? 'Keep as Active Account (Current)' : 'Set as Active Account',
+                            desc: 'Route proxy traffic through this account immediately'
+                        },
+                        {
+                            id: 'relogin',
+                            keyHint: 'R',
+                            label: 'Re-login via Google OAuth',
+                            desc: 'Open Google sign-in in browser to refresh an expired or revoked token'
+                        },
+                        {
+                            id: 'toggle',
+                            keyHint: 'T',
+                            label: isDisabled ? 'Enable Account in Pool' : 'Disable Account in Pool',
+                            desc: isDisabled
+                                ? 'Resume routing requests to this account'
+                                : 'Temporarily pause this account without deleting its saved token'
+                        },
+                        {
+                            id: 'verify',
+                            keyHint: 'V',
+                            label: verifyUrl ? 'Open Google Verification Link (Pending!)' : 'Open Google Verification Link (None Pending)',
+                            desc: verifyUrl
+                                ? 'Open Google security / Terms check URL in browser to clear [verify-req]'
+                                : 'No verification challenge is currently flagged on this account'
+                        },
+                        {
+                            id: 'delete',
+                            keyHint: 'D',
+                            label: 'Delete Account from atc',
+                            danger: true,
+                            desc: 'Permanently remove this account from accounts.json (asks confirmation)'
+                        },
+                        {
+                            id: 'cancel',
+                            keyHint: 'ESC',
+                            label: 'Back to Dashboard',
+                            desc: 'Return without making changes'
+                        }
+                    ];
+
+                    let selIdx = 0;
+
+                    function renderMenu() {
+                        let out = c.clearScreen + c.cursorHome;
+                        out += `${c.brandGreen}╭─────────────────────────────────────────────────────────────────╮${c.reset}\n`;
+                        out += `${c.brandGreen}│  Manage Account ${String(accNum).padEnd(2, ' ')}                                              │${c.reset}\n`;
+                        out += `${c.brandGreen}╰─────────────────────────────────────────────────────────────────╯${c.reset}\n`;
+                        out += `  ${c.textMuted}Email:${c.reset} \x1b[1;38;5;255m${acc.email}${c.reset}${cur.isCurrent ? ` ${c.statusCurrent}[current]${c.reset}` : ''}\n\n`;
+
+                        for (let i = 0; i < menuItems.length; i++) {
+                            const mi = menuItems[i];
+                            const isSel = i === selIdx;
+                            const pointer = isSel ? `  \x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
+                            const keyBadge = `\x1b[38;5;245m[${mi.keyHint}]\x1b[0m`;
+                            let labelStr = '';
+                            if (mi.danger) {
+                                labelStr = isSel
+                                    ? `\x1b[1;38;5;203m${mi.label.padEnd(44, ' ')}${c.reset}`
+                                    : `\x1b[38;5;167m${mi.label.padEnd(44, ' ')}${c.reset}`;
+                            } else {
+                                labelStr = isSel
+                                    ? `\x1b[1;38;5;255m${mi.label.padEnd(44, ' ')}${c.reset}`
+                                    : `\x1b[38;5;250m${mi.label.padEnd(44, ' ')}${c.reset}`;
+                            }
+                            out += `${pointer}${labelStr} ${keyBadge}${c.clearToEndOfLine}\n`;
+                        }
+
+                        const curMi = menuItems[selIdx];
+                        out += `\n${c.textMuted}───────────────────────────────────────────────────────────────────${c.reset}\n`;
+                        out += `${c.textMuted}Details:${c.reset} ${c.textNormal}${curMi.desc}${c.reset}${c.clearToEndOfLine}\n`;
+                        out += `${c.textMuted}[↑↓] Move  ·  [Enter] Run Action  ·  [R/T/V/D] Direct Shortcut  ·  [ESC] Back${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
+                        process.stdout.write(out);
+                    }
+
+                    await new Promise((resolve) => {
+                        if (process.stdin.isTTY) process.stdin.setRawMode(true);
+                        readline.emitKeypressEvents(process.stdin);
+
+                        function onKey(str, key) {
+                            if (!key) return;
+                            if (key.name === 'escape' || key.name === 'q' || key.name === 'space' || (key.ctrl && key.name === 'c')) {
+                                process.stdin.removeListener('keypress', onKey);
+                                resolve();
+                                return;
+                            }
+                            if (key.name === 'up' || key.name === 'k') {
+                                selIdx = (selIdx - 1 + menuItems.length) % menuItems.length;
+                                renderMenu();
+                                return;
+                            }
+                            if (key.name === 'down' || key.name === 'j') {
+                                selIdx = (selIdx + 1) % menuItems.length;
+                                renderMenu();
+                                return;
+                            }
+                            if (!key.ctrl && !key.meta && ['r', 't', 'v', 'd'].includes(key.name)) {
+                                const map = { r: 'relogin', t: 'toggle', v: 'verify', d: 'delete' };
+                                pickedAction = map[key.name];
+                                process.stdin.removeListener('keypress', onKey);
+                                resolve();
+                                return;
+                            }
+                            if (key.name === 'return' || key.name === 'enter') {
+                                pickedAction = menuItems[selIdx].id;
+                                process.stdin.removeListener('keypress', onKey);
+                                resolve();
+                            }
+                        }
+
+                        process.stdin.on('keypress', onKey);
+                        renderMenu();
+                    });
+                });
+
+                if (!pickedAction || pickedAction === 'cancel') return;
+                if (pickedAction === 'switch') {
+                    setStatus(`Switching to Account ${accNum} (${acc.email})...`, 2000);
+                    await switchAccount(accNum.toString());
+                    await refreshData();
+                    items = getItems();
+                    render();
+                } else if (pickedAction === 'relogin') {
+                    await doReloginAccount(cur);
+                } else if (pickedAction === 'toggle') {
+                    await doToggleAccount(cur);
+                } else if (pickedAction === 'verify') {
+                    await doVerifyAccount(cur);
+                } else if (pickedAction === 'delete') {
+                    await doDeleteAccount(cur);
+                }
+            };
+
             // Keyboard Shortcuts (guarded against Ctrl/Alt chord collisions such as Ctrl+D / Ctrl+R)
+            if (!key.ctrl && !key.meta && (key.name === 'space' || key.name === 'a' || key.name === 'm')) {
+                const cur = items[selectedIndex];
+                if (cur && cur.type === 'account') {
+                    await openAccountActionsMenu(cur);
+                }
+                return;
+            }
+
             if (!key.ctrl && !key.meta && key.name === 'v') {
                 const cur = items[selectedIndex];
                 if (cur && cur.type === 'account') {
-                    const acc = cur.account;
-                    if (acc.verifyUrl) {
-                        try {
-                            const { exec } = await import('child_process');
-                            const startCmd = process.platform === 'win32' ? `start "" "${acc.verifyUrl}"` : `open "${acc.verifyUrl}"`;
-                            exec(startCmd);
-                            setStatus(`Opened verification link for Account ${cur.accountIndex + 1}.`, 2000);
-                        } catch {
-                            setStatus('Could not open browser. Verify URL present in account.', 2000);
-                        }
-                    } else {
-                        setStatus(`Account ${cur.accountIndex + 1} has no pending Google verification link.`, 2000);
-                    }
+                    await doVerifyAccount(cur);
                 }
                 return;
             }
@@ -2357,14 +2630,7 @@ export async function runInteractiveDashboard(options = {}) {
             if (!key.ctrl && !key.meta && key.name === 'r') {
                 const cur = items[selectedIndex];
                 if (cur && cur.type === 'account') {
-                    const accNum = cur.accountIndex + 1;
-                    await runSubScreen(async () => {
-                        console.log(`${c.actionGreen}Re-authenticating Account ${accNum} (${cur.account.email})...${c.reset}\n`);
-                        await loginAccount();
-                        console.log(`\n${c.actionGreen}✓ Re-authentication finished. Returning in 1.5s...${c.reset}`);
-                        await new Promise(r => setTimeout(r, 1500));
-                        setStatus(`Account ${accNum} re-authentication completed.`, 2000);
-                    });
+                    await doReloginAccount(cur);
                 }
                 return;
             }
@@ -2372,12 +2638,7 @@ export async function runInteractiveDashboard(options = {}) {
             if (!key.ctrl && !key.meta && key.name === 't') {
                 const cur = items[selectedIndex];
                 if (cur && cur.type === 'account') {
-                    const accNum = cur.accountIndex + 1;
-                    const newStatus = await toggleAccount(accNum.toString());
-                    setStatus(`Toggled Account ${accNum}: ${newStatus}.`, 2000);
-                    await refreshData();
-                    items = getItems();
-                    render();
+                    await doToggleAccount(cur);
                 }
                 return;
             }
@@ -2385,21 +2646,7 @@ export async function runInteractiveDashboard(options = {}) {
             if (!key.ctrl && !key.meta && key.name === 'd') {
                 const cur = items[selectedIndex];
                 if (cur && cur.type === 'account') {
-                    const accNum = cur.accountIndex + 1;
-                    await runSubScreen(async () => {
-                        console.log(`${c.statusDanger}Are you sure you want to delete Account ${accNum} (${cur.account.email})?${c.reset}`);
-                        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-                        const confirm = await new Promise(r => rl.question('Type "yes" to confirm deletion: ', r));
-                        rl.close();
-                        if (confirm.trim().toLowerCase() === 'yes') {
-                            await removeAccount(accNum.toString());
-                            console.log(`\n${c.actionGreen}✓ Account deleted. Returning to dashboard in 1.5s...${c.reset}`);
-                            await new Promise(r => setTimeout(r, 1500));
-                            setStatus(`Deleted Account ${accNum}.`, 2000);
-                        } else {
-                            setStatus('Account deletion cancelled.', 2000);
-                        }
-                    });
+                    await doDeleteAccount(cur);
                 }
                 return;
             }
