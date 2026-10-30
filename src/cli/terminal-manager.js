@@ -17,6 +17,24 @@ import { loadAccounts, saveAccounts } from '../account-manager/storage.js';
 const CONFIG_DIR = dirname(ACCOUNT_CONFIG_PATH);
 const PID_FILE = join(CONFIG_DIR, 'server.pid');
 
+// ANSI Terminal Colors
+const c = {
+    reset: '\x1b[0m',
+    bold: '\x1b[1m',
+    dim: '\x1b[2m',
+    red: '\x1b[31m',
+    green: '\x1b[32m',
+    yellow: '\x1b[33m',
+    blue: '\x1b[34m',
+    magenta: '\x1b[35m',
+    cyan: '\x1b[36m',
+    gray: '\x1b[90m',
+    brightGreen: '\x1b[92m',
+    brightYellow: '\x1b[93m',
+    brightCyan: '\x1b[96m',
+    brightRed: '\x1b[91m'
+};
+
 /**
  * Read current proxy port from config or environment
  */
@@ -81,10 +99,22 @@ function formatTimeAgo(isoString) {
  * Format reset target time
  */
 function formatResetTime(isoString) {
-    if (!isoString) return 'unknown';
+    if (!isoString) return `${c.gray}unknown${c.reset}`;
     const diff = new Date(isoString).getTime() - Date.now();
-    if (diff <= 0) return 'now';
-    return `in ${formatDuration(diff)} (${isoString})`;
+    if (diff <= 0) return `${c.green}now${c.reset}`;
+    return `${c.brightYellow}in ${formatDuration(diff)}${c.reset} ${c.gray}(${isoString})${c.reset}`;
+}
+
+/**
+ * Colorize percentage values
+ */
+function formatPercentage(str, fraction) {
+    if (typeof fraction === 'number') {
+        if (fraction >= 0.5) return `${c.green}${str}${c.reset}`;
+        if (fraction >= 0.2) return `${c.yellow}${str}${c.reset}`;
+        return `${c.red}${str}${c.reset}`;
+    }
+    return `${c.green}${str}${c.reset}`;
 }
 
 /**
@@ -141,21 +171,27 @@ export async function showAccountStatus() {
         // offline
     }
 
-    console.log('\natc (Antigravity to Claude)');
-    console.log(`Accounts (${accounts.length})`);
-    console.log(`Storage: ${ACCOUNT_CONFIG_PATH}`);
+    console.log(`\n${c.bold}${c.brightCyan}atc${c.reset} ${c.gray}(Antigravity to Claude)${c.reset}`);
+    console.log(`${c.bold}Accounts (${accounts.length})${c.reset}`);
+    console.log(`${c.gray}Storage:${c.reset} ${ACCOUNT_CONFIG_PATH}`);
     if (proxyData) {
         const pidStr = pid ? `, pid: ${pid}` : '';
-        console.log(`Proxy:   http://127.0.0.1:${port} [active${pidStr}, latency: ${pingLatency}ms]`);
+        console.log(`Proxy:   http://127.0.0.1:${port} [${c.brightGreen}active${c.reset}${pidStr}, latency: ${c.cyan}${pingLatency}ms${c.reset}]`);
         if (proxyData.summary) {
-            console.log(`Summary: ${proxyData.summary}`);
+            // Colorize summary keywords
+            const coloredSummary = proxyData.summary
+                .replace(/(\d+ total)/, `${c.bold}$1${c.reset}`)
+                .replace(/(\d+ available)/, `${c.green}$1${c.reset}`)
+                .replace(/(\d+ rate-limited)/, (m) => m.startsWith('0') ? `${c.gray}${m}${c.reset}` : `${c.yellow}${m}${c.reset}`)
+                .replace(/(\d+ invalid)/, (m) => m.startsWith('0') ? `${c.gray}${m}${c.reset}` : `${c.red}${m}${c.reset}`);
+            console.log(`Summary: ${coloredSummary}`);
         }
     } else {
-        console.log(`Proxy:   http://127.0.0.1:${port} [offline]`);
+        console.log(`Proxy:   http://127.0.0.1:${port} [${c.red}offline${c.reset}]`);
     }
 
     if (accounts.length === 0) {
-        console.log('\nNo accounts configured. Run "atc login" to link a Google account.\n');
+        console.log(`\n${c.yellow}No accounts configured. Run "atc login" to link a Google account.${c.reset}\n`);
         return;
     }
 
@@ -180,16 +216,16 @@ export async function showAccountStatus() {
         ) || (live.rateLimitCooldownRemaining > 0);
 
         let stateTags = [];
-        if (isCurrent) stateTags.push('current');
-        if (!acc.enabled) stateTags.push('disabled');
-        else if (isInvalid) stateTags.push('invalid');
-        else if (isLimited) stateTags.push('rate-limited');
-        else stateTags.push('ready');
+        if (isCurrent) stateTags.push(`${c.bold}${c.brightGreen}current${c.reset}`);
+        if (!acc.enabled) stateTags.push(`${c.gray}disabled${c.reset}`);
+        else if (isInvalid) stateTags.push(`${c.bold}${c.brightRed}invalid${c.reset}`);
+        else if (isLimited) stateTags.push(`${c.yellow}rate-limited${c.reset}`);
+        else stateTags.push(`${c.green}ready${c.reset}`);
 
         const tagStr = `[${stateTags.join(', ')}]`;
         const lastUsedStr = formatTimeAgo(acc.lastUsed);
 
-        console.log(`${i + 1}. Account ${i + 1} (${acc.email}) ${tagStr} last used ${lastUsedStr}`);
+        console.log(`${c.bold}${c.cyan}${i + 1}.${c.reset} Account ${i + 1} (${c.bold}${acc.email}${c.reset}) ${tagStr} ${c.gray}last used ${lastUsedStr}${c.reset}`);
 
         // Health and quota details
         const models = live.models || {};
@@ -207,23 +243,24 @@ export async function showAccountStatus() {
             for (const km of keyModels) {
                 if (models[km]) {
                     const label = km.replace('gemini-', '').replace('claude-', '');
-                    summaryParts.push(`${label}: ${models[km].remaining} left`);
+                    const qFormatted = formatPercentage(models[km].remaining, models[km].remainingFraction);
+                    summaryParts.push(`${label}: ${qFormatted} left`);
                 }
             }
 
             if (summaryParts.length > 0) {
-                console.log(`   quota: ${summaryParts.join(' · ')}`);
+                console.log(`   ${c.gray}quota:${c.reset} ${summaryParts.join(' · ')}`);
             }
 
             // Show reset time for primary flash model
             const primaryModel = models['gemini-3.8-flash-high'] || models['gemini-3.8-flash-medium'] || models[modelKeys[0]];
             if (primaryModel && primaryModel.resetTime) {
-                console.log(`   resets: ${formatResetTime(primaryModel.resetTime)}`);
+                console.log(`   ${c.gray}resets:${c.reset} ${formatResetTime(primaryModel.resetTime)}`);
             }
         } else if (acc.isInvalid) {
-            console.log(`   status: invalid (${acc.invalidReason || 'verification needed'})`);
+            console.log(`   ${c.red}status: invalid (${acc.invalidReason || 'verification needed'})${c.reset}`);
         } else {
-            console.log('   quota: live stats not cached; run "atc check" to probe');
+            console.log(`   ${c.gray}quota: live stats not cached; run "atc check" to probe${c.reset}`);
         }
 
         // Forecast score calculation
@@ -242,9 +279,9 @@ export async function showAccountStatus() {
 
     console.log('');
     if (bestCandidate) {
-        console.log(`Forecast suggestion: Account ${bestCandidate.index} (${bestCandidate.email}) [readiness score ${bestCandidate.score}/100].`);
+        console.log(`${c.bold}Forecast suggestion:${c.reset} ${c.brightCyan}Account ${bestCandidate.index} (${bestCandidate.email})${c.reset} [${c.green}readiness score ${bestCandidate.score}/100${c.reset}].`);
     }
-    console.log(`Current active account: Account ${activeIndex + 1} (${accounts[activeIndex]?.email || 'none'})\n`);
+    console.log(`${c.bold}Current active account:${c.reset} ${c.brightGreen}Account ${activeIndex + 1} (${accounts[activeIndex]?.email || 'none'})${c.reset}\n`);
 }
 
 /**
@@ -252,13 +289,13 @@ export async function showAccountStatus() {
  */
 export async function switchAccount(target) {
     if (!target) {
-        console.error('Usage: atc switch <number | email>');
+        console.error(`${c.red}Usage:${c.reset} atc switch <number | email>`);
         process.exit(1);
     }
 
     const { accounts, settings, activeIndex } = await loadAccounts(ACCOUNT_CONFIG_PATH);
     if (accounts.length === 0) {
-        console.error('No accounts configured in proxy.');
+        console.error(`${c.red}Error:${c.reset} No accounts configured in proxy.`);
         process.exit(1);
     }
 
@@ -273,7 +310,7 @@ export async function switchAccount(target) {
     }
 
     if (targetIndex === -1) {
-        console.error(`Error: Could not find account matching "${target}".`);
+        console.error(`${c.red}Error:${c.reset} Could not find account matching "${target}".`);
         console.log(`Available accounts: 1 to ${accounts.length}`);
         process.exit(1);
     }
@@ -289,13 +326,13 @@ export async function switchAccount(target) {
         reloaded = await notifyProxyReload(port);
     }
 
-    console.log(`\n✓ Switched active account to: [${targetIndex + 1}] ${targetAccount.email}`);
+    console.log(`\n${c.green}✓${c.reset} Switched active account to: [${targetIndex + 1}] ${c.bold}${targetAccount.email}${c.reset}`);
     if (reloaded) {
-        console.log(`  Proxy daemon notified (hot-reloaded on port ${port}).\n`);
+        console.log(`  ${c.gray}Proxy daemon notified (hot-reloaded on port ${port}).${c.reset}\n`);
     } else if (pid) {
-        console.log(`  Proxy is running on port ${port}. Changes saved to disk.\n`);
+        console.log(`  ${c.gray}Proxy is running on port ${port}. Changes saved to disk.${c.reset}\n`);
     } else {
-        console.log('  Proxy is currently offline. Selection saved to disk.\n');
+        console.log(`  ${c.yellow}Proxy is currently offline. Selection saved to disk.${c.reset}\n`);
     }
 }
 
@@ -305,18 +342,18 @@ export async function switchAccount(target) {
 export async function checkAccounts() {
     const { accounts, settings, activeIndex } = await loadAccounts(ACCOUNT_CONFIG_PATH);
     if (accounts.length === 0) {
-        console.log('No accounts configured to check.');
+        console.log(`${c.yellow}No accounts configured to check.${c.reset}`);
         return;
     }
 
-    console.log(`\nProbing ${accounts.length} account credential(s)...\n`);
+    console.log(`\n${c.bold}Probing ${accounts.length} account credential(s)...${c.reset}\n`);
 
     for (let i = 0; i < accounts.length; i++) {
         const acc = accounts[i];
-        process.stdout.write(`  [${i + 1}/${accounts.length}] ${acc.email} ... `);
+        process.stdout.write(`  [${i + 1}/${accounts.length}] ${c.bold}${acc.email}${c.reset} ... `);
 
         if (!acc.refreshToken) {
-            console.log('SKIPPED (no refresh token)');
+            console.log(`${c.gray}SKIPPED (no refresh token)${c.reset}`);
             continue;
         }
 
@@ -325,11 +362,11 @@ export async function checkAccounts() {
             const email = await getUserEmail(tokens.accessToken);
             acc.isInvalid = false;
             acc.invalidReason = null;
-            console.log(`OK (authenticated as ${email})`);
+            console.log(`${c.green}OK${c.reset} ${c.gray}(authenticated as ${email})${c.reset}`);
         } catch (err) {
             acc.isInvalid = true;
             acc.invalidReason = err.message;
-            console.log(`FAILED (${err.message})`);
+            console.log(`${c.red}FAILED (${err.message})${c.reset}`);
         }
     }
 
@@ -338,7 +375,7 @@ export async function checkAccounts() {
     const port = getProxyPort();
     await notifyProxyReload(port);
 
-    console.log('\nProbe completed. Run "atc status" to view updated account pool.\n');
+    console.log(`\n${c.green}✓${c.reset} Probe completed. Run "atc status" to view updated account pool.\n`);
 }
 
 /**
@@ -348,13 +385,13 @@ export async function loginAccount(options = {}) {
     const noBrowser = !!options.noBrowser;
     const { accounts, settings, activeIndex } = await loadAccounts(ACCOUNT_CONFIG_PATH);
 
-    console.log('\n=== Antigravity Account Login ===\n');
+    console.log(`\n${c.bold}${c.brightCyan}=== Antigravity Account Login ===${c.reset}\n`);
 
     const { url, verifier, state } = getAuthorizationUrl();
 
     if (noBrowser) {
         console.log('Open this URL in a browser on any machine:\n');
-        console.log(`   ${url}\n`);
+        console.log(`   ${c.cyan}${url}${c.reset}\n`);
         console.log('After sign-in, copy the redirect URL or authorization code.\n');
 
         const rl = createInterface({ input: stdin, output: stdout });
@@ -367,13 +404,13 @@ export async function loginAccount(options = {}) {
             const result = await completeOAuthFlow(code, verifier);
             await recordNewAccount(result, accounts, settings, activeIndex);
         } catch (err) {
-            console.error(`\n✗ Authentication failed: ${err.message}\n`);
+            console.error(`\n${c.red}✗ Authentication failed: ${err.message}${c.reset}\n`);
         }
         return;
     }
 
     console.log('Opening browser for Google authorization...');
-    console.log(`(Manual link if browser does not open: ${url})\n`);
+    console.log(`(Manual link if browser does not open: ${c.cyan}${url}${c.reset})\n`);
     openBrowser(url);
 
     console.log('Listening for OAuth callback on localhost (timeout 2m)...');
@@ -384,7 +421,7 @@ export async function loginAccount(options = {}) {
         const result = await completeOAuthFlow(code, verifier);
         await recordNewAccount(result, accounts, settings, activeIndex);
     } catch (err) {
-        console.error(`\n✗ OAuth sign-in error: ${err.message}\n`);
+        console.error(`\n${c.red}✗ OAuth sign-in error: ${err.message}${c.reset}\n`);
     }
 }
 
@@ -400,7 +437,7 @@ async function recordNewAccount(result, accounts, settings, activeIndex) {
         accounts[existingIndex].invalidReason = null;
         accounts[existingIndex].enabled = true;
         accounts[existingIndex].addedAt = new Date().toISOString();
-        console.log(`\n✓ Refreshed credentials for existing account: ${result.email}`);
+        console.log(`\n${c.green}✓${c.reset} Refreshed credentials for existing account: ${c.bold}${result.email}${c.reset}`);
     } else {
         accounts.push({
             email: result.email,
@@ -412,7 +449,7 @@ async function recordNewAccount(result, accounts, settings, activeIndex) {
             invalidReason: null,
             modelRateLimits: {}
         });
-        console.log(`\n✓ Successfully linked account: ${result.email}`);
+        console.log(`\n${c.green}✓${c.reset} Successfully linked account: ${c.bold}${result.email}${c.reset}`);
     }
 
     await saveAccounts(ACCOUNT_CONFIG_PATH, accounts, settings, activeIndex);
@@ -420,9 +457,9 @@ async function recordNewAccount(result, accounts, settings, activeIndex) {
     const port = getProxyPort();
     const reloaded = await notifyProxyReload(port);
     if (reloaded) {
-        console.log(`  Hot-reloaded proxy pool on port ${port} (zero downtime).\n`);
+        console.log(`  ${c.gray}Hot-reloaded proxy pool on port ${port} (zero downtime).${c.reset}\n`);
     } else {
-        console.log('  Accounts saved to disk.\n');
+        console.log(`  ${c.gray}Accounts saved to disk.${c.reset}\n`);
     }
 }
 
@@ -432,7 +469,7 @@ async function recordNewAccount(result, accounts, settings, activeIndex) {
 export async function removeAccount(target) {
     const { accounts, settings, activeIndex } = await loadAccounts(ACCOUNT_CONFIG_PATH);
     if (accounts.length === 0) {
-        console.log('No accounts configured to remove.');
+        console.log(`${c.yellow}No accounts configured to remove.${c.reset}`);
         return;
     }
 
@@ -445,7 +482,7 @@ export async function removeAccount(target) {
     }
 
     if (idx === -1) {
-        console.error(`Error: Could not find account matching "${target}".`);
+        console.error(`${c.red}Error:${c.reset} Could not find account matching "${target}".`);
         return;
     }
 
@@ -457,7 +494,7 @@ export async function removeAccount(target) {
     const port = getProxyPort();
     await notifyProxyReload(port);
 
-    console.log(`\n✓ Unlinked account: ${removed.email} (${accounts.length} remaining)\n`);
+    console.log(`\n${c.green}✓${c.reset} Unlinked account: ${c.bold}${removed.email}${c.reset} (${accounts.length} remaining)\n`);
 }
 
 /**
@@ -466,7 +503,7 @@ export async function removeAccount(target) {
 export async function toggleAccount(target) {
     const { accounts, settings, activeIndex } = await loadAccounts(ACCOUNT_CONFIG_PATH);
     if (accounts.length === 0) {
-        console.log('No accounts configured.');
+        console.log(`${c.yellow}No accounts configured.${c.reset}`);
         return;
     }
 
@@ -479,7 +516,7 @@ export async function toggleAccount(target) {
     }
 
     if (idx === -1) {
-        console.error(`Error: Could not find account matching "${target}".`);
+        console.error(`${c.red}Error:${c.reset} Could not find account matching "${target}".`);
         return;
     }
 
@@ -491,7 +528,8 @@ export async function toggleAccount(target) {
     const port = getProxyPort();
     await notifyProxyReload(port);
 
-    console.log(`\n✓ Account [${idx + 1}] ${acc.email} is now ${acc.enabled ? 'ENABLED' : 'DISABLED'}.\n`);
+    const stateLabel = acc.enabled ? `${c.green}ENABLED${c.reset}` : `${c.yellow}DISABLED${c.reset}`;
+    console.log(`\n${c.green}✓${c.reset} Account [${idx + 1}] ${c.bold}${acc.email}${c.reset} is now ${stateLabel}.\n`);
 }
 
 /**
@@ -507,8 +545,8 @@ export function showModelMappings() {
         } catch {}
     }
 
-    console.log('\nClaude CLI Alias → Backend Model Mappings:');
-    console.log('─'.repeat(60));
+    console.log(`\n${c.bold}Claude CLI Alias → Backend Model Mappings:${c.reset}`);
+    console.log(`${c.gray}${'─'.repeat(60)}${c.reset}`);
     const entries = Object.entries(mapping);
     if (entries.length === 0) {
         console.log('No custom mappings defined in config.json.');
@@ -517,8 +555,8 @@ export function showModelMappings() {
 
     for (const [alias, target] of entries) {
         const dest = typeof target === 'string' ? target : (target.mapping || JSON.stringify(target));
-        console.log(`  ${alias.padEnd(28)} → ${dest}`);
+        console.log(`  ${c.cyan}${alias.padEnd(28)}${c.reset} ${c.gray}→${c.reset} ${c.brightGreen}${dest}${c.reset}`);
     }
-    console.log('─'.repeat(60));
-    console.log(`Total: ${entries.length} model aliases configured.\n`);
+    console.log(`${c.gray}${'─'.repeat(60)}${c.reset}`);
+    console.log(`Total: ${c.bold}${entries.length}${c.reset} model aliases configured.\n`);
 }
