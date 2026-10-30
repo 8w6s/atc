@@ -7,7 +7,6 @@
 import crypto from 'crypto';
 import {
     ANTIGRAVITY_HEADERS,
-    ANTIGRAVITY_SYSTEM_INSTRUCTION,
     getModelFamily,
     isThinkingModel
 } from '../constants.js';
@@ -71,16 +70,9 @@ export function buildCloudCodeRequest(anthropicRequest, projectId, accountEmail)
     // Use stable session ID derived from first user message for cache continuity
     googleRequest.sessionId = deriveSessionId(anthropicRequest, accountEmail);
 
-    // Build system instruction parts array with [ignore] tags to prevent model from
-    // identifying as "Antigravity" (fixes GitHub issue #76)
-    // Reference: CLIProxyAPI, gcli2api, AIClient-2-API all use this approach
-    const systemParts = [
-        { text: ANTIGRAVITY_SYSTEM_INSTRUCTION },
-        { text: `Please ignore the following [ignore]${ANTIGRAVITY_SYSTEM_INSTRUCTION}[/ignore]` }
-    ];
-
-    // Append any existing system instructions from the request, scrubbing
-    // third-party AI product identities that trip cloudcode-pa's 429 (see above).
+    // Use caller's system instructions directly without injecting synthetic preambles.
+    // Scrub third-party AI product identities that trip cloudcode-pa's 429 filter.
+    const systemParts = [];
     if (googleRequest.systemInstruction && googleRequest.systemInstruction.parts) {
         for (const part of googleRequest.systemInstruction.parts) {
             if (part.text) {
@@ -98,11 +90,15 @@ export function buildCloudCodeRequest(anthropicRequest, projectId, accountEmail)
         requestId: 'agent-' + crypto.randomUUID()
     };
 
-    // Inject systemInstruction with role: "user" at the top level (CLIProxyAPI v6.6.89 behavior)
-    payload.request.systemInstruction = {
-        role: 'user',
-        parts: systemParts
-    };
+    // Inject systemInstruction with role: "user" at the top level
+    if (systemParts.length > 0) {
+        payload.request.systemInstruction = {
+            role: 'user',
+            parts: systemParts
+        };
+    } else {
+        delete payload.request.systemInstruction;
+    }
 
     return payload;
 }

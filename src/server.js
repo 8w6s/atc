@@ -252,6 +252,17 @@ app.all(['/api/accounts/reload', '/reload'], async (req, res) => {
 });
 
 /**
+ * Graceful shutdown endpoint
+ */
+app.post('/api/shutdown', (req, res) => {
+    res.json({ status: 'ok', message: 'Proxy shutting down' });
+    setTimeout(() => {
+        logger.info('[Server] Gracefully exited via shutdown endpoint');
+        process.exit(0);
+    }, 150);
+});
+
+/**
  * Health check endpoint - Detailed status
  * Returns status of all accounts including rate limits and model quotas
  */

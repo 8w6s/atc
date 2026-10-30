@@ -227,7 +227,7 @@ async function checkProxyHealth(port = getPort(), timeoutMs = 10000) {
 
   while (Date.now() - startTime < timeoutMs) {
     try {
-      const res = await fetch(healthUrl, { signal: AbortSignal.timeout(1500) });
+      const res = await fetch(healthUrl, { signal: AbortSignal.timeout(3500) });
       if (res.ok) {
         return true;
       }
@@ -368,8 +368,17 @@ async function startServer() {
  * Stop the running server gracefully
  */
 async function stopServer({ silent = false } = {}) {
+  const port = getPort();
   const pid = getServicePid();
   let stopped = false;
+
+  // Try HTTP graceful shutdown first (works across users/permissions without taskkill errors)
+  try {
+    await fetch(`http://127.0.0.1:${port}/api/shutdown`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(1000)
+    });
+  } catch {}
 
   if (pid && isPidRunning(pid)) {
     try {
@@ -392,7 +401,6 @@ async function stopServer({ silent = false } = {}) {
   cleanupPidFile();
 
   // Wait for port release
-  const port = getPort();
   for (let i = 0; i < 10; i++) {
     const inUse = await isPortInUse(port);
     if (!inUse) break;
