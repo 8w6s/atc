@@ -395,6 +395,11 @@ USAGE
   atc status         Print quick non-interactive accounts overview
   atc switch <id>    Switch active account by index (1-9) or email
 
+━━━ SYSTEM & SETUP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  atc init           Configure Claude Code and setup Windows autostart
+  atc reinit         Re-sync Claude Code settings, refresh startup & restart
+  atc remove         Remove atc from Windows autostart and cleanup
+
 ━━━ PROXY DAEMON ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   atc start [--log]  Launch proxy daemon (background by default)
   atc stop           Shut down proxy daemon
@@ -420,6 +425,172 @@ USAGE
 
 function showVersion() {
   console.log(packageJson.version);
+}
+
+
+// Startup & Claude Code configuration paths
+const STARTUP_DIR = join(
+  process.env.APPDATA || join(process.env.USERPROFILE || '', 'AppData', 'Roaming'),
+  'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup'
+);
+const STARTUP_VBS = join(STARTUP_DIR, 'atc-proxy.vbs');
+const CLAUDE_DIR = join(process.env.HOME || process.env.USERPROFILE || '', '.claude');
+const CLAUDE_SETTINGS = join(CLAUDE_DIR, 'settings.json');
+
+function configureClaudeCode(port = 43128) {
+  if (!existsSync(CLAUDE_DIR)) {
+    mkdirSync(CLAUDE_DIR, { recursive: true });
+  }
+  let settings = {};
+  if (existsSync(CLAUDE_SETTINGS)) {
+    try {
+      settings = JSON.parse(readFileSync(CLAUDE_SETTINGS, 'utf-8'));
+    } catch {
+      settings = {};
+    }
+  }
+  settings.env = settings.env || {};
+  settings.env.ANTHROPIC_BASE_URL = `http://localhost:${port}`;
+  if (!settings.env.ANTHROPIC_API_KEY) {
+    settings.env.ANTHROPIC_API_KEY = 'atc-local-key';
+  }
+  writeFileSync(CLAUDE_SETTINGS, JSON.stringify(settings, null, 2), 'utf-8');
+}
+
+function unconfigureClaudeCode() {
+  if (existsSync(CLAUDE_SETTINGS)) {
+    try {
+      const settings = JSON.parse(readFileSync(CLAUDE_SETTINGS, 'utf-8'));
+      if (settings.env) {
+        delete settings.env.ANTHROPIC_BASE_URL;
+        if (settings.env.ANTHROPIC_API_KEY === 'atc-local-key') {
+          delete settings.env.ANTHROPIC_API_KEY;
+        }
+        writeFileSync(CLAUDE_SETTINGS, JSON.stringify(settings, null, 2), 'utf-8');
+      }
+    } catch {}
+  }
+}
+
+function installWindowsStartup(cliPath) {
+  if (process.platform !== 'win32') return false;
+  if (!existsSync(STARTUP_DIR)) {
+    mkdirSync(STARTUP_DIR, { recursive: true });
+  }
+  const cleanPath = cliPath.replace(/\\/g, '\\\\');
+  const vbsContent = 'Set WshShell = CreateObject("WScript.Shell")\r\nWshShell.Run "node """ & "' + cleanPath + '" & """ start", 0, False\r\n';
+  writeFileSync(STARTUP_VBS, vbsContent, 'utf-8');
+  return true;
+}
+
+function removeWindowsStartup() {
+  if (existsSync(STARTUP_VBS)) {
+    try {
+      unlinkSync(STARTUP_VBS);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+function isWindowsStartupInstalled() {
+  return existsSync(STARTUP_VBS);
+}
+
+async function initCommand() {
+  console.log('\n╭────────────────────────────────────────────────╮');
+  console.log('│  ⚡ Initializing atc (Antigravity to Claude)   │');
+  console.log('╰────────────────────────────────────────────────╯\n');
+
+  const port = getPort();
+  configureClaudeCode(port);
+  console.log(`✓ Configured Claude Code (~/.claude/settings.json):`);
+  console.log(`  • ANTHROPIC_BASE_URL = http://localhost:${port}`);
+  console.log(`  • ANTHROPIC_API_KEY  = atc-local-key\n`);
+
+  if (process.platform === 'win32') {
+    const readline = await import('readline');
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const answer = await new Promise(r => rl.question('Do you want atc to start automatically on Windows boot? [Y/n]: ', r));
+    rl.close();
+
+    if (answer.trim().toLowerCase() !== 'n') {
+      installWindowsStartup(join(__dirname, 'cli.js'));
+      console.log('✓ Added atc to Windows Startup (silently runs in background on PC boot).\n');
+    } else {
+      console.log('• Skipped Windows Startup configuration.\n');
+    }
+  }
+
+  if (!isServiceRunning()) {
+    console.log('Starting atc proxy daemon...');
+    await startServer();
+  } else {
+    console.log('✓ atc proxy daemon is already in orbit!\n');
+  }
+
+  console.log('🎉 Setup complete! Just run "claude" in any terminal to start using Antigravity models.\n');
+}
+
+async function reinitCommand() {
+  console.log('\n╭────────────────────────────────────────────────╮');
+  console.log('│  ♻️  Reinitializing atc Configuration           │');
+  console.log('╰────────────────────────────────────────────────╯\n');
+
+  if (isServiceRunning()) {
+    console.log('Stopping current proxy...');
+    stopServer();
+    await new Promise(r => setTimeout(r, 1000));
+  }
+
+  const port = getPort();
+  configureClaudeCode(port);
+  console.log(`✓ Re-synced Claude Code (~/.claude/settings.json) to http://localhost:${port}`);
+
+  if (process.platform === 'win32' && isWindowsStartupInstalled()) {
+    installWindowsStartup(join(__dirname, 'cli.js'));
+    console.log('✓ Refreshed Windows Startup shortcut.');
+  }
+
+  console.log('Launching fresh atc proxy instance...');
+  await startServer();
+  console.log('\n✓ atc proxy successfully reinitialized!\n');
+}
+
+async function removeCommand() {
+  console.log('\n╭────────────────────────────────────────────────╮');
+  console.log('│  🗑️  Remove atc from Windows Startup / System    │');
+  console.log('╰────────────────────────────────────────────────╯\n');
+
+  if (process.platform === 'win32') {
+    const removed = removeWindowsStartup();
+    if (removed) {
+      console.log('✓ Removed atc from Windows Startup (will no longer run on PC boot).');
+    } else {
+      console.log('• atc was not found in Windows Startup.');
+    }
+  }
+
+  if (isServiceRunning()) {
+    console.log('Stopping atc proxy daemon...');
+    stopServer();
+  }
+
+  const readline = await import('readline');
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const ans = await new Promise(r => rl.question('\nDo you also want to remove atc proxy from Claude Code settings? [y/N]: ', r));
+  rl.close();
+
+  if (ans.trim().toLowerCase() === 'y') {
+    unconfigureClaudeCode();
+    console.log('✓ Removed atc proxy configuration from Claude Code (~/.claude/settings.json).\n');
+  } else {
+    console.log('• Preserved Claude Code settings.\n');
+  }
+
+  console.log('✓ atc remove completed.\n');
 }
 
 async function main() {
@@ -475,11 +646,25 @@ async function main() {
       break;
     }
 
+    case 'init':
+    case 'initialize':
+      await initCommand();
+      break;
+
+    case 'reinit':
+    case 'reinitialize':
+      await reinitCommand();
+      break;
+
     case 'remove':
     case 'rm':
     case 'del':
     case 'delete':
-      await removeAccount(args[1]);
+      if (args[1]) {
+        await removeAccount(args[1]);
+      } else {
+        await removeCommand();
+      }
       break;
 
     case 'toggle':

@@ -1,3 +1,4 @@
+import readline from 'readline';
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { createInterface } from 'readline/promises';
@@ -420,14 +421,43 @@ export async function loginAccount(options = {}) {
     openBrowser(url);
 
     console.log('Listening for OAuth callback on localhost (timeout 2m)...');
+    console.log(`${c.dim}Press ESC or Q to cancel and return to Dashboard immediately...${c.reset}\n`);
+
+    const { promise, abort } = startCallbackServer(state);
+
+    let keyListener = null;
+    let isCancelled = false;
+
+    const cancelPromise = new Promise((_, reject) => {
+        if (process.stdin.isTTY) {
+            process.stdin.setRawMode(true);
+            readline.emitKeypressEvents(process.stdin);
+            keyListener = (str, key) => {
+                if (key && (key.name === 'escape' || key.name === 'q' || (key.ctrl && key.name === 'c'))) {
+                    isCancelled = true;
+                    abort();
+                    reject(new Error('Login cancelled by user (ESC pressed)'));
+                }
+            };
+            process.stdin.on('keypress', keyListener);
+        }
+    });
+
     try {
-        const { promise } = startCallbackServer(state);
-        const code = await promise;
+        const code = await Promise.race([promise, cancelPromise]);
         console.log('Authorization received. Exchanging for tokens...');
         const result = await completeOAuthFlow(code, verifier);
         await recordNewAccount(result, accounts, settings, activeIndex);
     } catch (err) {
-        console.error(`\n${c.red}✗ OAuth sign-in error: ${err.message}${c.reset}\n`);
+        if (isCancelled || err.message.includes('cancelled') || err.message.includes('abort')) {
+            console.log(`\n${c.yellow}⚠ Add Account cancelled by user.${c.reset}`);
+        } else {
+            console.error(`\n${c.red}✗ OAuth sign-in error: ${err.message}${c.reset}\n`);
+        }
+    } finally {
+        if (keyListener) {
+            process.stdin.removeListener('keypress', keyListener);
+        }
     }
 }
 

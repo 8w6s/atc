@@ -168,24 +168,27 @@ function renderAuthHtml({ success, title, subtitle, hint }) {
                 window.close();
             } catch (e) {}
 
-            setTimeout(() => {
-                if (document.referrer && !document.referrer.includes(window.location.host)) {
-                    window.location.href = document.referrer;
-                } else if (window.history.length > 1) {
-                    window.history.back();
-                } else {
-                    window.location.href = 'about:blank';
-                }
-            }, 300);
+            const btn = document.querySelector('.btn');
+            if (btn) {
+                btn.textContent = '✓ Tab safe to close · Return to Terminal';
+                btn.style.background = '#059669';
+                btn.style.borderColor = '#10b981';
+            }
+            const el = document.getElementById('timer');
+            if (el) {
+                el.textContent = '✓ Authenticated! Switch back to your Terminal or VS Code.';
+                el.style.color = '#34d399';
+            }
         }
 
         ${success ? `
-        let s = 5;
+        attemptCloseOrRedirect();
+        let s = 3;
         const el = document.getElementById('timer');
         const iv = setInterval(() => {
             s--;
             if (s > 0) {
-                if (el) el.textContent = 'Closing tab in ' + s + ' second' + (s > 1 ? 's...' : '...');
+                if (el) el.textContent = 'Authorized! Switch back to Terminal / VS Code (' + s + 's)...';
             } else {
                 clearInterval(iv);
                 attemptCloseOrRedirect();

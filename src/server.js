@@ -315,10 +315,15 @@ app.get('/health', async (req, res) => {
             }
         });
 
+        const activeEmail = accountManager.getCurrentAccount()?.email || null;
+        const activeIndex = accountManager.getCurrentIndex();
+
         res.json({
             status: 'ok',
             timestamp: new Date().toISOString(),
             latencyMs: Date.now() - start,
+            activeEmail,
+            activeIndex,
             summary: status.summary,
             counts: {
                 total: status.total,

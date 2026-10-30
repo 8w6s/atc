@@ -253,6 +253,14 @@ export class AccountManager {
      * Get the current strategy name
      * @returns {string} Strategy name
      */
+    getCurrentAccount() {
+        return this.#accounts[this.#currentIndex] || this.#accounts[0] || null;
+    }
+
+    getCurrentIndex() {
+        return this.#currentIndex;
+    }
+
     getStrategyName() {
         return this.#strategyName;
     }
