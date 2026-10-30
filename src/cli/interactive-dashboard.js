@@ -153,37 +153,37 @@ function writeClaudeSettings(settings) {
 
 // Brand-accurate gradient color palette and shimmer animation
 const TITLE_CHARS = [
-    // Antigravity (12 chars): Blue 40% (5), Green 20% (2), Yellow 20% (2), Red 20% (3)
-    { ch: 'A', r: 66,  g: 133, b: 244 },
-    { ch: 'n', r: 66,  g: 133, b: 244 },
-    { ch: 't', r: 66,  g: 133, b: 244 },
-    { ch: 'i', r: 66,  g: 133, b: 244 },
-    { ch: 'g', r: 66,  g: 133, b: 244 },
-    { ch: 'r', r: 52,  g: 168, b: 83  },
-    { ch: 'a', r: 52,  g: 168, b: 83  },
-    { ch: 'v', r: 251, g: 188, b: 5   },
-    { ch: 'i', r: 251, g: 188, b: 5   },
-    { ch: 't', r: 234, g: 67,  b: 53  },
-    { ch: 'y', r: 234, g: 67,  b: 53  },
+    // Antigravity (11 chars + space): Bright Sky Blue 40% -> Green 20% -> Yellow 20% -> Red 20% (true linear gradient)
+    { ch: 'A', r:  56, g: 189, b: 248 },
+    { ch: 'n', r:  56, g: 189, b: 248 },
+    { ch: 't', r:  56, g: 189, b: 248 },
+    { ch: 'i', r:  56, g: 189, b: 248 },
+    { ch: 'g', r:  56, g: 189, b: 248 },
+    { ch: 'r', r:  45, g: 193, b: 171 },
+    { ch: 'a', r:  34, g: 197, b:  94 },
+    { ch: 'v', r: 142, g: 200, b:  58 },
+    { ch: 'i', r: 250, g: 204, b:  21 },
+    { ch: 't', r: 244, g: 136, b:  44 },
+    { ch: 'y', r: 239, g:  68, b:  68 },
     { ch: ' ', r: 255, g: 255, b: 255 },
 
-    // to: white
-    { ch: 't', r: 245, g: 245, b: 245 },
-    { ch: 'o', r: 245, g: 245, b: 245 },
+    // to (pure white)
+    { ch: 't', r: 255, g: 255, b: 255 },
+    { ch: 'o', r: 255, g: 255, b: 255 },
     { ch: ' ', r: 255, g: 255, b: 255 },
 
-    // Claude Code (11 chars): Orange 60% (7), Yellow 40% (4)
-    { ch: 'C', r: 224, g: 106, b: 59  },
-    { ch: 'l', r: 224, g: 106, b: 59  },
-    { ch: 'a', r: 224, g: 106, b: 59  },
-    { ch: 'u', r: 224, g: 106, b: 59  },
-    { ch: 'd', r: 224, g: 106, b: 59  },
-    { ch: 'e', r: 224, g: 106, b: 59  },
-    { ch: ' ', r: 224, g: 106, b: 59  },
-    { ch: 'C', r: 245, g: 158, b: 11  },
-    { ch: 'o', r: 245, g: 158, b: 11  },
-    { ch: 'd', r: 245, g: 158, b: 11  },
-    { ch: 'e', r: 245, g: 158, b: 11  }
+    // Claude Code (11 chars): Bright Orange 60% -> Warm Yellow 40% (true linear gradient)
+    { ch: 'C', r: 249, g: 115, b:  22 },
+    { ch: 'l', r: 249, g: 120, b:  28 },
+    { ch: 'a', r: 250, g: 125, b:  35 },
+    { ch: 'u', r: 250, g: 130, b:  41 },
+    { ch: 'd', r: 250, g: 136, b:  47 },
+    { ch: 'e', r: 251, g: 141, b:  54 },
+    { ch: ' ', r: 251, g: 146, b:  60 },
+    { ch: 'C', r: 251, g: 160, b:  50 },
+    { ch: 'o', r: 250, g: 175, b:  40 },
+    { ch: 'd', r: 250, g: 190, b:  31 },
+    { ch: 'e', r: 250, g: 204, b:  21 }
 ];
 
 function getShimmerTitle() {
