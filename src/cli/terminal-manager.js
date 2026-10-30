@@ -650,9 +650,9 @@ export async function verifyAccount(account) {
 }
 
 /**
- * Probe and display available Antigravity models from the highest tier Google account
+ * Probe and display available Antigravity models from a specific account or highest tier Google account
  */
-export async function showBackendModels({ refresh = false } = {}) {
+export async function showBackendModels(target = null, { refresh = false } = {}) {
     const { accounts, settings, activeIndex } = await loadAccounts(ACCOUNT_CONFIG_PATH);
     if (!accounts || accounts.length === 0) {
         console.log(`\n${c.yellow}▲ No Google accounts configured in ATC pool.${c.reset}`);
@@ -661,23 +661,47 @@ export async function showBackendModels({ refresh = false } = {}) {
         return;
     }
 
-    // Rank accounts by subscription tier: ultra > pro/standard > plus > free > unknown
-    const tierRanks = { ultra: 5, pro: 4, standard: 4, plus: 3, free: 2, unknown: 1 };
-    const candidates = [...accounts].sort((a, b) => {
-        const tierA = (a.subscription?.tier || 'free').toLowerCase();
-        const tierB = (b.subscription?.tier || 'free').toLowerCase();
-        const diff = (tierRanks[tierB] || 1) - (tierRanks[tierA] || 1);
-        if (diff !== 0) return diff;
-        if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
-        if (a.isInvalid !== b.isInvalid) return a.isInvalid ? 1 : -1;
-        return 0;
-    });
+    let bestAcc = null;
+    let accountDesc = '';
 
-    const bestAcc = candidates[0];
+    if (target) {
+        let targetIndex = -1;
+        const num = parseInt(target, 10);
+        if (!isNaN(num) && num >= 1 && num <= accounts.length) {
+            targetIndex = num - 1;
+        } else {
+            const lower = target.toLowerCase();
+            targetIndex = accounts.findIndex(a => a.email && a.email.toLowerCase().includes(lower));
+        }
+
+        if (targetIndex === -1) {
+            console.error(`\n${c.red}Error:${c.reset} Could not find account matching "${target}". Run "${c.cyan}atc accounts${c.reset}" to view account list.\n`);
+            return;
+        }
+
+        bestAcc = accounts[targetIndex];
+        accountDesc = `Account #${targetIndex + 1}`;
+    } else {
+        // Rank accounts by subscription tier: ultra > pro/standard > plus > free > unknown
+        const tierRanks = { ultra: 5, pro: 4, standard: 4, plus: 3, free: 2, unknown: 1 };
+        const candidates = [...accounts].sort((a, b) => {
+            const tierA = (a.subscription?.tier || 'free').toLowerCase();
+            const tierB = (b.subscription?.tier || 'free').toLowerCase();
+            const diff = (tierRanks[tierB] || 1) - (tierRanks[tierA] || 1);
+            if (diff !== 0) return diff;
+            if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
+            if (a.isInvalid !== b.isInvalid) return a.isInvalid ? 1 : -1;
+            return 0;
+        });
+
+        bestAcc = candidates[0];
+        accountDesc = 'Highest plan account in pool';
+    }
+
     const bestTier = (bestAcc.subscription?.tier || 'unknown').toUpperCase();
 
     console.log(`\n${c.bold + c.brightCyan}atc${c.reset} ${c.gray}(Antigravity to Claude)${c.reset} — ${c.bold}Backend Model Catalog${c.reset}`);
-    console.log(`${c.gray}Probing via:${c.reset} ${c.bold}${bestAcc.email}${c.reset} [${c.brightYellow}${bestTier}${c.reset}] (Highest plan account in pool)`);
+    console.log(`${c.gray}Probing via:${c.reset} ${c.bold}${bestAcc.email}${c.reset} [${c.brightYellow}${bestTier}${c.reset}] (${accountDesc})`);
     console.log(`${c.gray}Status:${c.reset} ${refresh ? 'Fetching fresh model catalog from Google...' : 'Connecting to Antigravity API...'}`);
 
     try {

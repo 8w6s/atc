@@ -240,6 +240,18 @@ app.post('/test/clear-signature-cache', (req, res) => {
 });
 
 /**
+ * Reload accounts and config from disk
+ */
+app.all(['/api/accounts/reload', '/reload'], async (req, res) => {
+    try {
+        await accountManager.reload();
+        res.json({ status: 'ok', message: 'Accounts reloaded from disk' });
+    } catch (err) {
+        res.status(500).json({ status: 'error', error: err.message });
+    }
+});
+
+/**
  * Health check endpoint - Detailed status
  * Returns status of all accounts including rate limits and model quotas
  */

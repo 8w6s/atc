@@ -170,4 +170,9 @@ export function saveConfig(updates) {
     }
 }
 
-export { config };
+export function reloadConfig() {
+    loadConfig();
+    return config;
+}
+
+export { config, loadConfig };

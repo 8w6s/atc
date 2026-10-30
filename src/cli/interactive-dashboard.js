@@ -3,7 +3,7 @@ import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { ACCOUNT_CONFIG_PATH } from '../constants.js';
 import { loadAccounts, saveAccounts } from '../account-manager/storage.js';
-import { config, saveConfig } from '../config.js';
+import { config, saveConfig, reloadConfig } from '../config.js';
 import { getPackageVersion } from '../utils/helpers.js';
 import {
     getProxyPort,
@@ -58,7 +58,7 @@ const c = {
     exitAltScreen: '\x1b[?1049l',
     disableWrap: '\x1b[?7l',
     enableWrap: '\x1b[?7h',
-    clearScreen: '\x1b[2J\x1b[H',
+    clearScreen: '\x1b[2J\x1b[3J\x1b[H',
     cursorHome: '\x1b[H',
     clearToEndOfLine: '\x1b[K',
     clearToEndOfScreen: '\x1b[J',
@@ -275,12 +275,29 @@ export async function runInteractiveDashboard(options = {}) {
     }
     let currentStrategy = config?.accountSelection?.strategy || 'pipelined';
 
-    async function refreshData() {
+    async function refreshData(showStatus = false) {
+        if (showStatus) {
+            setStatus('Reloading accounts, proxy status & live quotas...', 0);
+        }
+        reloadConfig();
+        currentStrategy = config?.accountSelection?.strategy || 'pipelined';
+
+        // Notify proxy daemon to reload its in-memory accounts & config from disk
+        try {
+            await fetch(`http://127.0.0.1:${port}/reload`, {
+                method: 'POST',
+                signal: AbortSignal.timeout(2000)
+            });
+        } catch {
+            // daemon might be offline or busy
+        }
+
         accountsData = await loadAccounts(ACCOUNT_CONFIG_PATH);
+
         try {
             const [healthRes, limitsRes] = await Promise.allSettled([
-                fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(3000) }),
-                fetch(`http://127.0.0.1:${port}/account-limits`, { signal: AbortSignal.timeout(3000) })
+                fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(4000) }),
+                fetch(`http://127.0.0.1:${port}/account-limits`, { signal: AbortSignal.timeout(6000) })
             ]);
 
             if (healthRes.status === 'fulfilled' && healthRes.value.ok) {
@@ -292,6 +309,14 @@ export async function runInteractiveDashboard(options = {}) {
         } catch {
             proxyHealth = null;
             proxyLimits = null;
+        }
+
+        // Re-read accounts after limits call in case quotas were saved to disk by server
+        accountsData = await loadAccounts(ACCOUNT_CONFIG_PATH);
+
+        if (showStatus) {
+            const isOnline = !!proxyHealth;
+            setStatus(isOnline ? '✓ Dashboard, proxy pool & live quotas reloaded.' : '✓ Reloaded from disk (Proxy daemon is offline).', 2000);
         }
     }
 
@@ -311,6 +336,7 @@ export async function runInteractiveDashboard(options = {}) {
         list.push({ type: 'action', id: 'pick_best', label: 'Pick Best Account', desc: 'Automatically switch to healthiest account with highest quota' });
         list.push({ type: 'action', id: 'check_problem', label: 'Check Problem Accounts', desc: 'Inspect problem accounts with detailed diagnostics & quick fixes' });
         list.push({ type: 'action', id: 'engine_settings', label: 'Settings', desc: 'Configure quota thresholds, request caps, and proxy engine parameters' });
+        list.push({ type: 'action', id: 'reload_dashboard', label: 'Reload & Refresh (Ctrl+R)', desc: 'Force clear terminal layers, probe live proxy quota, and redraw dashboard' });
 
         list.push({ type: 'header', label: 'Saved Accounts' });
         const { accounts, activeIndex } = accountsData;
@@ -513,7 +539,7 @@ export async function runInteractiveDashboard(options = {}) {
         }
 
         // Fixed Footer line (no trailing newline to guarantee no terminal auto-scroll)
-        buf += `${c.textMuted}↑↓ Move | Enter Select | 1-9 Switch | V Verify | R Re-login | T Toggle | D Delete | Q Back${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
+        buf += `${c.textMuted}↑↓ Move | Enter Select | 1-9 Switch | Ctrl+R Reload | V Verify | R Re-login | T Toggle | D Delete | Q Back${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
 
         process.stdout.write(buf);
     }
@@ -931,6 +957,15 @@ export async function runInteractiveDashboard(options = {}) {
                 return;
             }
 
+            // Ctrl+R: force full reload and redraw
+            if (key.ctrl && key.name === 'r') {
+                process.stdout.write(c.clearScreen + c.cursorHome);
+                await refreshData(true);
+                items = getItems();
+                render();
+                return;
+            }
+
             // Quick switch 1-9
             if (/^[1-9]$/.test(str)) {
                 const targetNum = parseInt(str, 10);
@@ -1251,7 +1286,7 @@ export async function runInteractiveDashboard(options = {}) {
 
                             function renderScreen() {
                                 const list = getItemsList();
-                                let out = c.clearScreen + c.cursorHome;
+                                let out = c.hideCursor + c.disableWrap + c.clearScreen + c.cursorHome;
                                 out += `${c.brandGreen}╭─────────────────────────────────────────────────────────────────╮${c.reset}\n`;
                                 out += `${c.brandGreen}│  Model Mappings & Fake ID Routing                               │${c.reset}\n`;
                                 out += `${c.brandGreen}╰─────────────────────────────────────────────────────────────────╯${c.reset}\n\n`;
@@ -1295,7 +1330,7 @@ export async function runInteractiveDashboard(options = {}) {
                                     out += `${c.textMuted}Details:${c.reset} ${c.textNormal}${curIt.desc || ''}${c.reset}${c.clearToEndOfLine}\n`;
                                 }
 
-                                out += `${c.textMuted}↑↓ Move | Enter Select/Edit | ESC Return${c.reset}${c.clearToEndOfLine}`;
+                                out += `${c.textMuted}↑↓ Move | Enter Select/Edit | Ctrl+R Reload | ESC Return${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
                                 process.stdout.write(out);
                             }
 
@@ -1305,6 +1340,13 @@ export async function runInteractiveDashboard(options = {}) {
 
                                 async function onKey(str, key) {
                                     if (!key) return;
+
+                                    if (key.ctrl && key.name === 'r') {
+                                        process.stdout.write(c.clearScreen + c.cursorHome);
+                                        notice = 'Model Mappings reloaded.';
+                                        renderScreen();
+                                        return;
+                                    }
 
                                     if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
                                         process.stdin.removeListener('keypress', onKey);
@@ -1344,9 +1386,9 @@ export async function runInteractiveDashboard(options = {}) {
                                         if (curIt.type === 'env_var') {
                                             process.stdin.removeListener('keypress', onKey);
                                             if (process.stdin.isTTY) process.stdin.setRawMode(false);
-                                            process.stdout.write(c.showCursor);
+                                            process.stdout.write(c.clearScreen + c.cursorHome + c.enableWrap + c.showCursor);
 
-                                            console.log(`\n\nConfigure ${curIt.label}:`);
+                                            console.log(`Configure ${curIt.label}:`);
                                             console.log(`Current: Fake ID = [${curIt.val}] → Google Backend = [${curIt.target}]\n`);
 
                                             const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -1384,8 +1426,8 @@ export async function runInteractiveDashboard(options = {}) {
 
                                             notice = `Set ${curIt.envKey} = [${finalFake}] → [${finalBackend}]`;
 
+                                            process.stdout.write(c.clearScreen + c.cursorHome + c.disableWrap + c.hideCursor);
                                             if (process.stdin.isTTY) process.stdin.setRawMode(true);
-                                            process.stdout.write(c.hideCursor);
                                             process.stdin.on('keypress', onKey);
                                             renderScreen();
                                             return;
@@ -1395,9 +1437,9 @@ export async function runInteractiveDashboard(options = {}) {
                                         if (curIt.id === 'add_fake') {
                                             process.stdin.removeListener('keypress', onKey);
                                             if (process.stdin.isTTY) process.stdin.setRawMode(false);
-                                            process.stdout.write(c.showCursor);
+                                            process.stdout.write(c.clearScreen + c.cursorHome + c.enableWrap + c.showCursor);
 
-                                            console.log(`\n\nRegister Custom Fake Model ID:`);
+                                            console.log(`Register Custom Fake Model ID:`);
                                             const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
                                             console.log(`Enter Fake Model ID (e.g. gpt-6-sol, my-custom-model, claude-opus-5.5):`);
                                             const fAns = await new Promise(r => rl.question(`> `, r));
@@ -1426,8 +1468,8 @@ export async function runInteractiveDashboard(options = {}) {
                                                 notice = `Registered Fake Model [${fakeId}] → [${backend}]`;
                                             }
 
+                                            process.stdout.write(c.clearScreen + c.cursorHome + c.disableWrap + c.hideCursor);
                                             if (process.stdin.isTTY) process.stdin.setRawMode(true);
-                                            process.stdout.write(c.hideCursor);
                                             process.stdin.on('keypress', onKey);
                                             renderScreen();
                                             return;
@@ -1437,9 +1479,9 @@ export async function runInteractiveDashboard(options = {}) {
                                         if (curIt.type === 'custom_item') {
                                             process.stdin.removeListener('keypress', onKey);
                                             if (process.stdin.isTTY) process.stdin.setRawMode(false);
-                                            process.stdout.write(c.showCursor);
+                                            process.stdout.write(c.clearScreen + c.cursorHome + c.enableWrap + c.showCursor);
 
-                                            console.log(`\n\nManage Custom Fake Model: [${curIt.fakeId}] → [${curIt.target}]`);
+                                            console.log(`Manage Custom Fake Model: [${curIt.fakeId}] → [${curIt.target}]`);
                                             console.log(`  1. Change Google Backend Target`);
                                             console.log(`  2. Delete this Fake Model`);
                                             console.log(`  3. Cancel`);
@@ -1461,12 +1503,12 @@ export async function runInteractiveDashboard(options = {}) {
                                                 delete newMm[curIt.fakeId];
                                                 config.modelMapping = newMm;
                                                 saveConfig({ modelMapping: newMm });
-                                                notice = `Deleted [${curIt.fakeId}]`;
+                                                notice = `Deleted Fake Model [${curIt.fakeId}]`;
                                             }
                                             rl.close();
 
+                                            process.stdout.write(c.clearScreen + c.cursorHome + c.disableWrap + c.hideCursor);
                                             if (process.stdin.isTTY) process.stdin.setRawMode(true);
-                                            process.stdout.write(c.hideCursor);
                                             process.stdin.on('keypress', onKey);
                                             renderScreen();
                                             return;
@@ -1701,6 +1743,14 @@ export async function runInteractiveDashboard(options = {}) {
 
                     if (cur.id === 'engine_settings') {
                         await openEngineSettings();
+                        return;
+                    }
+
+                    if (cur.id === 'reload_dashboard') {
+                        process.stdout.write(c.clearScreen + c.cursorHome);
+                        await refreshData(true);
+                        items = getItems();
+                        render();
                         return;
                     }
 

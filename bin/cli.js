@@ -570,7 +570,7 @@ ${c.bold + c.bCyan}━━━ DASHBOARD & ACCOUNTS ━━━━━━━━━━
   ${c.cyan}check, probe${c.reset}        Probe all accounts and refresh live quota stats
 
 ${c.bold + c.bCyan}━━━ MODELS & SETTINGS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}
-  ${c.cyan}models [--refresh]${c.reset}  List available Antigravity models (from top plan)
+  ${c.cyan}models [id] [--refresh]${c.reset}  List available Antigravity models (specific ID or top plan)
   ${c.cyan}mapid, map${c.reset}          List Claude Code fake model ID mappings
   ${c.cyan}flex${c.reset}                Auto-bind Claude 3.7 Sonnet & Opus to Google backend
   ${c.cyan}settings, config${c.reset}    Directly open proxy engine & secret key settings
@@ -1062,9 +1062,11 @@ async function main() {
       await toggleAccount(args[1]);
       break;
 
-    case 'models':
-      await showBackendModels({ refresh: args.includes('--refresh') });
+    case 'models': {
+      const target = args.slice(1).find(a => !a.startsWith('-'));
+      await showBackendModels(target, { refresh: args.includes('--refresh') });
       break;
+    }
 
     case 'mapid':
     case 'map':
