@@ -614,174 +614,344 @@ export async function runInteractiveDashboard() {
 
                     if (cur.id === 'custom_project') {
                         await runSubScreen(async () => {
-                            console.log(`${c.brandGreen}╭─────────────────────────────────────────────────────────────────╮${c.reset}`);
-                            console.log(`${c.brandGreen}│  Custom GCP Project Configuration                               │${c.reset}`);
-                            console.log(`${c.brandGreen}╰─────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+                            let customProj = config?.customProjectId || '';
+                            let selectedIdx = 0;
+                            let notice = '';
 
-                            console.log(`Current GCP Project ID: ${c.activeBright}${config?.customProjectId || '(not set - using default auto project)'}${c.reset}\n`);
-                            console.log('Set a custom GCP project to route Gemini API calls with your own Cloud Project.');
-                            console.log('Leave empty or type "clear" to revert to default automatic project.\n');
+                            const items = [
+                                { id: 'val', label: 'Custom GCP Project ID', getVal: () => customProj || 'Default (auto)', desc: 'Route Gemini API requests with your own Google Cloud project' },
+                                { id: 'edit', label: 'Set Custom Project ID', getVal: () => '', desc: 'Enter custom project ID string (e.g. my-project-513208)' },
+                                { id: 'reset', label: 'Reset to Default (auto)', getVal: () => '', desc: 'Revert to automatic default project routing' },
+                                { id: 'save', label: 'Save & Return to Dashboard', getVal: () => '', desc: 'Write changes to ~/.config/antigravity-proxy/config.json' }
+                            ];
 
-                            const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-                            const answer = await new Promise(r => rl.question('Enter custom GCP Project ID or press Enter to keep current: ', r));
-                            rl.close();
+                            function renderScreen() {
+                                let out = c.clearScreen + c.cursorHome;
+                                out += `${c.brandGreen}╭─────────────────────────────────────────────────────────────────╮${c.reset}\n`;
+                                out += `${c.brandGreen}│  Custom GCP Project Configuration                               │${c.reset}\n`;
+                                out += `${c.brandGreen}╰─────────────────────────────────────────────────────────────────╯${c.reset}\n\n`;
 
-                            const trimmed = answer.trim();
-                            if (trimmed.length > 0) {
-                                if (trimmed.toLowerCase() === 'clear' || trimmed.toLowerCase() === 'reset' || trimmed.toLowerCase() === 'none') {
-                                    const nextConfig = { ...config };
-                                    delete nextConfig.customProjectId;
-                                    saveConfig(nextConfig);
-                                    console.log(`\n${c.actionGreen}✓ Cleared custom project ID. Returning to dashboard in 1.5s...${c.reset}`);
-                                    await new Promise(r => setTimeout(r, 1500));
-                                    setStatus('Reset GCP Project ID to default.', 2000);
-                                } else {
-                                    saveConfig({ customProjectId: trimmed });
-                                    console.log(`\n${c.actionGreen}✓ Saved custom GCP Project: ${trimmed}. Returning to dashboard in 1.5s...${c.reset}`);
-                                    await new Promise(r => setTimeout(r, 1500));
-                                    setStatus(`Saved custom GCP project: ${trimmed}.`, 2000);
+                                for (let i = 0; i < items.length; i++) {
+                                    const it = items[i];
+                                    const isSel = i === selectedIdx;
+                                    const pointer = isSel ? `\x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
+                                    const val = it.getVal();
+
+                                    let line = '';
+                                    if (val) {
+                                        line = isSel
+                                            ? `\x1b[1;38;5;255m${it.label}:\x1b[0m \x1b[1;38;5;120m[${val}]\x1b[0m`
+                                            : `\x1b[38;5;250m${it.label}:\x1b[0m \x1b[38;5;147m[${val}]\x1b[0m`;
+                                    } else {
+                                        line = isSel
+                                            ? `\x1b[1;38;5;255m${it.label}${c.reset}`
+                                            : `\x1b[38;5;248m${it.label}${c.reset}`;
+                                    }
+                                    out += `${pointer}${line}${c.clearToEndOfLine}\n`;
                                 }
+
+                                out += `\n`;
+                                const curIt = items[selectedIdx];
+                                if (notice) {
+                                    out += `${c.statusWarn}ℹ ${notice}${c.reset}${c.clearToEndOfLine}\n`;
+                                } else {
+                                    out += `${c.textMuted}Details:${c.reset} ${c.textNormal}${curIt.desc}${c.reset}${c.clearToEndOfLine}\n`;
+                                }
+
+                                out += `${c.textMuted}↑↓ Move | Enter Select/Edit | ESC Return${c.reset}${c.clearToEndOfLine}`;
+                                process.stdout.write(out);
                             }
+
+                            await new Promise((resolve) => {
+                                if (process.stdin.isTTY) process.stdin.setRawMode(true);
+                                readline.emitKeypressEvents(process.stdin);
+
+                                async function onKey(str, key) {
+                                    if (!key) return;
+
+                                    if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
+                                        process.stdin.removeListener('keypress', onKey);
+                                        resolve();
+                                        return;
+                                    }
+
+                                    if (key.name === 'up' || key.name === 'k') {
+                                        notice = '';
+                                        selectedIdx = (selectedIdx - 1 + items.length) % items.length;
+                                        renderScreen();
+                                        return;
+                                    }
+
+                                    if (key.name === 'down' || key.name === 'j') {
+                                        notice = '';
+                                        selectedIdx = (selectedIdx + 1) % items.length;
+                                        renderScreen();
+                                        return;
+                                    }
+
+                                    if (key.name === 'return' || key.name === 'enter') {
+                                        if (selectedIdx === 0 || selectedIdx === 1) {
+                                            process.stdin.removeListener('keypress', onKey);
+                                            if (process.stdin.isTTY) process.stdin.setRawMode(false);
+                                            process.stdout.write(c.showCursor);
+                                            console.log(`\n\nEnter new GCP Project ID (leave empty to reset):`);
+                                            const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+                                            const ans = await new Promise(r => rl.question('> ', r));
+                                            rl.close();
+                                            const trimmed = ans.trim();
+                                            if (trimmed && trimmed.toLowerCase() !== 'clear' && trimmed.toLowerCase() !== 'reset') {
+                                                customProj = trimmed;
+                                                saveConfig({ customProjectId: trimmed });
+                                                notice = `Saved Custom GCP Project ID: ${trimmed}`;
+                                            } else {
+                                                customProj = '';
+                                                const next = { ...config };
+                                                delete next.customProjectId;
+                                                saveConfig(next);
+                                                notice = 'Reset to default automatic project routing';
+                                            }
+                                            if (process.stdin.isTTY) process.stdin.setRawMode(true);
+                                            process.stdout.write(c.hideCursor);
+                                            process.stdin.on('keypress', onKey);
+                                            renderScreen();
+                                            return;
+                                        }
+
+                                        if (selectedIdx === 2) {
+                                            customProj = '';
+                                            const next = { ...config };
+                                            delete next.customProjectId;
+                                            saveConfig(next);
+                                            notice = 'Reset to default automatic project routing';
+                                            renderScreen();
+                                            return;
+                                        }
+
+                                        if (selectedIdx === 3) {
+                                            process.stdin.removeListener('keypress', onKey);
+                                            resolve();
+                                            return;
+                                        }
+                                    }
+                                }
+
+                                process.stdin.on('keypress', onKey);
+                                renderScreen();
+                            });
+
+                            setStatus(`Custom GCP Project set to: ${customProj || 'Default'}.`, 2000);
                         });
                         return;
                     }
 
                     if (cur.id === 'model_mapping') {
                         await runSubScreen(async () => {
-                            console.log(`${c.brandGreen}╭─────────────────────────────────────────────────────────────────╮${c.reset}`);
-                            console.log(`${c.brandGreen}│  Model Mappings                                                 │${c.reset}`);
-                            console.log(`${c.brandGreen}╰─────────────────────────────────────────────────────────────────╯${c.reset}\n`);
-
                             const claudeSettings = readClaudeSettings();
                             const cEnv = claudeSettings.env || {};
                             const mm = config.modelMapping || {};
 
-                            const mainModel = cEnv.ANTHROPIC_MODEL || '';
-                            const subagentModel = cEnv.CLAUDE_CODE_SUBAGENT_MODEL || '';
-                            const opusModel = cEnv.ANTHROPIC_DEFAULT_OPUS_MODEL || cEnv.ANTHROPIC_CLAUDE_OPUS_MODEL || '';
-                            const sonnetModel = cEnv.ANTHROPIC_DEFAULT_SONNET_MODEL || cEnv.ANTHROPIC_CLAUDE_SONNET_MODEL || '';
-                            const haikuModel = cEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL || '';
+                            let selectedIdx = 0;
+                            let notice = '';
 
-                            console.log(`Current Claude Code Model Environment Variables (${c.textDark}~/.claude/settings.json${c.reset}):\n`);
-                            console.log(`  1. Main Model (ANTHROPIC_MODEL):             ${mainModel ? `${c.activeBright}${mainModel}${c.reset} -> ${c.actionGreen}${getMappingTarget(mm, mainModel)}${c.reset}` : `${c.textMuted}(not set - uses default)${c.reset}`}`);
-                            console.log(`  2. Subagent Model (CLAUDE_CODE_SUBAGENT):    ${subagentModel ? `${c.activeBright}${subagentModel}${c.reset} -> ${c.actionGreen}${getMappingTarget(mm, subagentModel)}${c.reset}` : `${c.textMuted}(not set - falls back to haiku)${c.reset}`}`);
-                            console.log(`  3. Opus Override (ANTHROPIC_DEFAULT_OPUS):   ${opusModel ? `${c.activeBright}${opusModel}${c.reset} -> ${c.actionGreen}${getMappingTarget(mm, opusModel)}${c.reset}` : `${c.textMuted}(not set)${c.reset}`}`);
-                            console.log(`  4. Sonnet Override (ANTHROPIC_DEFAULT_SONNET): ${sonnetModel ? `${c.activeBright}${sonnetModel}${c.reset} -> ${c.actionGreen}${getMappingTarget(mm, sonnetModel)}${c.reset}` : `${c.textMuted}(not set)${c.reset}`}`);
-                            console.log(`  5. Haiku Override (ANTHROPIC_DEFAULT_HAIKU):  ${haikuModel ? `${c.activeBright}${haikuModel}${c.reset} -> ${c.actionGreen}${getMappingTarget(mm, haikuModel)}${c.reset}` : `${c.textMuted}(not set)${c.reset}`}\n`);
+                            function getItemsList() {
+                                const env = claudeSettings.env || {};
+                                return [
+                                    { id: 'ANTHROPIC_MODEL', label: 'Main Model (ANTHROPIC_MODEL)', val: env.ANTHROPIC_MODEL || 'default', desc: 'Primary model used by Claude Code CLI (leave blank for default)' },
+                                    { id: 'CLAUDE_CODE_SUBAGENT_MODEL', label: 'Subagent Model (CLAUDE_CODE_SUBAGENT)', val: env.CLAUDE_CODE_SUBAGENT_MODEL || 'default', desc: 'Model used for background Claude Code subagents' },
+                                    { id: 'ANTHROPIC_DEFAULT_OPUS_MODEL', label: 'Opus Override (ANTHROPIC_DEFAULT_OPUS)', val: env.ANTHROPIC_DEFAULT_OPUS_MODEL || 'default', desc: 'Mapping override when Claude Code requests Opus' },
+                                    { id: 'ANTHROPIC_DEFAULT_SONNET_MODEL', label: 'Sonnet Override (ANTHROPIC_DEFAULT_SONNET)', val: env.ANTHROPIC_DEFAULT_SONNET_MODEL || 'default', desc: 'Mapping override when Claude Code requests Sonnet' },
+                                    { id: 'ANTHROPIC_DEFAULT_HAIKU_MODEL', label: 'Haiku Override (ANTHROPIC_DEFAULT_HAIKU)', val: env.ANTHROPIC_DEFAULT_HAIKU_MODEL || 'default', desc: 'Mapping override when Claude Code requests Haiku' },
+                                    { id: 'preset_speed', label: 'Apply Preset: Max Performance', val: '', desc: 'Sonnet/Opus -> Flash-High, Subagent/Haiku -> Flash-Lite' },
+                                    { id: 'preset_balanced', label: 'Apply Preset: Balanced', val: '', desc: 'Opus -> Flash-High, Sonnet -> Flash-Medium, Subagent/Haiku -> Flash-Lite' },
+                                    { id: 'preset_quality', label: 'Apply Preset: Gemini 3.8 Pro', val: '', desc: 'Route all model requests to high-reasoning Gemini 3.8 Pro' },
+                                    { id: 'clean', label: 'Clean All Custom Model Overrides', val: '', desc: 'Remove all model environment variables from ~/.claude/settings.json' },
+                                    { id: 'save', label: 'Save & Return to Dashboard', val: '', desc: 'Return to main dashboard' }
+                                ];
+                            }
 
-                            console.log('Options:');
-                            console.log('  [1] Max Performance Preset (Sonnet/Opus -> Flash-High, Subagent/Haiku -> Flash-Lite)');
-                            console.log('  [2] Balanced Preset        (Opus -> Flash-High, Sonnet -> Flash-Medium, Subagent/Haiku -> Flash-Lite)');
-                            console.log('  [3] Quality Preset         (All models -> Gemini 3.8 Pro)');
-                            console.log('  [4] Edit Variable [1-5]    (Enter variable number to update or leave blank to delete)');
-                            console.log('  [5] Clean All Model Envs   (Remove all model env overrides from settings.json)');
-                            console.log('  [Enter] Return to Dashboard\n');
+                            function renderScreen() {
+                                const list = getItemsList();
+                                let out = c.clearScreen + c.cursorHome;
+                                out += `${c.brandGreen}╭─────────────────────────────────────────────────────────────────╮${c.reset}\n`;
+                                out += `${c.brandGreen}│  Model Mappings & Claude Code Environment Variables             │${c.reset}\n`;
+                                out += `${c.brandGreen}╰─────────────────────────────────────────────────────────────────╯${c.reset}\n\n`;
 
-                            const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-                            const opt = await new Promise(r => rl.question('Select option [1-5] or press Enter: ', r));
+                                for (let i = 0; i < list.length; i++) {
+                                    const it = list[i];
+                                    const isSel = i === selectedIdx;
+                                    const pointer = isSel ? `\x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
 
-                            if (opt === '1') {
-                                claudeSettings.env = claudeSettings.env || {};
-                                claudeSettings.env.ANTHROPIC_MODEL = 'claude-sonnet-5-5';
-                                claudeSettings.env.ANTHROPIC_DEFAULT_OPUS_MODEL = 'claude-opus-5-5';
-                                claudeSettings.env.ANTHROPIC_DEFAULT_SONNET_MODEL = 'claude-sonnet-5-5';
-                                claudeSettings.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = 'claude-haiku-5-5';
-                                claudeSettings.env.CLAUDE_CODE_SUBAGENT_MODEL = 'claude-haiku-5-5';
-                                writeClaudeSettings(claudeSettings);
-
-                                const newMm = { ...(config.modelMapping || {}) };
-                                newMm['claude-opus-5-5'] = { mapping: 'gemini-3.8-flash-high' };
-                                newMm['claude-sonnet-5-5'] = { mapping: 'gemini-3.8-flash-high' };
-                                newMm['claude-haiku-5-5'] = { mapping: 'gemini-3.1-flash-lite' };
-                                saveConfig({ modelMapping: newMm });
-                                console.log(`\n${c.actionGreen}✓ Applied Max Performance preset. Returning in 1.5s...${c.reset}`);
-                                await new Promise(r => setTimeout(r, 1500));
-                                setStatus('Applied Preset: Max Performance models in Claude Code.', 2000);
-                            } else if (opt === '2') {
-                                claudeSettings.env = claudeSettings.env || {};
-                                claudeSettings.env.ANTHROPIC_MODEL = 'claude-sonnet-5-5';
-                                claudeSettings.env.ANTHROPIC_DEFAULT_OPUS_MODEL = 'claude-opus-5-5';
-                                claudeSettings.env.ANTHROPIC_DEFAULT_SONNET_MODEL = 'claude-sonnet-5-5';
-                                claudeSettings.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = 'claude-haiku-5-5';
-                                claudeSettings.env.CLAUDE_CODE_SUBAGENT_MODEL = 'claude-haiku-5-5';
-                                writeClaudeSettings(claudeSettings);
-
-                                const newMm = { ...(config.modelMapping || {}) };
-                                newMm['claude-opus-5-5'] = { mapping: 'gemini-3.8-flash-high' };
-                                newMm['claude-sonnet-5-5'] = { mapping: 'gemini-3.8-flash-medium' };
-                                newMm['claude-haiku-5-5'] = { mapping: 'gemini-3.1-flash-lite' };
-                                saveConfig({ modelMapping: newMm });
-                                console.log(`\n${c.actionGreen}✓ Applied Balanced preset. Returning in 1.5s...${c.reset}`);
-                                await new Promise(r => setTimeout(r, 1500));
-                                setStatus('Applied Preset: Balanced models in Claude Code.', 2000);
-                            } else if (opt === '3') {
-                                claudeSettings.env = claudeSettings.env || {};
-                                claudeSettings.env.ANTHROPIC_MODEL = 'claude-opus-5-5';
-                                claudeSettings.env.ANTHROPIC_DEFAULT_OPUS_MODEL = 'claude-opus-5-5';
-                                claudeSettings.env.ANTHROPIC_DEFAULT_SONNET_MODEL = 'claude-opus-5-5';
-                                claudeSettings.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = 'claude-sonnet-5-5';
-                                claudeSettings.env.CLAUDE_CODE_SUBAGENT_MODEL = 'claude-sonnet-5-5';
-                                writeClaudeSettings(claudeSettings);
-
-                                const newMm = { ...(config.modelMapping || {}) };
-                                newMm['claude-opus-5-5'] = { mapping: 'gemini-3.8-pro' };
-                                newMm['claude-sonnet-5-5'] = { mapping: 'gemini-3.8-pro' };
-                                newMm['claude-haiku-5-5'] = { mapping: 'gemini-3.8-flash-high' };
-                                saveConfig({ modelMapping: newMm });
-                                console.log(`\n${c.actionGreen}✓ Applied Quality preset. Returning in 1.5s...${c.reset}`);
-                                await new Promise(r => setTimeout(r, 1500));
-                                setStatus('Applied Preset: Gemini 3.8 Pro in Claude Code.', 2000);
-                            } else if (opt === '4') {
-                                const varIndex = await new Promise(r => rl.question('Enter variable number to configure [1-5]: ', r));
-                                const keyMap = {
-                                    '1': 'ANTHROPIC_MODEL',
-                                    '2': 'CLAUDE_CODE_SUBAGENT_MODEL',
-                                    '3': 'ANTHROPIC_DEFAULT_OPUS_MODEL',
-                                    '4': 'ANTHROPIC_DEFAULT_SONNET_MODEL',
-                                    '5': 'ANTHROPIC_DEFAULT_HAIKU_MODEL'
-                                };
-                                const selectedKey = keyMap[varIndex.trim()];
-                                if (selectedKey) {
-                                    const currentVal = cEnv[selectedKey] || '';
-                                    console.log(`\nEditing ${selectedKey} (current: ${currentVal || 'not set'})`);
-                                    console.log('Enter custom model ID, or leave blank to delete env:');
-                                    const newVal = await new Promise(r => rl.question('> ', r));
-                                    const trimmed = newVal.trim();
-                                    claudeSettings.env = claudeSettings.env || {};
-                                    if (trimmed.length > 0 && trimmed.toLowerCase() !== 'clear' && trimmed.toLowerCase() !== 'delete' && trimmed.toLowerCase() !== 'none') {
-                                        claudeSettings.env[selectedKey] = trimmed;
-                                        writeClaudeSettings(claudeSettings);
-                                        console.log(`\n${c.actionGreen}✓ Updated ${selectedKey} = ${trimmed}. Returning in 1.5s...${c.reset}`);
-                                        await new Promise(r => setTimeout(r, 1500));
-                                        setStatus(`Updated ${selectedKey} = ${trimmed}.`, 2000);
+                                    let line = '';
+                                    if (it.val) {
+                                        line = isSel
+                                            ? `\x1b[1;38;5;255m${it.label}:\x1b[0m \x1b[1;38;5;120m[${it.val}]\x1b[0m`
+                                            : `\x1b[38;5;250m${it.label}:\x1b[0m \x1b[38;5;147m[${it.val}]\x1b[0m`;
                                     } else {
-                                        delete claudeSettings.env[selectedKey];
-                                        writeClaudeSettings(claudeSettings);
-                                        console.log(`\n${c.actionGreen}✓ Deleted ${selectedKey} from settings.json. Returning in 1.5s...${c.reset}`);
-                                        await new Promise(r => setTimeout(r, 1500));
-                                        setStatus(`Deleted ${selectedKey} from settings.json.`, 2000);
+                                        line = isSel
+                                            ? `\x1b[1;38;5;255m${it.label}${c.reset}`
+                                            : `\x1b[38;5;248m${it.label}${c.reset}`;
+                                    }
+                                    out += `${pointer}${line}${c.clearToEndOfLine}\n`;
+                                }
+
+                                out += `\n`;
+                                const curIt = list[selectedIdx];
+                                if (notice) {
+                                    out += `${c.statusWarn}ℹ ${notice}${c.reset}${c.clearToEndOfLine}\n`;
+                                } else {
+                                    out += `${c.textMuted}Details:${c.reset} ${c.textNormal}${curIt.desc}${c.reset}${c.clearToEndOfLine}\n`;
+                                }
+
+                                out += `${c.textMuted}↑↓ Move | Enter Select/Edit | ESC Return${c.reset}${c.clearToEndOfLine}`;
+                                process.stdout.write(out);
+                            }
+
+                            await new Promise((resolve) => {
+                                if (process.stdin.isTTY) process.stdin.setRawMode(true);
+                                readline.emitKeypressEvents(process.stdin);
+
+                                async function onKey(str, key) {
+                                    if (!key) return;
+
+                                    if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
+                                        process.stdin.removeListener('keypress', onKey);
+                                        resolve();
+                                        return;
+                                    }
+
+                                    const list = getItemsList();
+                                    if (key.name === 'up' || key.name === 'k') {
+                                        notice = '';
+                                        selectedIdx = (selectedIdx - 1 + list.length) % list.length;
+                                        renderScreen();
+                                        return;
+                                    }
+
+                                    if (key.name === 'down' || key.name === 'j') {
+                                        notice = '';
+                                        selectedIdx = (selectedIdx + 1) % list.length;
+                                        renderScreen();
+                                        return;
+                                    }
+
+                                    if (key.name === 'return' || key.name === 'enter') {
+                                        const curIt = list[selectedIdx];
+
+                                        // Editing model env variable
+                                        if (selectedIdx < 5) {
+                                            process.stdin.removeListener('keypress', onKey);
+                                            if (process.stdin.isTTY) process.stdin.setRawMode(false);
+                                            process.stdout.write(c.showCursor);
+                                            console.log(`\n\nEnter model ID for ${curIt.id} (leave empty to delete env):`);
+                                            const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+                                            const newVal = await new Promise(r => rl.question('> ', r));
+                                            rl.close();
+
+                                            const trimmed = newVal.trim();
+                                            claudeSettings.env = claudeSettings.env || {};
+                                            if (trimmed && trimmed.toLowerCase() !== 'delete' && trimmed.toLowerCase() !== 'clear') {
+                                                claudeSettings.env[curIt.id] = trimmed;
+                                                writeClaudeSettings(claudeSettings);
+                                                notice = `Saved ${curIt.id} = ${trimmed}`;
+                                            } else {
+                                                delete claudeSettings.env[curIt.id];
+                                                writeClaudeSettings(claudeSettings);
+                                                notice = `Removed ${curIt.id} from settings.json`;
+                                            }
+
+                                            if (process.stdin.isTTY) process.stdin.setRawMode(true);
+                                            process.stdout.write(c.hideCursor);
+                                            process.stdin.on('keypress', onKey);
+                                            renderScreen();
+                                            return;
+                                        }
+
+                                        // Presets
+                                        if (curIt.id === 'preset_speed') {
+                                            claudeSettings.env = claudeSettings.env || {};
+                                            claudeSettings.env.ANTHROPIC_MODEL = 'claude-sonnet-5-5';
+                                            claudeSettings.env.ANTHROPIC_DEFAULT_OPUS_MODEL = 'claude-opus-5-5';
+                                            claudeSettings.env.ANTHROPIC_DEFAULT_SONNET_MODEL = 'claude-sonnet-5-5';
+                                            claudeSettings.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = 'claude-haiku-5-5';
+                                            claudeSettings.env.CLAUDE_CODE_SUBAGENT_MODEL = 'claude-haiku-5-5';
+                                            writeClaudeSettings(claudeSettings);
+
+                                            const newMm = { ...(config.modelMapping || {}) };
+                                            newMm['claude-opus-5-5'] = { mapping: 'gemini-3.8-flash-high' };
+                                            newMm['claude-sonnet-5-5'] = { mapping: 'gemini-3.8-flash-high' };
+                                            newMm['claude-haiku-5-5'] = { mapping: 'gemini-3.1-flash-lite' };
+                                            saveConfig({ modelMapping: newMm });
+                                            notice = 'Applied Preset: Max Performance (Flash-High & Flash-Lite)';
+                                            renderScreen();
+                                            return;
+                                        }
+
+                                        if (curIt.id === 'preset_balanced') {
+                                            claudeSettings.env = claudeSettings.env || {};
+                                            claudeSettings.env.ANTHROPIC_MODEL = 'claude-sonnet-5-5';
+                                            claudeSettings.env.ANTHROPIC_DEFAULT_OPUS_MODEL = 'claude-opus-5-5';
+                                            claudeSettings.env.ANTHROPIC_DEFAULT_SONNET_MODEL = 'claude-sonnet-5-5';
+                                            claudeSettings.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = 'claude-haiku-5-5';
+                                            claudeSettings.env.CLAUDE_CODE_SUBAGENT_MODEL = 'claude-haiku-5-5';
+                                            writeClaudeSettings(claudeSettings);
+
+                                            const newMm = { ...(config.modelMapping || {}) };
+                                            newMm['claude-opus-5-5'] = { mapping: 'gemini-3.8-flash-high' };
+                                            newMm['claude-sonnet-5-5'] = { mapping: 'gemini-3.8-flash-medium' };
+                                            newMm['claude-haiku-5-5'] = { mapping: 'gemini-3.1-flash-lite' };
+                                            saveConfig({ modelMapping: newMm });
+                                            notice = 'Applied Preset: Balanced (Flash-High, Medium & Lite)';
+                                            renderScreen();
+                                            return;
+                                        }
+
+                                        if (curIt.id === 'preset_quality') {
+                                            claudeSettings.env = claudeSettings.env || {};
+                                            claudeSettings.env.ANTHROPIC_MODEL = 'claude-opus-5-5';
+                                            claudeSettings.env.ANTHROPIC_DEFAULT_OPUS_MODEL = 'claude-opus-5-5';
+                                            claudeSettings.env.ANTHROPIC_DEFAULT_SONNET_MODEL = 'claude-opus-5-5';
+                                            claudeSettings.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = 'claude-sonnet-5-5';
+                                            claudeSettings.env.CLAUDE_CODE_SUBAGENT_MODEL = 'claude-sonnet-5-5';
+                                            writeClaudeSettings(claudeSettings);
+
+                                            const newMm = { ...(config.modelMapping || {}) };
+                                            newMm['claude-opus-5-5'] = { mapping: 'gemini-3.8-pro' };
+                                            newMm['claude-sonnet-5-5'] = { mapping: 'gemini-3.8-pro' };
+                                            newMm['claude-haiku-5-5'] = { mapping: 'gemini-3.8-flash-high' };
+                                            saveConfig({ modelMapping: newMm });
+                                            notice = 'Applied Preset: Gemini 3.8 Pro for all models';
+                                            renderScreen();
+                                            return;
+                                        }
+
+                                        if (curIt.id === 'clean') {
+                                            const keys = [
+                                                'ANTHROPIC_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL',
+                                                'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+                                                'CLAUDE_CODE_SUBAGENT_MODEL', 'ANTHROPIC_CLAUDE_OPUS_MODEL',
+                                                'ANTHROPIC_CLAUDE_SONNET_MODEL'
+                                            ];
+                                            claudeSettings.env = claudeSettings.env || {};
+                                            keys.forEach(k => delete claudeSettings.env[k]);
+                                            writeClaudeSettings(claudeSettings);
+                                            notice = 'Cleaned all custom model variables from settings.json';
+                                            renderScreen();
+                                            return;
+                                        }
+
+                                        if (curIt.id === 'save') {
+                                            process.stdin.removeListener('keypress', onKey);
+                                            resolve();
+                                            return;
+                                        }
                                     }
                                 }
-                            } else if (opt === '5') {
-                                const keysToRemove = [
-                                    'ANTHROPIC_MODEL',
-                                    'ANTHROPIC_DEFAULT_OPUS_MODEL',
-                                    'ANTHROPIC_DEFAULT_SONNET_MODEL',
-                                    'ANTHROPIC_DEFAULT_HAIKU_MODEL',
-                                    'CLAUDE_CODE_SUBAGENT_MODEL',
-                                    'ANTHROPIC_CLAUDE_OPUS_MODEL',
-                                    'ANTHROPIC_CLAUDE_SONNET_MODEL',
-                                    'ANTHROPIC_CLAUDE_5_OPUS_MODEL',
-                                    'ANTHROPIC_CLAUDE_5_SONNET_MODEL'
-                                ];
-                                claudeSettings.env = claudeSettings.env || {};
-                                keysToRemove.forEach(k => delete claudeSettings.env[k]);
-                                writeClaudeSettings(claudeSettings);
-                                console.log(`\n${c.actionGreen}✓ Removed all custom model env variables. Returning in 1.5s...${c.reset}`);
-                                await new Promise(r => setTimeout(r, 1500));
-                                setStatus('Cleaned all model environment variables from settings.json.', 2000);
-                            }
-                            rl.close();
+
+                                process.stdin.on('keypress', onKey);
+                                renderScreen();
+                            });
+
+                            setStatus('Model Mappings configuration updated.', 2000);
                         });
                         return;
                     }
@@ -818,10 +988,6 @@ export async function runInteractiveDashboard() {
 
                     if (cur.id === 'check_problem') {
                         await runSubScreen(async () => {
-                            console.log(`${c.brandGreen}╭─────────────────────────────────────────────────────────────────╮${c.reset}`);
-                            console.log(`${c.brandGreen}│  Problem Accounts Diagnostics & Resolution                      │${c.reset}`);
-                            console.log(`${c.brandGreen}╰─────────────────────────────────────────────────────────────────╯${c.reset}\n`);
-
                             const liveMap = new Map();
                             if (proxyHealth && Array.isArray(proxyHealth.accounts)) {
                                 for (const a of proxyHealth.accounts) liveMap.set(a.email, a);
@@ -847,39 +1013,86 @@ export async function runInteractiveDashboard() {
                                 }
                             });
 
-                            if (problems.length === 0) {
-                                console.log(`${c.actionGreen}✨ All accounts are 100% healthy and ready in pool!${c.reset}`);
-                                console.log(`   • ${accountsData.accounts.length} active accounts monitored with zero rate limits or errors.`);
-                                console.log(`\n${c.textMuted}Press Enter to return to Dashboard...${c.reset}`);
-                                const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-                                await new Promise(r => rl.once('line', r));
-                                rl.close();
-                                return;
+                            let selectedProblemIdx = 0;
+
+                            function renderScreen() {
+                                let out = c.clearScreen + c.cursorHome;
+                                out += `${c.brandGreen}╭─────────────────────────────────────────────────────────────────╮${c.reset}\n`;
+                                out += `${c.brandGreen}│  Problem Accounts Diagnostics & Resolution                      │${c.reset}\n`;
+                                out += `${c.brandGreen}╰─────────────────────────────────────────────────────────────────╯${c.reset}\n\n`;
+
+                                if (problems.length === 0) {
+                                    out += `  \x1b[1;38;5;48m✨ All accounts are 100% healthy and ready in pool!${c.reset}\n`;
+                                    out += `  ${c.textMuted}• ${accountsData.accounts.length} active accounts monitored with zero rate limits or errors.${c.reset}\n\n`;
+                                    out += `${c.textMuted}───────────────────────────────────────────────────────────────────${c.reset}\n`;
+                                    out += `${c.textMuted}Details:${c.reset} ${c.textNormal}All accounts are ready. Press Enter or ESC to return.${c.reset}\n`;
+                                    out += `${c.textMuted}Enter / ESC Return to Dashboard${c.reset}`;
+                                    process.stdout.write(out);
+                                    return;
+                                }
+
+                                for (let i = 0; i < problems.length; i++) {
+                                    const p = problems[i];
+                                    const isSel = i === selectedProblemIdx;
+                                    const pointer = isSel ? `\x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
+
+                                    let badge = '';
+                                    if (p.hasVerifyUrl) badge = `${c.statusDanger}[verify-req]${c.reset}`;
+                                    else if (p.isInvalid) badge = `${c.statusDanger}[invalid]${c.reset}`;
+                                    else if (p.isLimited) badge = `${c.statusWarn}[rate-limit]${c.reset}`;
+                                    else if (p.isDisabled) badge = `${c.statusMuted}[disabled]${c.reset}`;
+
+                                    const line = isSel
+                                        ? `\x1b[1;38;5;255mAccount ${p.index}: ${p.account.email}\x1b[0m  ${badge}`
+                                        : `\x1b[38;5;250mAccount ${p.index}: ${p.account.email}\x1b[0m  ${badge}`;
+
+                                    out += `${pointer}${line}${c.clearToEndOfLine}\n`;
+                                }
+
+                                const curP = problems[selectedProblemIdx];
+                                let fixAction = '';
+                                if (curP.hasVerifyUrl) fixAction = 'Press V on Dashboard to open Google Verification link in browser';
+                                else if (curP.isInvalid) fixAction = 'Press R on Dashboard to re-authenticate via OAuth';
+                                else if (curP.isLimited) fixAction = 'Account cooling down · Auto-recovers when quota resets';
+                                else if (curP.isDisabled) fixAction = 'Press T on Dashboard to re-enable account in pool';
+
+                                out += `\n${c.textMuted}───────────────────────────────────────────────────────────────────${c.reset}\n`;
+                                out += `${c.textMuted}Details:${c.reset} ${c.textNormal}${fixAction}${c.reset}${c.clearToEndOfLine}\n`;
+                                out += `${c.textMuted}↑↓ Move | Enter / ESC Return to Dashboard${c.reset}`;
+                                process.stdout.write(out);
                             }
 
-                            console.log(`Found ${c.statusDanger}${problems.length} account(s)${c.reset} requiring attention:\n`);
-                            problems.forEach((p, idx) => {
-                                console.log(`${c.bold}${idx + 1}. Account ${p.index}: ${p.account.email}${c.reset}`);
-                                if (p.hasVerifyUrl) {
-                                    console.log(`   • Issue:  ${c.statusDanger}Google Security Checkpoint / Validation Required${c.reset}`);
-                                    console.log(`   • Fix:    Press ${c.bold}V${c.reset} on Dashboard to open Google Verification link in browser.`);
-                                } else if (p.isInvalid) {
-                                    console.log(`   • Issue:  ${c.statusDanger}Credentials Invalid / Expired (${p.account.invalidReason || 'Auth Error'})${c.reset}`);
-                                    console.log(`   • Fix:    Press ${c.bold}R${c.reset} on Dashboard to re-authenticate via OAuth.`);
-                                } else if (p.isLimited) {
-                                    console.log(`   • Issue:  ${c.statusWarn}Rate Limited / Quota Exhausted${c.reset}`);
-                                    console.log(`   • Fix:    Account is cooling down. Proxy will auto-recover when quota resets.`);
-                                } else if (p.isDisabled) {
-                                    console.log(`   • Issue:  ${c.textMuted}Manually Disabled${c.reset}`);
-                                    console.log(`   • Fix:    Press ${c.bold}T${c.reset} on Dashboard to re-enable account in pool.`);
-                                }
-                                console.log('');
-                            });
+                            await new Promise((resolve) => {
+                                if (process.stdin.isTTY) process.stdin.setRawMode(true);
+                                readline.emitKeypressEvents(process.stdin);
 
-                            console.log(`${c.textMuted}Press Enter to return to Dashboard...${c.reset}`);
-                            const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-                            await new Promise(r => rl.once('line', r));
-                            rl.close();
+                                function onKey(str, key) {
+                                    if (!key) return;
+
+                                    if (key.name === 'escape' || key.name === 'return' || key.name === 'enter' || (key.ctrl && key.name === 'c')) {
+                                        process.stdin.removeListener('keypress', onKey);
+                                        resolve();
+                                        return;
+                                    }
+
+                                    if (problems.length > 0) {
+                                        if (key.name === 'up' || key.name === 'k') {
+                                            selectedProblemIdx = (selectedProblemIdx - 1 + problems.length) % problems.length;
+                                            renderScreen();
+                                            return;
+                                        }
+
+                                        if (key.name === 'down' || key.name === 'j') {
+                                            selectedProblemIdx = (selectedProblemIdx + 1) % problems.length;
+                                            renderScreen();
+                                            return;
+                                        }
+                                    }
+                                }
+
+                                process.stdin.on('keypress', onKey);
+                                renderScreen();
+                            });
                         });
                         return;
                     }
@@ -896,70 +1109,72 @@ export async function runInteractiveDashboard() {
                             let notice = '';
 
                             const settingsItems = [
-                                { id: 'threshold', label: 'Quota Rotation Threshold', unit: '%', desc: 'Rotates account after consuming this quota %', min: 1, max: 100, step: 1 },
-                                { id: 'reqCap', label: 'Fallback Request Cap', unit: 'reqs', desc: 'Rotates account after this many requests if quota delayed', min: 1, max: 500, step: 5 },
-                                { id: 'cooldown', label: 'Switch Delay Cooldown', unit: 'ms', desc: 'Delay cooldown before switching account on error', min: 500, max: 60000, step: 500 },
-                                { id: 'port', label: 'Proxy Listen Port', unit: '', desc: 'Local HTTP port (requires proxy restart to apply)', min: 1024, max: 65535, step: 1 },
-                                { id: 'reset', label: '↺  Reset All to Defaults', desc: 'Restore defaults: 5% threshold, 20 reqs, 5000ms delay' },
-                                { id: 'save', label: '✓  Save & Return to Dashboard', desc: 'Write changes to ~/.config/antigravity-proxy/config.json' }
+                                { id: 'threshold', label: 'Quota Rotation Threshold', unit: '%', desc: 'Rotates account after consuming this quota % to stagger 5h recovery' },
+                                { id: 'reqCap', label: 'Fallback Request Cap', unit: 'reqs', desc: 'Rotates account after this many requests if quota telemetry delayed' },
+                                { id: 'cooldown', label: 'Switch Delay Cooldown', unit: 'ms', desc: 'Cooldown delay in milliseconds before switching account on error' },
+                                { id: 'port', label: 'Proxy Listen Port', unit: '', desc: 'Local HTTP proxy listen port (requires proxy restart to apply)' },
+                                { id: 'reset', label: 'Reset All to Defaults', unit: '', desc: 'Restore recommended defaults: 5% quota, 20 reqs, 5000ms delay' },
+                                { id: 'save', label: 'Save & Return to Dashboard', unit: '', desc: 'Write configuration to ~/.config/antigravity-proxy/config.json' }
                             ];
 
                             function getSettingVal(idx) {
-                                if (idx === 0) return thresholdPct;
-                                if (idx === 1) return reqCap;
-                                if (idx === 2) return cooldown;
-                                if (idx === 3) return proxyPort;
+                                if (idx === 0) return thresholdPct + '%';
+                                if (idx === 1) return reqCap + ' reqs';
+                                if (idx === 2) return cooldown + 'ms';
+                                if (idx === 3) return proxyPort.toString();
                                 return '';
                             }
 
-                            function setSettingVal(idx, val) {
+                            function setSettingRawVal(idx, val) {
                                 if (idx === 0) thresholdPct = val;
                                 else if (idx === 1) reqCap = val;
                                 else if (idx === 2) cooldown = val;
                                 else if (idx === 3) proxyPort = val;
                             }
 
-                            function renderSettingsScreen() {
+                            function getSettingRawNum(idx) {
+                                if (idx === 0) return thresholdPct;
+                                if (idx === 1) return reqCap;
+                                if (idx === 2) return cooldown;
+                                if (idx === 3) return proxyPort;
+                                return 0;
+                            }
+
+                            function renderScreen() {
                                 let out = c.clearScreen + c.cursorHome;
                                 out += `${c.brandGreen}╭─────────────────────────────────────────────────────────────────╮${c.reset}\n`;
-                                out += `${c.brandGreen}│  atc Engine Settings & Configuration (In-Place Editor)          │${c.reset}\n`;
+                                out += `${c.brandGreen}│  atc Engine Settings & Parameters                               │${c.reset}\n`;
                                 out += `${c.brandGreen}╰─────────────────────────────────────────────────────────────────╯${c.reset}\n\n`;
 
-                                out += `${c.textMuted}Config file: ~/.config/antigravity-proxy/config.json${c.reset}\n\n`;
-
                                 for (let i = 0; i < settingsItems.length; i++) {
-                                    const item = settingsItems[i];
+                                    const it = settingsItems[i];
                                     const isSel = i === activeSettingIdx;
-                                    const pointer = isSel ? `[1;38;5;48m> ` : `  [38;5;240m· `;
+                                    const pointer = isSel ? `\x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
+                                    const valStr = isEditing && isSel ? `${editBuffer}_` : getSettingVal(i);
 
-                                    if (item.id === 'reset' || item.id === 'save') {
-                                        out += `\n`;
-                                        if (isSel) {
-                                            out += `${pointer}[1;38;5;255;48;5;236m ${item.label} ${c.reset}  ${c.textMuted}${item.desc}${c.reset}\n`;
-                                        } else {
-                                            out += `${pointer}[38;5;248m${item.label}${c.reset}\n`;
-                                        }
-                                        continue;
+                                    let line = '';
+                                    if (valStr) {
+                                        line = isSel
+                                            ? `\x1b[1;38;5;255m${it.label}:\x1b[0m \x1b[1;38;5;120m[${valStr}]\x1b[0m`
+                                            : `\x1b[38;5;250m${it.label}:\x1b[0m \x1b[38;5;147m[${valStr}]\x1b[0m`;
+                                    } else {
+                                        line = isSel
+                                            ? `\x1b[1;38;5;255m${it.label}${c.reset}`
+                                            : `\x1b[38;5;248m${it.label}${c.reset}`;
                                     }
 
-                                    const currentVal = isSel && isEditing ? editBuffer : getSettingVal(i);
-                                    const valBox = isSel
-                                        ? `[1;38;5;120m[ [48;5;236m${currentVal}[0;1;38;5;120m ][0m ${c.bold}${item.unit}${c.reset}`
-                                        : `[38;5;250m[ ${currentVal} ] ${item.unit}[0m`;
-
-                                    const labelPad = item.label.padEnd(28, ' ');
-                                    out += `${pointer}${isSel ? c.bold : ''}${labelPad}${c.reset} ${valBox}  ${c.textMuted}(${item.desc})${c.reset}\n`;
+                                    out += `${pointer}${line}${c.clearToEndOfLine}\n`;
                                 }
 
                                 out += `\n`;
+                                const curIt = settingsItems[activeSettingIdx];
                                 if (notice) {
-                                    out += `${c.statusWarn}ℹ ${notice}${c.reset}\n\n`;
+                                    out += `${c.statusWarn}ℹ ${notice}${c.reset}${c.clearToEndOfLine}\n`;
                                 } else {
-                                    out += `\n`;
+                                    out += `${c.textMuted}Details:${c.reset} ${c.textNormal}${curIt.desc}${c.reset}${c.clearToEndOfLine}\n`;
                                 }
 
-                                out += `${c.textMuted}───────────────────────────────────────────────────────────────────${c.reset}\n`;
-                                out += `${c.textMuted}↑↓ Scroll | ←→ Adjust | 0-9 Type | Backspace Delete | Enter Next/Save | ESC Return${c.reset}`;
+                                out += `${c.textMuted}↑↓ Move | ←→ Adjust | 0-9 Type | Backspace Delete | Enter Next/Save | ESC Return${c.reset}${c.clearToEndOfLine}`;
                                 process.stdout.write(out);
                             }
 
@@ -967,11 +1182,10 @@ export async function runInteractiveDashboard() {
                                 if (process.stdin.isTTY) process.stdin.setRawMode(true);
                                 readline.emitKeypressEvents(process.stdin);
 
-                                function onSettingKey(str, key) {
+                                function onKey(str, key) {
                                     if (!key) return;
 
                                     if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
-                                        // Save and return
                                         const accSel = { ...(config.accountSelection || {}), stepThreshold: thresholdPct / 100, requestThreshold: reqCap };
                                         saveConfig({ accountSelection: accSel, switchAccountDelayMs: cooldown, port: proxyPort });
                                         cleanup();
@@ -984,7 +1198,7 @@ export async function runInteractiveDashboard() {
                                         editBuffer = '';
                                         notice = '';
                                         activeSettingIdx = (activeSettingIdx - 1 + settingsItems.length) % settingsItems.length;
-                                        renderSettingsScreen();
+                                        renderScreen();
                                         return;
                                     }
 
@@ -993,7 +1207,7 @@ export async function runInteractiveDashboard() {
                                         editBuffer = '';
                                         notice = '';
                                         activeSettingIdx = (activeSettingIdx + 1) % settingsItems.length;
-                                        renderSettingsScreen();
+                                        renderScreen();
                                         return;
                                     }
 
@@ -1001,24 +1215,26 @@ export async function runInteractiveDashboard() {
                                     if (key.name === 'left' && activeSettingIdx < 4) {
                                         isEditing = false;
                                         editBuffer = '';
-                                        const item = settingsItems[activeSettingIdx];
-                                        const curVal = getSettingVal(activeSettingIdx);
-                                        const newVal = Math.max(item.min, curVal - item.step);
-                                        setSettingVal(activeSettingIdx, newVal);
-                                        notice = `Adjusted ${item.label} to ${newVal}${item.unit}`;
-                                        renderSettingsScreen();
+                                        const step = activeSettingIdx === 2 ? 500 : (activeSettingIdx === 1 ? 5 : 1);
+                                        const curVal = getSettingRawNum(activeSettingIdx);
+                                        const minVal = activeSettingIdx === 0 ? 1 : (activeSettingIdx === 2 ? 500 : 1);
+                                        const newVal = Math.max(minVal, curVal - step);
+                                        setSettingRawVal(activeSettingIdx, newVal);
+                                        notice = `Adjusted ${settingsItems[activeSettingIdx].label} to ${getSettingVal(activeSettingIdx)}`;
+                                        renderScreen();
                                         return;
                                     }
 
                                     if (key.name === 'right' && activeSettingIdx < 4) {
                                         isEditing = false;
                                         editBuffer = '';
-                                        const item = settingsItems[activeSettingIdx];
-                                        const curVal = getSettingVal(activeSettingIdx);
-                                        const newVal = Math.min(item.max, curVal + item.step);
-                                        setSettingVal(activeSettingIdx, newVal);
-                                        notice = `Adjusted ${item.label} to ${newVal}${item.unit}`;
-                                        renderSettingsScreen();
+                                        const step = activeSettingIdx === 2 ? 500 : (activeSettingIdx === 1 ? 5 : 1);
+                                        const curVal = getSettingRawNum(activeSettingIdx);
+                                        const maxVal = activeSettingIdx === 0 ? 100 : (activeSettingIdx === 1 ? 500 : (activeSettingIdx === 2 ? 60000 : 65535));
+                                        const newVal = Math.min(maxVal, curVal + step);
+                                        setSettingRawVal(activeSettingIdx, newVal);
+                                        notice = `Adjusted ${settingsItems[activeSettingIdx].label} to ${getSettingVal(activeSettingIdx)}`;
+                                        renderScreen();
                                         return;
                                     }
 
@@ -1031,11 +1247,11 @@ export async function runInteractiveDashboard() {
                                             editBuffer += str;
                                         }
                                         const parsed = parseInt(editBuffer, 10);
-                                        const item = settingsItems[activeSettingIdx];
-                                        if (!isNaN(parsed) && parsed <= item.max) {
-                                            setSettingVal(activeSettingIdx, parsed);
+                                        const maxVal = activeSettingIdx === 0 ? 100 : (activeSettingIdx === 1 ? 500 : (activeSettingIdx === 2 ? 60000 : 65535));
+                                        if (!isNaN(parsed) && parsed <= maxVal) {
+                                            setSettingRawVal(activeSettingIdx, parsed);
                                         }
-                                        renderSettingsScreen();
+                                        renderScreen();
                                         return;
                                     }
 
@@ -1043,12 +1259,12 @@ export async function runInteractiveDashboard() {
                                     if (key.name === 'backspace' && activeSettingIdx < 4) {
                                         if (!isEditing) {
                                             isEditing = true;
-                                            editBuffer = getSettingVal(activeSettingIdx).toString();
+                                            editBuffer = getSettingRawNum(activeSettingIdx).toString();
                                         }
                                         editBuffer = editBuffer.slice(0, -1);
-                                        const parsed = parseInt(editBuffer, 10) || settingsItems[activeSettingIdx].min;
-                                        setSettingVal(activeSettingIdx, parsed);
-                                        renderSettingsScreen();
+                                        const parsed = parseInt(editBuffer, 10) || 1;
+                                        setSettingRawVal(activeSettingIdx, parsed);
+                                        renderScreen();
                                         return;
                                     }
 
@@ -1057,17 +1273,15 @@ export async function runInteractiveDashboard() {
                                         isEditing = false;
                                         editBuffer = '';
                                         if (activeSettingIdx === 4) {
-                                            // Reset to defaults
                                             thresholdPct = 5;
                                             reqCap = 20;
                                             cooldown = 5000;
-                                            notice = 'Reset all settings to recommended defaults (5% quota, 20 requests).';
-                                            renderSettingsScreen();
+                                            notice = 'Reset all settings to recommended defaults (5% quota, 20 reqs, 5000ms delay).';
+                                            renderScreen();
                                             return;
                                         }
 
                                         if (activeSettingIdx === 5) {
-                                            // Save and return
                                             const accSel = { ...(config.accountSelection || {}), stepThreshold: thresholdPct / 100, requestThreshold: reqCap };
                                             saveConfig({ accountSelection: accSel, switchAccountDelayMs: cooldown, port: proxyPort });
                                             cleanup();
@@ -1075,19 +1289,18 @@ export async function runInteractiveDashboard() {
                                             return;
                                         }
 
-                                        // Move to next setting
                                         activeSettingIdx = (activeSettingIdx + 1) % settingsItems.length;
-                                        renderSettingsScreen();
+                                        renderScreen();
                                         return;
                                     }
                                 }
 
                                 function cleanup() {
-                                    process.stdin.removeListener('keypress', onSettingKey);
+                                    process.stdin.removeListener('keypress', onKey);
                                 }
 
-                                process.stdin.on('keypress', onSettingKey);
-                                renderSettingsScreen();
+                                process.stdin.on('keypress', onKey);
+                                renderScreen();
                             });
 
                             setStatus(`Saved Engine Settings: ${thresholdPct}% quota, ${reqCap} req cap.`, 2000);
