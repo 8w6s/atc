@@ -106,10 +106,10 @@ function formatPlanBadge(tier) {
 function getStrategyCycle() {
     const thresholdPct = Math.round((config?.accountSelection?.stepThreshold || 0.05) * 100);
     return [
-        { id: 'pipelined', label: `Pipelined ${thresholdPct}%`, desc: `Rotates every ${thresholdPct}% quota to stagger 5h recovery windows in parallel` },
-        { id: 'hybrid', label: 'Hybrid (Smart)', desc: 'Smart scoring combining health, token bucket, and quota' },
-        { id: 'round-robin', label: 'Round-Robin', desc: 'Even rotation per-request across all available accounts' },
-        { id: 'sticky', label: 'Sticky (Cache)', desc: 'Keeps using current account to maximize prompt caching' }
+        { id: 'pipelined', label: `Pipelined Quota Shift ${thresholdPct}%`, desc: `Staggers accounts: shifts to next account every ${thresholdPct}% quota drop` },
+        { id: 'hybrid', label: 'Hybrid Score', desc: 'Balances health rating, quota availability, and token buckets' },
+        { id: 'round-robin', label: 'Round-Robin', desc: 'Cycles sequentially per request across ready accounts' },
+        { id: 'sticky', label: 'Sticky Cache', desc: 'Pins to current account until exhausted to maximize prompt caching' }
     ];
 }
 
@@ -748,21 +748,64 @@ export async function runInteractiveDashboard() {
                         await runSubScreen(async () => {
                             const claudeSettings = readClaudeSettings();
                             const cEnv = claudeSettings.env || {};
-                            const mm = config.modelMapping || {};
-
                             let selectedIdx = 0;
                             let notice = '';
 
                             function getItemsList() {
                                 const env = claudeSettings.env || {};
+                                const mm = config.modelMapping || {};
+
+                                const defaultMain = env.ANTHROPIC_MODEL || 'claude-sonnet-5-5';
+                                const defaultSub = env.CLAUDE_CODE_SUBAGENT_MODEL || 'claude-haiku-5-5';
+                                const defaultOpus = env.ANTHROPIC_DEFAULT_OPUS_MODEL || 'claude-opus-5-5';
+                                const defaultSonnet = env.ANTHROPIC_DEFAULT_SONNET_MODEL || 'claude-sonnet-5-5';
+                                const defaultHaiku = env.ANTHROPIC_DEFAULT_HAIKU_MODEL || 'claude-haiku-5-5';
+
                                 return [
-                                    { id: 'ANTHROPIC_MODEL', label: 'Main Model (ANTHROPIC_MODEL)', val: env.ANTHROPIC_MODEL || 'default', desc: 'Primary model used by Claude Code CLI (leave blank for default)' },
-                                    { id: 'CLAUDE_CODE_SUBAGENT_MODEL', label: 'Subagent Model (CLAUDE_CODE_SUBAGENT)', val: env.CLAUDE_CODE_SUBAGENT_MODEL || 'default', desc: 'Model used for background Claude Code subagents' },
-                                    { id: 'ANTHROPIC_DEFAULT_OPUS_MODEL', label: 'Opus Override (ANTHROPIC_DEFAULT_OPUS)', val: env.ANTHROPIC_DEFAULT_OPUS_MODEL || 'default', desc: 'Mapping override when Claude Code requests Opus' },
-                                    { id: 'ANTHROPIC_DEFAULT_SONNET_MODEL', label: 'Sonnet Override (ANTHROPIC_DEFAULT_SONNET)', val: env.ANTHROPIC_DEFAULT_SONNET_MODEL || 'default', desc: 'Mapping override when Claude Code requests Sonnet' },
-                                    { id: 'ANTHROPIC_DEFAULT_HAIKU_MODEL', label: 'Haiku Override (ANTHROPIC_DEFAULT_HAIKU)', val: env.ANTHROPIC_DEFAULT_HAIKU_MODEL || 'default', desc: 'Mapping override when Claude Code requests Haiku' },
-                                    { id: 'preset_speed', label: 'Apply Preset: Max Performance', val: '', desc: 'Sonnet/Opus -> Flash-High, Subagent/Haiku -> Flash-Lite' },
-                                    { id: 'preset_balanced', label: 'Apply Preset: Balanced', val: '', desc: 'Opus -> Flash-High, Sonnet -> Flash-Medium, Subagent/Haiku -> Flash-Lite' },
+                                    {
+                                        id: 'ANTHROPIC_MODEL',
+                                        label: 'Main Model (ANTHROPIC_MODEL)',
+                                        val: defaultMain,
+                                        target: getMappingTarget(mm, defaultMain),
+                                        desc: 'Fake ID sent by Claude Code → translated by ATC to target Google model'
+                                    },
+                                    {
+                                        id: 'CLAUDE_CODE_SUBAGENT_MODEL',
+                                        label: 'Subagent Model (CLAUDE_CODE_SUBAGENT)',
+                                        val: defaultSub,
+                                        target: getMappingTarget(mm, defaultSub),
+                                        desc: 'Fake ID sent by subagents → translated by ATC to target Google model'
+                                    },
+                                    {
+                                        id: 'ANTHROPIC_DEFAULT_OPUS_MODEL',
+                                        label: 'Opus Override (ANTHROPIC_DEFAULT_OPUS)',
+                                        val: defaultOpus,
+                                        target: getMappingTarget(mm, defaultOpus),
+                                        desc: 'Opus request translation → translated by ATC to target Google model'
+                                    },
+                                    {
+                                        id: 'ANTHROPIC_DEFAULT_SONNET_MODEL',
+                                        label: 'Sonnet Override (ANTHROPIC_DEFAULT_SONNET)',
+                                        val: defaultSonnet,
+                                        target: getMappingTarget(mm, defaultSonnet),
+                                        desc: 'Sonnet request translation → translated by ATC to target Google model'
+                                    },
+                                    {
+                                        id: 'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+                                        label: 'Haiku Override (ANTHROPIC_DEFAULT_HAIKU)',
+                                        val: defaultHaiku,
+                                        target: getMappingTarget(mm, defaultHaiku),
+                                        desc: 'Haiku request translation → translated by ATC to target Google model'
+                                    },
+                                    {
+                                        id: 'custom_fake',
+                                        label: 'Add / Edit Custom Fake Model (e.g. gpt-6-sol)',
+                                        val: '',
+                                        target: '',
+                                        desc: 'Create or update any arbitrary Fake Model ID mapping to a Gemini backend'
+                                    },
+                                    { id: 'preset_speed', label: 'Apply Preset: Max Performance', val: '', desc: 'Sonnet/Opus → Flash-High, Subagent/Haiku → Flash-Lite' },
+                                    { id: 'preset_balanced', label: 'Apply Preset: Balanced', val: '', desc: 'Opus → Flash-High, Sonnet → Flash-Medium, Subagent/Haiku → Flash-Lite' },
                                     { id: 'preset_quality', label: 'Apply Preset: Gemini 3.8 Pro', val: '', desc: 'Route all model requests to high-reasoning Gemini 3.8 Pro' },
                                     { id: 'clean', label: 'Clean All Custom Model Overrides', val: '', desc: 'Remove all model environment variables from ~/.claude/settings.json' },
                                     { id: 'save', label: 'Save & Return to Dashboard', val: '', desc: 'Return to main dashboard' }
@@ -773,7 +816,7 @@ export async function runInteractiveDashboard() {
                                 const list = getItemsList();
                                 let out = c.clearScreen + c.cursorHome;
                                 out += `${c.brandGreen}╭─────────────────────────────────────────────────────────────────╮${c.reset}\n`;
-                                out += `${c.brandGreen}│  Model Mappings & Claude Code Environment Variables             │${c.reset}\n`;
+                                out += `${c.brandGreen}│  Model Mappings & Fake ID Routing                               │${c.reset}\n`;
                                 out += `${c.brandGreen}╰─────────────────────────────────────────────────────────────────╯${c.reset}\n\n`;
 
                                 for (let i = 0; i < list.length; i++) {
@@ -783,9 +826,10 @@ export async function runInteractiveDashboard() {
 
                                     let line = '';
                                     if (it.val) {
+                                        const targetTag = it.target ? ` \x1b[38;5;245m→\x1b[0m \x1b[1;38;5;51m${it.target}\x1b[0m` : '';
                                         line = isSel
-                                            ? `\x1b[1;38;5;255m${it.label}:\x1b[0m \x1b[1;38;5;120m[${it.val}]\x1b[0m`
-                                            : `\x1b[38;5;250m${it.label}:\x1b[0m \x1b[38;5;147m[${it.val}]\x1b[0m`;
+                                            ? `\x1b[1;38;5;255m${it.label}:\x1b[0m \x1b[1;38;5;120m[${it.val}]\x1b[0m${targetTag}`
+                                            : `\x1b[38;5;250m${it.label}:\x1b[0m \x1b[38;5;147m[${it.val}]\x1b[0m${targetTag}`;
                                     } else {
                                         line = isSel
                                             ? `\x1b[1;38;5;255m${it.label}${c.reset}`
@@ -837,26 +881,64 @@ export async function runInteractiveDashboard() {
                                     if (key.name === 'return' || key.name === 'enter') {
                                         const curIt = list[selectedIdx];
 
-                                        // Editing model env variable
+                                        // Editing model env variable and target mapping
                                         if (selectedIdx < 5) {
                                             process.stdin.removeListener('keypress', onKey);
                                             if (process.stdin.isTTY) process.stdin.setRawMode(false);
                                             process.stdout.write(c.showCursor);
-                                            console.log(`\n\nEnter model ID for ${curIt.id} (leave empty to delete env):`);
+
+                                            console.log(`\n\nConfigure Fake Model ID & Backend Target for ${curIt.id}:`);
+                                            console.log(`Current: Fake ID = [${curIt.val}] → Backend = [${curIt.target}]`);
+
                                             const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-                                            const newVal = await new Promise(r => rl.question('> ', r));
+                                            console.log(`\nStep 1: Enter Fake Model ID (client requests this name, e.g. claude-sonnet-5-5, gpt-6-sol):`);
+                                            const newFake = await new Promise(r => rl.question(`[default: ${curIt.val}] > `, r));
+
+                                            console.log(`\nStep 2: Enter Google Backend Model to execute (e.g. gemini-3.8-flash-high, gemini-3.8-flash-medium, gemini-2.5-pro, gemini-3.1-flash-lite):`);
+                                            const newBackend = await new Promise(r => rl.question(`[default: ${curIt.target}] > `, r));
                                             rl.close();
 
-                                            const trimmed = newVal.trim();
+                                            const finalFake = newFake.trim() || curIt.val;
+                                            const finalBackend = newBackend.trim() || curIt.target;
+
                                             claudeSettings.env = claudeSettings.env || {};
-                                            if (trimmed && trimmed.toLowerCase() !== 'delete' && trimmed.toLowerCase() !== 'clear') {
-                                                claudeSettings.env[curIt.id] = trimmed;
-                                                writeClaudeSettings(claudeSettings);
-                                                notice = `Saved ${curIt.id} = ${trimmed}`;
-                                            } else {
-                                                delete claudeSettings.env[curIt.id];
-                                                writeClaudeSettings(claudeSettings);
-                                                notice = `Removed ${curIt.id} from settings.json`;
+                                            claudeSettings.env[curIt.id] = finalFake;
+                                            writeClaudeSettings(claudeSettings);
+
+                                            const newMm = { ...(config.modelMapping || {}) };
+                                            newMm[finalFake] = { mapping: finalBackend };
+                                            saveConfig({ modelMapping: newMm });
+
+                                            notice = `Mapped [${finalFake}] → [${finalBackend}] for ${curIt.id}`;
+
+                                            if (process.stdin.isTTY) process.stdin.setRawMode(true);
+                                            process.stdout.write(c.hideCursor);
+                                            process.stdin.on('keypress', onKey);
+                                            renderScreen();
+                                            return;
+                                        }
+
+                                        if (curIt.id === 'custom_fake') {
+                                            process.stdin.removeListener('keypress', onKey);
+                                            if (process.stdin.isTTY) process.stdin.setRawMode(false);
+                                            process.stdout.write(c.showCursor);
+
+                                            console.log(`\n\nAdd Custom Fake Model ID Mapping:`);
+                                            const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+                                            console.log(`Enter Fake Model ID (e.g. gpt-6-sol, my-custom-agent, claude-opus-5.5):`);
+                                            const fakeName = await new Promise(r => rl.question(`> `, r));
+
+                                            console.log(`Enter Google Gemini Backend Model (e.g. gemini-3.8-flash-high, gemini-3.8-flash-medium, gemini-2.5-pro, gemini-3.1-flash-lite):`);
+                                            const backendName = await new Promise(r => rl.question(`[default: gemini-3.8-flash-high] > `, r));
+                                            rl.close();
+
+                                            const f = fakeName.trim();
+                                            const b = backendName.trim() || 'gemini-3.8-flash-high';
+                                            if (f) {
+                                                const newMm = { ...(config.modelMapping || {}) };
+                                                newMm[f] = { mapping: b };
+                                                saveConfig({ modelMapping: newMm });
+                                                notice = `Added custom fake mapping: [${f}] → [${b}]`;
                                             }
 
                                             if (process.stdin.isTTY) process.stdin.setRawMode(true);
@@ -961,6 +1043,10 @@ export async function runInteractiveDashboard() {
                         if (proxyHealth && Array.isArray(proxyHealth.accounts)) {
                             for (const a of proxyHealth.accounts) liveMap.set(a.email, a);
                         }
+                        const limitsMap = new Map();
+                        if (proxyLimits && Array.isArray(proxyLimits.accounts)) {
+                            for (const a of proxyLimits.accounts) limitsMap.set(a.email, a);
+                        }
                         let bestIdx = 1;
                         let bestScore = -1;
                         const tierWeight = { ultra: 30, pro: 20, plus: 10, free: 0 };
@@ -1022,8 +1108,8 @@ export async function runInteractiveDashboard() {
                                 out += `${c.brandGreen}╰─────────────────────────────────────────────────────────────────╯${c.reset}\n\n`;
 
                                 if (problems.length === 0) {
-                                    out += `  \x1b[1;38;5;48m✨ All accounts are 100% healthy and ready in pool!${c.reset}\n`;
-                                    out += `  ${c.textMuted}• ${accountsData.accounts.length} active accounts monitored with zero rate limits or errors.${c.reset}\n\n`;
+                                    out += `  \x1b[1;38;5;48m✓ All accounts are active and ready in pool.${c.reset}\n`;
+                                    out += `  ${c.textMuted}• ${accountsData.accounts.length} accounts configured for request routing.${c.reset}\n\n`;
                                     out += `${c.textMuted}───────────────────────────────────────────────────────────────────${c.reset}\n`;
                                     out += `${c.textMuted}Details:${c.reset} ${c.textNormal}All accounts are ready. Press Enter or ESC to return.${c.reset}\n`;
                                     out += `${c.textMuted}Enter / ESC Return to Dashboard${c.reset}`;

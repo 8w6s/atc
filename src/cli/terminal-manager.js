@@ -494,7 +494,7 @@ async function recordNewAccount(result, accounts, settings, activeIndex) {
     const port = getProxyPort();
     const reloaded = await notifyProxyReload(port);
     if (reloaded) {
-        console.log(`  ${c.gray}Hot-reloaded proxy pool on port ${port} (zero downtime).${c.reset}\n`);
+        console.log(`  ${c.gray}Hot-reloaded proxy pool on port ${port}.${c.reset}\n`);
     } else {
         console.log(`  ${c.gray}Accounts saved to disk.${c.reset}\n`);
     }
