@@ -1104,40 +1104,97 @@ export async function runInteractiveDashboard() {
                             let cooldown = config?.switchAccountDelayMs || 5000;
                             let proxyPort = config?.port || 43128;
                             let activeSettingIdx = 0;
+                            let isFocusEditing = false;
                             let editBuffer = '';
-                            let isEditing = false;
                             let notice = '';
 
-                            const settingsItems = [
-                                { id: 'threshold', label: 'Quota Rotation Threshold', unit: '%', desc: 'Rotates account after consuming this quota % to stagger 5h recovery' },
-                                { id: 'reqCap', label: 'Fallback Request Cap', unit: 'reqs', desc: 'Rotates account after this many requests if quota telemetry delayed' },
-                                { id: 'cooldown', label: 'Switch Delay Cooldown', unit: 'ms', desc: 'Cooldown delay in milliseconds before switching account on error' },
-                                { id: 'port', label: 'Proxy Listen Port', unit: '', desc: 'Local HTTP proxy listen port (requires proxy restart to apply)' },
-                                { id: 'reset', label: 'Reset All to Defaults', unit: '', desc: 'Restore recommended defaults: 5% quota, 20 reqs, 5000ms delay' },
-                                { id: 'save', label: 'Save & Return to Dashboard', unit: '', desc: 'Write configuration to ~/.config/antigravity-proxy/config.json' }
+                            const settingsMeta = [
+                                {
+                                    id: 'threshold',
+                                    label: 'Quota Rotation Threshold',
+                                    unit: '%',
+                                    desc: 'Rotates account after using this quota % to stagger 5h recovery in parallel',
+                                    min: 1, max: 50, step: 1,
+                                    safeMin: 3, safeMax: 15,
+                                    warnLow: 'Below 3%: rapid account cycling from same IP may trigger Google scrutiny',
+                                    warnHigh: 'Above 15%: single account quota drains heavily before rotation'
+                                },
+                                {
+                                    id: 'reqCap',
+                                    label: 'Fallback Request Cap',
+                                    unit: 'reqs',
+                                    desc: 'Rotates account after this many requests if quota telemetry delayed',
+                                    min: 5, max: 200, step: 5,
+                                    safeMin: 10, safeMax: 50,
+                                    warnLow: 'Below 10 reqs: switches accounts excessively during slow telemetry',
+                                    warnHigh: 'Above 50 reqs: risk of depleting account quota before switching'
+                                },
+                                {
+                                    id: 'cooldown',
+                                    label: 'Switch Delay Cooldown',
+                                    unit: 'ms',
+                                    desc: 'Cooldown delay in milliseconds before switching account on error',
+                                    min: 500, max: 30000, step: 500,
+                                    safeMin: 2000, safeMax: 10000,
+                                    warnLow: 'Below 2000ms: rapid failovers may trigger Google rate limit firewalls',
+                                    warnHigh: 'Above 10000ms: sluggish error recovery time for user requests'
+                                },
+                                {
+                                    id: 'port',
+                                    label: 'Proxy Listen Port',
+                                    unit: '',
+                                    desc: 'Local HTTP proxy listen port (requires proxy restart to take effect)',
+                                    min: 1024, max: 65535, step: 1,
+                                    safeMin: 1024, safeMax: 65535,
+                                    warnLow: 'Ports below 1024 require root/administrator privileges',
+                                    warnHigh: 'Port number out of valid TCP range'
+                                },
+                                {
+                                    id: 'reset',
+                                    label: 'Reset All to Defaults',
+                                    unit: '',
+                                    desc: 'Restore recommended safe defaults (5% quota, 20 requests, 5000ms cooldown)'
+                                },
+                                {
+                                    id: 'save',
+                                    label: 'Save & Return to Dashboard',
+                                    unit: '',
+                                    desc: 'Save all parameters to ~/.config/antigravity-proxy/config.json'
+                                }
                             ];
 
-                            function getSettingVal(idx) {
-                                if (idx === 0) return thresholdPct + '%';
-                                if (idx === 1) return reqCap + ' reqs';
-                                if (idx === 2) return cooldown + 'ms';
-                                if (idx === 3) return proxyPort.toString();
-                                return '';
-                            }
-
-                            function setSettingRawVal(idx, val) {
-                                if (idx === 0) thresholdPct = val;
-                                else if (idx === 1) reqCap = val;
-                                else if (idx === 2) cooldown = val;
-                                else if (idx === 3) proxyPort = val;
-                            }
-
-                            function getSettingRawNum(idx) {
+                            function getValNum(idx) {
                                 if (idx === 0) return thresholdPct;
                                 if (idx === 1) return reqCap;
                                 if (idx === 2) return cooldown;
                                 if (idx === 3) return proxyPort;
                                 return 0;
+                            }
+
+                            function setValNum(idx, num) {
+                                const meta = settingsMeta[idx];
+                                const clamped = Math.max(meta.min, Math.min(meta.max, num));
+                                if (idx === 0) thresholdPct = clamped;
+                                else if (idx === 1) reqCap = clamped;
+                                else if (idx === 2) cooldown = clamped;
+                                else if (idx === 3) proxyPort = clamped;
+                            }
+
+                            function getWarning(idx) {
+                                if (idx >= 4) return null;
+                                const meta = settingsMeta[idx];
+                                const val = getValNum(idx);
+                                if (val < meta.safeMin) return meta.warnLow;
+                                if (val > meta.safeMax) return meta.warnHigh;
+                                return null;
+                            }
+
+                            function getDisplayVal(idx) {
+                                if (idx === 0) return thresholdPct + '%';
+                                if (idx === 1) return reqCap + ' reqs';
+                                if (idx === 2) return cooldown + 'ms';
+                                if (idx === 3) return proxyPort.toString();
+                                return '';
                             }
 
                             function renderScreen() {
@@ -1146,35 +1203,61 @@ export async function runInteractiveDashboard() {
                                 out += `${c.brandGreen}│  atc Engine Settings & Parameters                               │${c.reset}\n`;
                                 out += `${c.brandGreen}╰─────────────────────────────────────────────────────────────────╯${c.reset}\n\n`;
 
-                                for (let i = 0; i < settingsItems.length; i++) {
-                                    const it = settingsItems[i];
+                                for (let i = 0; i < settingsMeta.length; i++) {
+                                    const meta = settingsMeta[i];
                                     const isSel = i === activeSettingIdx;
                                     const pointer = isSel ? `\x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
-                                    const valStr = isEditing && isSel ? `${editBuffer}_` : getSettingVal(i);
+                                    const warn = getWarning(i);
 
                                     let line = '';
-                                    if (valStr) {
+                                    if (i < 4) {
+                                        let valBox = '';
+                                        if (isSel && isFocusEditing) {
+                                            // Focus / Editing Mode indicator
+                                            valBox = `\x1b[1;38;5;226;48;5;236m[ ${editBuffer || '0'}_ ]\x1b[0m \x1b[38;5;220m✎ editing\x1b[0m`;
+                                        } else {
+                                            const displayStr = getDisplayVal(i);
+                                            valBox = isSel
+                                                ? `\x1b[1;38;5;120m[${displayStr}]\x1b[0m`
+                                                : `\x1b[38;5;147m[${displayStr}]\x1b[0m`;
+                                        }
+
+                                        // Subtle non-emoji threshold warning indicator
+                                        let warnBadge = '';
+                                        if (warn) {
+                                            warnBadge = ` \x1b[38;5;214m▲ outside safe zone\x1b[0m`;
+                                        }
+
                                         line = isSel
-                                            ? `\x1b[1;38;5;255m${it.label}:\x1b[0m \x1b[1;38;5;120m[${valStr}]\x1b[0m`
-                                            : `\x1b[38;5;250m${it.label}:\x1b[0m \x1b[38;5;147m[${valStr}]\x1b[0m`;
+                                            ? `\x1b[1;38;5;255m${meta.label}:\x1b[0m ${valBox}${warnBadge}`
+                                            : `\x1b[38;5;250m${meta.label}:\x1b[0m ${valBox}${warnBadge}`;
                                     } else {
                                         line = isSel
-                                            ? `\x1b[1;38;5;255m${it.label}${c.reset}`
-                                            : `\x1b[38;5;248m${it.label}${c.reset}`;
+                                            ? `\x1b[1;38;5;255m${meta.label}${c.reset}`
+                                            : `\x1b[38;5;248m${meta.label}${c.reset}`;
                                     }
 
                                     out += `${pointer}${line}${c.clearToEndOfLine}\n`;
                                 }
 
                                 out += `\n`;
-                                const curIt = settingsItems[activeSettingIdx];
+                                const curMeta = settingsMeta[activeSettingIdx];
+                                const activeWarn = getWarning(activeSettingIdx);
+
                                 if (notice) {
-                                    out += `${c.statusWarn}ℹ ${notice}${c.reset}${c.clearToEndOfLine}\n`;
+                                    out += `\x1b[38;5;153m› ${notice}${c.reset}${c.clearToEndOfLine}\n`;
+                                } else if (activeWarn) {
+                                    out += `${c.textMuted}Details:${c.reset} \x1b[1;38;5;214m▲ ${activeWarn}${c.reset}${c.clearToEndOfLine}\n`;
                                 } else {
-                                    out += `${c.textMuted}Details:${c.reset} ${c.textNormal}${curIt.desc}${c.reset}${c.clearToEndOfLine}\n`;
+                                    out += `${c.textMuted}Details:${c.reset} ${c.textNormal}${curMeta.desc}${c.reset}${c.clearToEndOfLine}\n`;
                                 }
 
-                                out += `${c.textMuted}↑↓ Move | ←→ Adjust | 0-9 Type | Backspace Delete | Enter Next/Save | ESC Return${c.reset}${c.clearToEndOfLine}`;
+                                if (isFocusEditing) {
+                                    out += `${c.textMuted}0-9 Type Value | ←→ Adjust | Backspace Delete | Enter/ESC Confirm${c.reset}${c.clearToEndOfLine}`;
+                                } else {
+                                    out += `${c.textMuted}↑↓ Move | Enter Focus to Edit | ←→ Quick Step | ESC Return${c.reset}${c.clearToEndOfLine}`;
+                                }
+
                                 process.stdout.write(out);
                             }
 
@@ -1186,6 +1269,19 @@ export async function runInteractiveDashboard() {
                                     if (!key) return;
 
                                     if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
+                                        if (isFocusEditing) {
+                                            // Finish focus editing
+                                            if (editBuffer) {
+                                                const parsed = parseInt(editBuffer, 10);
+                                                if (!isNaN(parsed)) setValNum(activeSettingIdx, parsed);
+                                            }
+                                            isFocusEditing = false;
+                                            editBuffer = '';
+                                            renderScreen();
+                                            return;
+                                        }
+
+                                        // Exit screen and save
                                         const accSel = { ...(config.accountSelection || {}), stepThreshold: thresholdPct / 100, requestThreshold: reqCap };
                                         saveConfig({ accountSelection: accSel, switchAccountDelayMs: cooldown, port: proxyPort });
                                         cleanup();
@@ -1193,105 +1289,121 @@ export async function runInteractiveDashboard() {
                                         return;
                                     }
 
+                                    // Mode 1: In Focus Editing Mode
+                                    if (isFocusEditing) {
+                                        if (key.name === 'return' || key.name === 'enter') {
+                                            if (editBuffer) {
+                                                const parsed = parseInt(editBuffer, 10);
+                                                if (!isNaN(parsed)) setValNum(activeSettingIdx, parsed);
+                                            }
+                                            isFocusEditing = false;
+                                            editBuffer = '';
+                                            notice = `Updated ${settingsMeta[activeSettingIdx].label} to ${getDisplayVal(activeSettingIdx)}`;
+                                            renderScreen();
+                                            return;
+                                        }
+
+                                        if (key.name === 'backspace') {
+                                            editBuffer = editBuffer.slice(0, -1);
+                                            renderScreen();
+                                            return;
+                                        }
+
+                                        if (/^[0-9]$/.test(str)) {
+                                            if (editBuffer.length < 5) {
+                                                editBuffer += str;
+                                            }
+                                            renderScreen();
+                                            return;
+                                        }
+
+                                        if (key.name === 'left') {
+                                            let current = parseInt(editBuffer, 10);
+                                            if (isNaN(current)) current = getValNum(activeSettingIdx);
+                                            const step = settingsMeta[activeSettingIdx].step;
+                                            const updated = Math.max(settingsMeta[activeSettingIdx].min, current - step);
+                                            editBuffer = updated.toString();
+                                            renderScreen();
+                                            return;
+                                        }
+
+                                        if (key.name === 'right') {
+                                            let current = parseInt(editBuffer, 10);
+                                            if (isNaN(current)) current = getValNum(activeSettingIdx);
+                                            const step = settingsMeta[activeSettingIdx].step;
+                                            const updated = Math.min(settingsMeta[activeSettingIdx].max, current + step);
+                                            editBuffer = updated.toString();
+                                            renderScreen();
+                                            return;
+                                        }
+                                        return;
+                                    }
+
+                                    // Mode 2: Normal Navigation Mode
                                     if (key.name === 'up' || key.name === 'k') {
-                                        isEditing = false;
-                                        editBuffer = '';
                                         notice = '';
-                                        activeSettingIdx = (activeSettingIdx - 1 + settingsItems.length) % settingsItems.length;
+                                        activeSettingIdx = (activeSettingIdx - 1 + settingsMeta.length) % settingsMeta.length;
                                         renderScreen();
                                         return;
                                     }
 
                                     if (key.name === 'down' || key.name === 'j') {
-                                        isEditing = false;
-                                        editBuffer = '';
                                         notice = '';
-                                        activeSettingIdx = (activeSettingIdx + 1) % settingsItems.length;
+                                        activeSettingIdx = (activeSettingIdx + 1) % settingsMeta.length;
                                         renderScreen();
                                         return;
                                     }
 
-                                    // Left / Right adjustment
+                                    // Quick Adjust with Left / Right
                                     if (key.name === 'left' && activeSettingIdx < 4) {
-                                        isEditing = false;
-                                        editBuffer = '';
-                                        const step = activeSettingIdx === 2 ? 500 : (activeSettingIdx === 1 ? 5 : 1);
-                                        const curVal = getSettingRawNum(activeSettingIdx);
-                                        const minVal = activeSettingIdx === 0 ? 1 : (activeSettingIdx === 2 ? 500 : 1);
-                                        const newVal = Math.max(minVal, curVal - step);
-                                        setSettingRawVal(activeSettingIdx, newVal);
-                                        notice = `Adjusted ${settingsItems[activeSettingIdx].label} to ${getSettingVal(activeSettingIdx)}`;
+                                        notice = '';
+                                        const meta = settingsMeta[activeSettingIdx];
+                                        const cur = getValNum(activeSettingIdx);
+                                        const next = Math.max(meta.min, cur - meta.step);
+                                        setValNum(activeSettingIdx, next);
                                         renderScreen();
                                         return;
                                     }
 
                                     if (key.name === 'right' && activeSettingIdx < 4) {
-                                        isEditing = false;
-                                        editBuffer = '';
-                                        const step = activeSettingIdx === 2 ? 500 : (activeSettingIdx === 1 ? 5 : 1);
-                                        const curVal = getSettingRawNum(activeSettingIdx);
-                                        const maxVal = activeSettingIdx === 0 ? 100 : (activeSettingIdx === 1 ? 500 : (activeSettingIdx === 2 ? 60000 : 65535));
-                                        const newVal = Math.min(maxVal, curVal + step);
-                                        setSettingRawVal(activeSettingIdx, newVal);
-                                        notice = `Adjusted ${settingsItems[activeSettingIdx].label} to ${getSettingVal(activeSettingIdx)}`;
+                                        notice = '';
+                                        const meta = settingsMeta[activeSettingIdx];
+                                        const cur = getValNum(activeSettingIdx);
+                                        const next = Math.min(meta.max, cur + meta.step);
+                                        setValNum(activeSettingIdx, next);
                                         renderScreen();
                                         return;
                                     }
 
-                                    // Numeric direct typing
-                                    if (/^[0-9]$/.test(str) && activeSettingIdx < 4) {
-                                        if (!isEditing) {
-                                            isEditing = true;
-                                            editBuffer = str;
-                                        } else {
-                                            editBuffer += str;
-                                        }
-                                        const parsed = parseInt(editBuffer, 10);
-                                        const maxVal = activeSettingIdx === 0 ? 100 : (activeSettingIdx === 1 ? 500 : (activeSettingIdx === 2 ? 60000 : 65535));
-                                        if (!isNaN(parsed) && parsed <= maxVal) {
-                                            setSettingRawVal(activeSettingIdx, parsed);
-                                        }
-                                        renderScreen();
-                                        return;
-                                    }
-
-                                    // Backspace deletion
-                                    if (key.name === 'backspace' && activeSettingIdx < 4) {
-                                        if (!isEditing) {
-                                            isEditing = true;
-                                            editBuffer = getSettingRawNum(activeSettingIdx).toString();
-                                        }
-                                        editBuffer = editBuffer.slice(0, -1);
-                                        const parsed = parseInt(editBuffer, 10) || 1;
-                                        setSettingRawVal(activeSettingIdx, parsed);
-                                        renderScreen();
-                                        return;
-                                    }
-
-                                    // Enter handling
+                                    // Enter Selection
                                     if (key.name === 'return' || key.name === 'enter') {
-                                        isEditing = false;
-                                        editBuffer = '';
+                                        notice = '';
+                                        if (activeSettingIdx < 4) {
+                                            // Focus into editing mode
+                                            isFocusEditing = true;
+                                            editBuffer = getValNum(activeSettingIdx).toString();
+                                            renderScreen();
+                                            return;
+                                        }
+
                                         if (activeSettingIdx === 4) {
+                                            // Reset to safe defaults
                                             thresholdPct = 5;
                                             reqCap = 20;
                                             cooldown = 5000;
-                                            notice = 'Reset all settings to recommended defaults (5% quota, 20 reqs, 5000ms delay).';
+                                            notice = 'Reset all settings to recommended safe defaults (5% quota, 20 reqs, 5000ms delay)';
                                             renderScreen();
                                             return;
                                         }
 
                                         if (activeSettingIdx === 5) {
+                                            // Save and return
                                             const accSel = { ...(config.accountSelection || {}), stepThreshold: thresholdPct / 100, requestThreshold: reqCap };
                                             saveConfig({ accountSelection: accSel, switchAccountDelayMs: cooldown, port: proxyPort });
                                             cleanup();
                                             resolve();
                                             return;
                                         }
-
-                                        activeSettingIdx = (activeSettingIdx + 1) % settingsItems.length;
-                                        renderScreen();
-                                        return;
                                     }
                                 }
 
