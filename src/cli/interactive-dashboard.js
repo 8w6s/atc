@@ -255,27 +255,35 @@ export async function runInteractiveDashboard() {
 
                 buf += `${pointer}${emailStr} ${badges.join(' ')}${c.clearToEndOfLine}\n`;
 
-                // Dynamic details pane when hovered
+                // Dynamic details pane when hovered (minimalist clean layout)
                 if (isSelected) {
                     const models = live.models || lim.models || {};
-                    const high = models['gemini-3.8-flash-high'] || {};
-                    const med = models['gemini-3.8-flash-medium'] || {};
+                    const primary = models['gemini-3.8-flash-high'] || models['gemini-3.8-flash-medium'] || Object.values(models)[0] || {};
 
-                    const highFrac = typeof high.remainingFraction === 'number' ? high.remainingFraction : 1.0;
-                    const highPct = high.remaining || '100%';
-                    const medFrac = typeof med.remainingFraction === 'number' ? med.remainingFraction : 1.0;
-                    const medPct = med.remaining || '100%';
-
-                    const highBar = formatBar(highFrac, 10);
-                    const medBar = formatBar(medFrac, 10);
+                    const frac = typeof primary.remainingFraction === 'number' ? primary.remainingFraction : 1.0;
+                    const remainingPct = Math.round(frac * 100);
+                    const usedPct = 100 - remainingPct;
                     const timeAgo = formatTimeAgo(acc.lastUsed);
 
-                    let statusTag = isLimited ? `${c.statusWarn}rate-limited${c.reset}` : `${c.statusOk}active${c.reset}`;
-                    if (isInvalid) statusTag = `${c.statusDanger}invalid (press R to re-login)${c.reset}`;
+                    let usageColor = c.statusOk;
+                    if (usedPct >= 80) usageColor = c.statusDanger;
+                    else if (usedPct >= 50) usageColor = c.statusWarn;
 
-                    const projectInfo = (lim.subscription?.projectId || acc.subscription?.projectId) ? ` ${c.textDark}[${lim.subscription?.projectId || acc.subscription?.projectId}]${c.reset}` : '';
+                    const usageStr = `${usageColor}${usedPct}% used${c.reset} ${c.textDark}(${remainingPct}% left)${c.reset}`;
 
-                    buf += `  ${c.textMuted}Last used:${c.reset} ${timeAgo} ${c.textDark}|${c.reset} ${c.textMuted}High:${c.reset} ${highBar} ${highPct} ${c.textDark}|${c.reset} ${c.textMuted}Med:${c.reset} ${medBar} ${medPct} ${c.textDark}|${c.reset} ${statusTag}${projectInfo}${c.clearToEndOfLine}\n`;
+                    let resetStr = '';
+                    if (primary.resetTime) {
+                        const diff = new Date(primary.resetTime).getTime() - Date.now();
+                        if (diff > 0) {
+                            resetStr = ` ${c.textDark}|${c.reset} ${c.textMuted}Resets:${c.reset} in ${formatDuration(diff)}`;
+                        }
+                    }
+
+                    const projectId = lim.subscription?.projectId || acc.subscription?.projectId;
+                    const projectStr = projectId ? ` ${c.textDark}|${c.reset} ${c.textMuted}Project:${c.reset} ${projectId}` : '';
+                    const invalidHint = isInvalid ? ` ${c.textDark}|${c.reset} ${c.statusDanger}press R to re-login${c.reset}` : '';
+
+                    buf += `  ${c.textMuted}Last used:${c.reset} ${timeAgo} ${c.textDark}|${c.reset} ${c.textMuted}Usage:${c.reset} ${usageStr}${resetStr}${projectStr}${invalidHint}${c.clearToEndOfLine}\n`;
                 }
             }
         }
