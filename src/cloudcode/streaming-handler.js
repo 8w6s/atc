@@ -249,22 +249,23 @@ export async function* sendMessageStream(anthropicRequest, accountManager, fallb
                             throw new Error(`invalid_request_error: ${errorText}`);
                         }
 
-                        // 403 with VALIDATION_REQUIRED or PERMISSION_DENIED is an account-level error
-                        // The account needs validation (captcha, terms, etc.) - trying different endpoints won't help
-                        // Mark account as invalid (requires user intervention) and rotate (fixes #248)
-                        if (response.status === 403 && isValidationRequired(errorText)) {
+                        // 403 Forbidden / ToS Restriction / Permission Denied
+                        if (response.status === 403) {
+                            const isBan = isAccountBanned(errorText);
                             const verifyUrl = extractVerificationUrl(errorText);
-                            logger.warn(`[CloudCode] 403 VALIDATION_REQUIRED/PERMISSION_DENIED for ${account.email}, marking invalid and rotating account...`);
-                            accountManager.markInvalid(account.email, 'Account requires verification', verifyUrl);
-                            throw new AccountForbiddenError(errorText, account.email);
-                        }
+                            const reason = isBan
+                                ? 'Account suspended / ToS restriction by Google'
+                                : (verifyUrl ? 'Account requires verification (403)' : '403 Forbidden / Permission Denied');
 
-                        // 403 with permanent ToS ban — account is permanently disabled by Google
-                        // Unlike VALIDATION_REQUIRED, this cannot be resolved by verification
-                        if (response.status === 403 && isAccountBanned(errorText)) {
-                            logger.warn(`[CloudCode] 403 ToS BANNED for ${account.email}, marking invalid permanently...`);
-                            accountManager.markInvalid(account.email, 'Account banned — Gemini disabled for Terms of Service violation');
-                            throw new AccountForbiddenError(errorText, account.email);
+                            logger.error(`[ATC SAFETY SHIELD] 403 Restriction on ${account.email}: ${reason}`);
+                            accountManager.markInvalid(account.email, reason, verifyUrl);
+                            accountManager.saveToDisk().catch(() => {});
+
+                            // CRITICAL: Halt immediately. Do NOT retry other endpoints or cycle to another account!
+                            throw new AccountForbiddenError(
+                                `[ATC SAFETY SHIELD] Account ${account.email} received 403 Forbidden (${reason}). Rotation halted immediately to protect remaining accounts.`,
+                                account.email
+                            );
                         }
 
                         lastError = new Error(`API error ${response.status}: ${errorText}`);
@@ -427,11 +428,9 @@ export async function* sendMessageStream(anthropicRequest, accountManager, fallb
                 continue;
             }
             if (isAccountForbiddenError(error)) {
-                // 403 VALIDATION_REQUIRED / PERMISSION_DENIED - account-level error
-                // Already marked with cooldown, notify strategy and rotate to next account
-                accountManager.notifyFailure(account, model);
-                logger.warn(`[CloudCode] Account ${account.email} forbidden (403 VALIDATION_REQUIRED), trying next...`);
-                continue;
+                // Fail closed: Stop immediately, do NOT cycle through remaining accounts!
+                logger.error(`[ATC SAFETY SHIELD] Circuit breaker triggered for ${account.email}. Aborting streaming request without rotating.`);
+                throw error;
             }
             // Handle 5xx errors
             if (error.message.includes('API error 5') || error.message.includes('500') || error.message.includes('503')) {

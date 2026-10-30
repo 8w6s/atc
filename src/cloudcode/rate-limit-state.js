@@ -110,7 +110,10 @@ export function isValidationRequired(errorText) {
     const lower = (errorText || '').toLowerCase();
     return lower.includes('validation_required') ||
         lower.includes('account_disabled') ||
-        lower.includes('user_disabled');
+        lower.includes('user_disabled') ||
+        lower.includes('permission_denied') ||
+        lower.includes('access_denied') ||
+        lower.includes('consumer plan');
 }
 
 /**
@@ -148,7 +151,14 @@ export function extractVerificationUrl(errorText) {
  */
 export function isAccountBanned(errorText) {
     const lower = (errorText || '').toLowerCase();
-    return lower.includes('has been disabled') && lower.includes('violation of terms of service');
+    return lower.includes('violation of terms of service') ||
+        lower.includes('terms of service') ||
+        lower.includes('terms_of_service') ||
+        lower.includes('tos_violation') ||
+        lower.includes('policy_violation') ||
+        lower.includes('has been disabled') ||
+        lower.includes('account_suspended') ||
+        lower.includes('service_disabled');
 }
 
 /**

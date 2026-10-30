@@ -65,6 +65,14 @@ async function fetchAndSaveSubscription(token, account, onSave) {
  * @throws {Error} If token refresh fails
  */
 export async function getTokenForAccount(account, tokenCache, onInvalid, onSave) {
+    // Safety Shield: Block token refresh for permanently restricted or ToS-suspended accounts
+    if (account.isInvalid) {
+        const reason = (account.invalidReason || '').toLowerCase();
+        if (reason.includes('tos') || reason.includes('banned') || reason.includes('suspended') || reason.includes('terms of service')) {
+            throw new Error(`[ATC SAFETY SHIELD] Account ${account.email} is restricted (${account.invalidReason}). Token refresh blocked to protect Google Account integrity.`);
+        }
+    }
+
     // Check cache first
     const cached = tokenCache.get(account.email);
     if (cached && (Date.now() - cached.extractedAt) < TOKEN_REFRESH_INTERVAL_MS) {
