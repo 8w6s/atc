@@ -70,8 +70,8 @@ function isDisabledPlaceholder(modelId) {
  * @param {string} token - OAuth access token
  * @returns {Promise<{object: string, data: Array<{id: string, object: string, created: number, owned_by: string, description: string}>}>} List of available models
  */
-export async function listModels(token) {
-    const data = await fetchAvailableModels(token);
+export async function listModels(token, projectId = null, accountKey = null) {
+    const data = await fetchAvailableModels(token, projectId, accountKey);
     if (!data || !data.models) {
         return { object: 'list', data: [] };
     }
@@ -336,7 +336,7 @@ export async function getSubscriptionTier(token, accountKey = null) {
  * @param {string} [projectId] - Optional project ID
  * @returns {Promise<void>}
  */
-async function populateModelCache(token, projectId = null) {
+async function populateModelCache(token, projectId = null, accountKey = null) {
     const now = Date.now();
 
     // Check if cache is fresh
@@ -353,7 +353,7 @@ async function populateModelCache(token, projectId = null) {
     // Start fetch
     modelCache.fetchPromise = (async () => {
         try {
-            const data = await fetchAvailableModels(token, projectId);
+            const data = await fetchAvailableModels(token, projectId, accountKey);
             if (data && data.models) {
                 recordModels(data);
                 const validIds = Object.keys(data.models).filter(modelId => isSupportedModel(modelId));
@@ -380,10 +380,10 @@ async function populateModelCache(token, projectId = null) {
  * @param {string} [projectId] - Optional project ID
  * @returns {Promise<boolean>} True if model is valid
  */
-export async function isValidModel(modelId, token, projectId = null) {
+export async function isValidModel(modelId, token, projectId = null, accountKey = null) {
     try {
         // Populate cache if needed
-        await populateModelCache(token, projectId);
+        await populateModelCache(token, projectId, accountKey);
 
         // If cache is populated, validate against it
         if (modelCache.validModels.size > 0) {

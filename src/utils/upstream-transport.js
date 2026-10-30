@@ -12,7 +12,18 @@ import zlib from 'zlib';
  */
 const MAX_POOLS = 64;
 const POOL_IDLE_TTL_MS = 10 * 60 * 1000;
+const IDLE_SOCKET_TIMEOUT_MS = 30 * 1000;
+const ACTIVE_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
+const IDLE_HANDLER_SYM = Symbol('atcIdleTimeoutHandler');
 const NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
+
+function clearIdleTimeout(socket) {
+    const fn = socket?.[IDLE_HANDLER_SYM];
+    if (fn) {
+        socket.removeListener('timeout', fn);
+        socket[IDLE_HANDLER_SYM] = null;
+    }
+}
 
 const agentPools = new Map();
 
@@ -78,14 +89,29 @@ function getIsolatedAgent(poolKey, testTlsOptions = null) {
 
     evictStalePools(now);
 
+    /*
+     * Node's Agent `timeout` option applies to active in-flight sockets as well as
+     * idle ones, which would abort deep thinking models whose TTFT exceeds 30s.
+     * Arm the 30s timeout only when the socket enters the free pool (matching Go's
+     * http.Transport.IdleConnTimeout) and clear/extend it while a request is active.
+     */
     const agent = new https.Agent({
         keepAlive: true,
         keepAliveMsecs: 15000,
         maxSockets: 6,
         maxFreeSockets: 2,
-        timeout: 30000,
         ALPNProtocols: ['http/1.1'],
         ...(testTlsOptions || {})
+    });
+
+    agent.on('free', (socket) => {
+        clearIdleTimeout(socket);
+        const onIdle = () => {
+            socket[IDLE_HANDLER_SYM] = null;
+            socket.destroy();
+        };
+        socket[IDLE_HANDLER_SYM] = onIdle;
+        socket.setTimeout(IDLE_SOCKET_TIMEOUT_MS, onIdle);
     });
 
     agentPools.set(effectiveKey, { agent, lastUsed: now });
@@ -214,8 +240,14 @@ export function upstreamFetch(url, options = {}) {
             }
         );
 
+        const activeTimeoutMs = options.timeoutMs || ACTIVE_REQUEST_TIMEOUT_MS;
+        req.on('socket', (socket) => {
+            clearIdleTimeout(socket);
+            socket.setTimeout(activeTimeoutMs);
+        });
+
         req.on('timeout', () => {
-            req.destroy(new Error('Upstream socket timeout'));
+            req.destroy(new Error(`Upstream socket timeout after ${activeTimeoutMs}ms`));
         });
 
         req.on('error', (err) => {

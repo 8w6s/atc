@@ -809,7 +809,7 @@ app.get('/v1/models', async (req, res) => {
             });
         }
         const token = await accountManager.getTokenForAccount(account);
-        const models = await listModels(token);
+        const models = await listModels(token, account.subscription?.projectId || null, account.email);
 
         // Virtual Anthropic model definitions for clients
         const virtualModels = [
@@ -947,7 +947,7 @@ app.post('/v1/messages', async (req, res) => {
         if (validationAccount) {
             const token = await accountManager.getTokenForAccount(validationAccount);
             const projectId = validationAccount.subscription?.projectId || null;
-            const valid = await isValidModel(modelId, token, projectId);
+            const valid = await isValidModel(modelId, token, projectId, validationAccount.email);
 
             if (!valid) {
                 throw new Error(`invalid_request_error: Invalid model: ${modelId}. Use /v1/models to see available models.`);
