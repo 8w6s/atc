@@ -33,11 +33,11 @@ const c = {
     statusDanger: '\x1b[38;5;196m',   // [invalid] crisp red
     statusMuted: '\x1b[38;5;244m',    // [disabled] slate gray
     
-    // Plan tiers
-    planPro: '\x1b[38;5;141m',        // [pro] lavender purple
-    planUltra: '\x1b[38;5;220m',      // [ultra] gold
-    planFree: '\x1b[38;5;245m',       // [free] soft gray
-    planStd: '\x1b[38;5;75m',         // [standard] sky blue
+    // Google AI Plans (free < plus < pro < ultra)
+    planUltra: '\x1b[1;38;5;220m',    // [ultra] bold gold
+    planPro: '\x1b[1;38;5;141m',      // [pro] lavender purple
+    planPlus: '\x1b[38;5;75m',        // [plus] sky cyan
+    planFree: '\x1b[38;5;244m',       // [free] slate gray
 
     // Progress bar tones
     barFill: '\x1b[38;5;42m',         // ##########
@@ -94,14 +94,16 @@ function formatTimeAgo(isoString) {
 function formatPlanBadge(tier) {
     const t = (tier || 'unknown').toLowerCase();
     switch (t) {
-        case 'pro':
-            return `${c.planPro}[pro]${c.reset}`;
         case 'ultra':
             return `${c.planUltra}[ultra]${c.reset}`;
+        case 'pro':
+            return `${c.planPro}[pro]${c.reset}`;
+        case 'plus':
+            return `${c.planPlus}[plus]${c.reset}`;
         case 'free':
             return `${c.planFree}[free]${c.reset}`;
         case 'standard':
-            return `${c.planStd}[standard]${c.reset}`;
+            return `${c.planPro}[pro]${c.reset}`;
         default:
             return `${c.textMuted}[${t}]${c.reset}`;
     }
@@ -410,13 +412,18 @@ export async function runInteractiveDashboard() {
                         }
                         let bestIdx = 1;
                         let bestScore = -1;
+                        const tierWeight = { ultra: 30, pro: 20, plus: 10, free: 0 };
                         accountsData.accounts.forEach((acc, i) => {
                             if (!acc.enabled || acc.isInvalid) return;
                             const live = liveMap.get(acc.email) || {};
-                            const high = live.models?.['gemini-3.8-flash-high'];
-                            const score = high?.remainingFraction || 0.5;
-                            if (score > bestScore) {
-                                bestScore = score;
+                            const lim = limitsMap.get(acc.email) || {};
+                            const tier = (lim.subscription?.tier || acc.subscription?.tier || 'free').toLowerCase();
+                            const high = live.models?.['gemini-3.8-flash-high'] || lim.models?.['gemini-3.8-flash-high'];
+                            const quotaScore = Math.round((high?.remainingFraction || 0.5) * 70);
+                            const bonus = tierWeight[tier] !== undefined ? tierWeight[tier] : 0;
+                            const totalScore = quotaScore + bonus;
+                            if (totalScore > bestScore) {
+                                bestScore = totalScore;
                                 bestIdx = i + 1;
                             }
                         });

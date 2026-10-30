@@ -189,17 +189,17 @@ export function parseTierId(tierId) {
     if (!tierId) return 'unknown';
     const lower = tierId.toLowerCase();
 
+    // Google AI Plans hierarchy: free < plus < pro < ultra
     if (lower.includes('ultra')) {
         return 'ultra';
     }
-    if (lower === 'standard-tier') {
-        // standard-tier = "Gemini Code Assist" (paid, project-based)
+    if (lower.includes('pro') || lower.includes('premium') || lower === 'standard-tier') {
         return 'pro';
     }
-    if (lower.includes('pro') || lower.includes('premium')) {
-        return 'pro';
+    if (lower.includes('plus')) {
+        return 'plus';
     }
-    if (lower === 'free-tier' || lower.includes('free')) {
+    if (lower.includes('free') || lower === 'free-tier') {
         return 'free';
     }
     return 'unknown';
