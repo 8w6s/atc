@@ -7,6 +7,7 @@
 import { StickyStrategy } from './sticky-strategy.js';
 import { RoundRobinStrategy } from './round-robin-strategy.js';
 import { HybridStrategy } from './hybrid-strategy.js';
+import { PipelinedStrategy } from './pipelined-strategy.js';
 import { logger } from '../../utils/logger.js';
 import {
     SELECTION_STRATEGIES,
@@ -28,6 +29,12 @@ export function createStrategy(strategyName, config = {}) {
     const name = (strategyName || DEFAULT_STRATEGY).toLowerCase();
 
     switch (name) {
+        case 'pipelined':
+        case 'pipelined-5pct':
+        case 'pipeline':
+            logger.debug('[Strategy] Creating PipelinedStrategy (5% step rotation)');
+            return new PipelinedStrategy(config);
+
         case 'sticky':
             logger.debug('[Strategy] Creating StickyStrategy');
             return new StickyStrategy(config);
@@ -43,7 +50,7 @@ export function createStrategy(strategyName, config = {}) {
 
         default:
             logger.warn(`[Strategy] Unknown strategy "${strategyName}", falling back to ${DEFAULT_STRATEGY}`);
-            return new HybridStrategy(config);
+            return new PipelinedStrategy(config);
     }
 }
 

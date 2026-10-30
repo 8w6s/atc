@@ -388,47 +388,33 @@ with intelligent load balancing across Google accounts.
 
 USAGE
   atc <command> [options]
-  acc <command> [options]                 ← legacy alias
 
-━━━ CORE (DASHBOARD-FIRST) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━ DASHBOARD (DEFAULT) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   atc                Open interactive TUI dashboard (default)
-  atc dash           Interactive dashboard with hotkeys (↑↓, 1-9, R)
-  atc switch <id>    Quick switch active account by index/email
-  atc status         Print non-interactive status overview
+  atc dash           Interactive dashboard (↑↓, Enter, 1-9, R, T, D)
+  atc status         Print quick non-interactive accounts overview
+  atc switch <id>    Switch active account by index (1-9) or email
 
 ━━━ PROXY DAEMON ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  atc start [--log]  Launch proxy daemon (optional --log for foreground)
+  atc start [--log]  Launch proxy daemon (background by default)
   atc stop           Shut down proxy daemon
-  atc restart        Relaunch proxy daemon
+  atc restart        Restart proxy daemon
 
 ━━━ OPTIONS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   --help, -h         Show this help
   --version, -v      Show version
-  --log              Run in foreground with visible logs
-  --strategy=NAME    Load balancing: hybrid (default),
-                     sticky (cache-optimized), round-robin
+  --log              Run in foreground with live stream logs
+  --strategy=NAME    Load balancer strategy: pipelined (default 5%),
+                     hybrid (token-bucket), round-robin, sticky
   --fallback         Enable model fallback on errors
 
-━━━ ENVIRONMENT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  PORT              Custom port (default: 8080)
-
-━━━ EXAMPLES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  acc start                    Launch proxy
-  acc start --log              Launch with visible logs
-  acc ui                       Open dashboard
-  PORT=3000 acc start          Use custom port
-  acc start --strategy=sticky  Optimize for prompt caching
-  acc accounts add             Link new Google account
-
-━━━ CLAUDE CODE SETUP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Edit ~/.claude/settings.json:
+━━━ CLAUDE CODE CONFIGURATION ━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  In ~/.claude/settings.json:
   {
     "env": {
       "ANTHROPIC_BASE_URL": "http://localhost:8080"
     }
   }
-
-Docs: https://github.com/badrisnarayanan/antigravity-claude-proxy
 `);
 }
 

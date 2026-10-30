@@ -192,14 +192,15 @@ export const CAPACITY_JITTER_MAX_MS = 10000; // ±5s jitter range
 export const MIN_SIGNATURE_LENGTH = 50; // Minimum valid thinking signature length
 
 // Account selection strategies
-export const SELECTION_STRATEGIES = ['sticky', 'round-robin', 'hybrid'];
-export const DEFAULT_SELECTION_STRATEGY = 'hybrid';
+export const SELECTION_STRATEGIES = ['pipelined', 'hybrid', 'round-robin', 'sticky'];
+export const DEFAULT_SELECTION_STRATEGY = 'pipelined';
 
 // Strategy display labels
 export const STRATEGY_LABELS = {
-    'sticky': 'Sticky (Cache Optimized)',
+    'pipelined': 'Pipelined (5% Staggered Quota Rotation)',
+    'hybrid': 'Hybrid (Multi-factor Smart Scoring)',
     'round-robin': 'Round Robin (Load Balanced)',
-    'hybrid': 'Hybrid (Smart Distribution)'
+    'sticky': 'Sticky (Cache Optimized)'
 };
 
 // Gemini-specific limits (Gemini 3.8 / Gemini 4 Argon support up to 65536 output tokens)

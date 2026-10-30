@@ -1,8 +1,9 @@
 import readline from 'readline';
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { ACCOUNT_CONFIG_PATH } from '../constants.js';
 import { loadAccounts, saveAccounts } from '../account-manager/storage.js';
+import { config, saveConfig } from '../config.js';
 import {
     getProxyPort,
     getServicePid,
@@ -61,20 +62,6 @@ const c = {
     showCursor: '\x1b[?25h'
 };
 
-function formatBar(ratio, width = 10) {
-    if (typeof ratio !== 'number' || isNaN(ratio)) ratio = 0;
-    const filled = Math.max(0, Math.min(width, Math.round(ratio * width)));
-    const empty = width - filled;
-    const bar = '#'.repeat(filled);
-    const dash = '-'.repeat(empty);
-
-    let fillColor = c.barFill;
-    if (ratio < 0.2) fillColor = c.statusDanger;
-    else if (ratio < 0.5) fillColor = c.statusWarn;
-
-    return `${fillColor}${bar}${c.barEmpty}${dash}${c.reset}`;
-}
-
 function formatDuration(ms) {
     if (ms <= 0 || isNaN(ms)) return '0s';
     const sec = Math.floor(ms / 1000);
@@ -113,6 +100,13 @@ function formatPlanBadge(tier) {
     }
 }
 
+const STRATEGY_CYCLE = [
+    { id: 'pipelined', label: 'Pipelined 5%', desc: 'Rotates every 5% quota to stagger 5h recovery windows in parallel' },
+    { id: 'hybrid', label: 'Hybrid (Smart)', desc: 'Smart scoring combining health, token bucket, and quota' },
+    { id: 'round-robin', label: 'Round-Robin', desc: 'Even rotation per-request across all available accounts' },
+    { id: 'sticky', label: 'Sticky (Cache)', desc: 'Keeps using current account to maximize prompt caching' }
+];
+
 export async function runInteractiveDashboard() {
     let accountsData = await loadAccounts(ACCOUNT_CONFIG_PATH);
     const port = getProxyPort();
@@ -120,6 +114,7 @@ export async function runInteractiveDashboard() {
     let proxyHealth = null;
     let proxyLimits = null;
     let statusMessage = '';
+    let currentStrategy = config?.accountSelection?.strategy || 'pipelined';
 
     async function refreshData() {
         accountsData = await loadAccounts(ACCOUNT_CONFIG_PATH);
@@ -143,19 +138,22 @@ export async function runInteractiveDashboard() {
 
     await refreshData();
 
-    // Build selectable items list
     function getItems() {
         const list = [];
+        const stratObj = STRATEGY_CYCLE.find(s => s.id === currentStrategy) || STRATEGY_CYCLE[0];
+        const customProject = config?.customProjectId || 'Default (auto)';
 
         list.push({ type: 'header', label: 'Quick Actions' });
-        list.push({ type: 'action', id: 'add_account', label: 'Add New Account' });
-        list.push({ type: 'action', id: 'health_check', label: 'Run Health Check' });
-        list.push({ type: 'action', id: 'pick_best', label: 'Pick Best Account' });
-        list.push({ type: 'action', id: 'models', label: 'API credentials and models' });
+        list.push({ type: 'action', id: 'add_account', label: 'Add New Account', desc: 'Link a new Google account via OAuth browser' });
+        list.push({ type: 'action', id: 'lb_strategy', label: `Load Balancer: [${stratObj.label}]`, desc: stratObj.desc });
+        list.push({ type: 'action', id: 'custom_project', label: `Custom GCP Project: [${customProject}]`, desc: 'Configure custom Google Cloud Project ID for quotas' });
+        list.push({ type: 'action', id: 'model_mapping', label: 'Model Mappings (Claude <-> Gemini)', desc: 'Customize mapping from Claude models to Gemini IDs' });
+        list.push({ type: 'action', id: 'pick_best', label: 'Pick Best Account', desc: 'Automatically switch to healthiest account with highest quota' });
+        list.push({ type: 'action', id: 'health_check', label: 'Run Health Check', desc: 'Inspect credentials, token validity, and proxy health' });
 
         list.push({ type: 'header', label: 'Advanced Checks' });
-        list.push({ type: 'action', id: 'refresh_all', label: 'Refresh All Accounts' });
-        list.push({ type: 'action', id: 'check_problem', label: 'Check Problem Accounts' });
+        list.push({ type: 'action', id: 'refresh_all', label: 'Refresh All Accounts', desc: 'Query Google API to update live quotas and tier info' });
+        list.push({ type: 'action', id: 'check_problem', label: 'Check Problem Accounts', desc: 'Scan and review accounts needing re-login or verification' });
 
         list.push({ type: 'header', label: 'Saved Accounts' });
         const { accounts, activeIndex } = accountsData;
@@ -168,44 +166,37 @@ export async function runInteractiveDashboard() {
             });
         });
 
-        list.push({ type: 'header', label: 'Danger Zone' });
-        list.push({ type: 'action', id: 'toggle_current', label: 'Toggle Selected Account' });
-        list.push({ type: 'action', id: 'delete_current', label: 'Delete Selected Account' });
-
         return list;
     }
 
     let items = getItems();
-    // Default focus on active account or first item
     let selectedIndex = items.findIndex(it => it.type === 'account' && it.isCurrent);
     if (selectedIndex === -1) selectedIndex = items.findIndex(it => it.type === 'account') || 1;
     if (selectedIndex === -1) selectedIndex = 1;
 
-    // Enter alternate screen buffer, disable line wrap & hide cursor for 100% flicker-free & isolated TUI
+    // Enter alternate screen buffer, disable line wrap & hide cursor for 100% flicker-free isolated TUI
     process.stdout.write(c.enterAltScreen + c.disableWrap + c.hideCursor);
 
-    // Flicker-free render function using virtual buffer and cursor home
+    // Fixed-height, 0% flicker render function
     function render() {
         let buf = c.hideCursor + c.disableWrap + c.cursorHome;
 
-        // Header Title (clean, no unwanted '+' symbols)
-        buf += `${c.brandGreen}Accounts Dashboard (atc v2.9.1)${c.reset}${c.clearToEndOfLine}\n\n`;
+        // Header Title
+        buf += `${c.brandGreen}Accounts Dashboard (atc v2.9.1)${c.reset}${c.clearToEndOfLine}\n`;
 
         const liveMap = new Map();
         if (proxyHealth && Array.isArray(proxyHealth.accounts)) {
-            for (const a of proxyHealth.accounts) {
-                liveMap.set(a.email, a);
-            }
+            for (const a of proxyHealth.accounts) liveMap.set(a.email, a);
         }
 
         const limitsMap = new Map();
         if (proxyLimits && Array.isArray(proxyLimits.accounts)) {
-            for (const a of proxyLimits.accounts) {
-                limitsMap.set(a.email, a);
-            }
+            for (const a of proxyLimits.accounts) limitsMap.set(a.email, a);
         }
 
-        // Render sections
+        let detailsLine = '';
+
+        // Render main list (fixed item lines, no inline expanding rows)
         for (let i = 0; i < items.length; i++) {
             const it = items[i];
             const isSelected = i === selectedIndex;
@@ -221,12 +212,10 @@ export async function runInteractiveDashboard() {
                     ? `${c.activeBright}${it.label}${c.reset}`
                     : `${c.actionGreen}${it.label}${c.reset}`;
 
-                if (it.id === 'delete_current') {
-                    text = isSelected
-                        ? `${c.bold}${c.statusDanger}${it.label}${c.reset}`
-                        : `${c.statusDanger}${it.label}${c.reset}`;
-                }
                 buf += `${pointer}${text}${c.clearToEndOfLine}\n`;
+                if (isSelected) {
+                    detailsLine = `${c.textMuted}Action:${c.reset} ${it.desc || it.label}`;
+                }
                 continue;
             }
 
@@ -241,7 +230,6 @@ export async function runInteractiveDashboard() {
                     l => l.isRateLimited && l.resetTime > Date.now()
                 ) || (live.rateLimitCooldownRemaining > 0);
 
-                // Detect plan from limits API or account stored subscription
                 const planTier = lim.subscription?.tier || acc.subscription?.tier || 'free';
                 const planBadge = formatPlanBadge(planTier);
 
@@ -259,11 +247,9 @@ export async function runInteractiveDashboard() {
 
                 buf += `${pointer}${emailStr} ${badges.join(' ')}${c.clearToEndOfLine}\n`;
 
-                // Dynamic details pane when hovered (minimalist clean layout, concise to fit standard width)
                 if (isSelected) {
                     const models = live.models || lim.models || {};
                     const primary = models['gemini-3.8-flash-high'] || models['gemini-3.8-flash-medium'] || Object.values(models)[0] || {};
-
                     const frac = typeof primary.remainingFraction === 'number' ? primary.remainingFraction : 1.0;
                     const remainingPct = Math.round(frac * 100);
                     const usedPct = 100 - remainingPct;
@@ -273,41 +259,36 @@ export async function runInteractiveDashboard() {
                     if (usedPct >= 80) usageColor = c.statusDanger;
                     else if (usedPct >= 50) usageColor = c.statusWarn;
 
-                    const usageStr = `${usageColor}${usedPct}% used${c.reset} ${c.textDark}(${remainingPct}% left)${c.reset}`;
-
                     let resetStr = '';
                     if (primary.resetTime) {
                         const diff = new Date(primary.resetTime).getTime() - Date.now();
-                        if (diff > 0) {
-                            resetStr = ` ${c.textDark}|${c.reset} ${c.textMuted}Resets:${c.reset} in ${formatDuration(diff)}`;
-                        }
+                        if (diff > 0) resetStr = ` ${c.textDark}|${c.reset} ${c.textMuted}Resets:${c.reset} in ${formatDuration(diff)}`;
                     }
 
                     if (isInvalid) {
-                        buf += `  ${c.textMuted}Last used:${c.reset} ${timeAgo} ${c.textDark}|${c.reset} ${c.statusDanger}press R to re-login${c.reset}${c.clearToEndOfLine}\n`;
+                        detailsLine = `${c.textMuted}Details:${c.reset} ${timeAgo} ${c.textDark}|${c.reset} ${c.statusDanger}invalid - press R to re-login${c.reset}`;
                     } else {
-                        buf += `  ${c.textMuted}Last used:${c.reset} ${timeAgo} ${c.textDark}|${c.reset} ${c.textMuted}Usage:${c.reset} ${usageStr}${resetStr}${c.clearToEndOfLine}\n`;
+                        detailsLine = `${c.textMuted}Details:${c.reset} ${timeAgo} ${c.textDark}|${c.reset} ${usageColor}${usedPct}% used${c.reset} ${c.textDark}(${remainingPct}% left)${c.reset}${resetStr}`;
                     }
                 }
             }
         }
 
-        buf += `\n`;
+        // Fixed bottom Info Bar (1 line)
         if (statusMessage) {
             buf += `${c.statusWarn}ℹ ${statusMessage}${c.reset}${c.clearToEndOfLine}\n`;
+        } else {
+            buf += `${detailsLine || `${c.textMuted}Select an option or account above`}${c.reset}${c.clearToEndOfLine}\n`;
         }
-        // Do NOT add trailing \n to footer line to prevent terminal from auto-scrolling
-        buf += `${c.textMuted}↑↓ Move | Enter Select | R Re-login | 1-9 Switch | Q Back${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
 
-        // Single write to stdout guarantees 0% screen flicker
+        // Fixed Footer line (no trailing newline to guarantee no terminal auto-scroll)
+        buf += `${c.textMuted}↑↓ Move | Enter Select | 1-9 Switch | R Re-login | T Toggle | D Delete | Q Back${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
+
         process.stdout.write(buf);
     }
 
-    // Set up interactive raw terminal input
     readline.emitKeypressEvents(process.stdin);
-    if (process.stdin.isTTY) {
-        process.stdin.setRawMode(true);
-    }
+    if (process.stdin.isTTY) process.stdin.setRawMode(true);
     process.stdin.resume();
 
     const onResize = () => render();
@@ -319,9 +300,7 @@ export async function runInteractiveDashboard() {
         function cleanupAndExit() {
             process.stdout.removeListener('resize', onResize);
             process.stdout.write(c.exitAltScreen + c.enableWrap + c.showCursor);
-            if (process.stdin.isTTY) {
-                process.stdin.setRawMode(false);
-            }
+            if (process.stdin.isTTY) process.stdin.setRawMode(false);
             process.stdin.pause();
             process.stdin.removeListener('keypress', onKeypress);
             console.log('\nExited dashboard.\n');
@@ -331,7 +310,6 @@ export async function runInteractiveDashboard() {
         async function onKeypress(str, key) {
             if (!key) return;
 
-            // Handle exit keys
             if ((key.ctrl && key.name === 'c') || key.name === 'q' || key.name === 'escape') {
                 cleanupAndExit();
                 return;
@@ -353,7 +331,7 @@ export async function runInteractiveDashboard() {
                 return;
             }
 
-            // 'R' or 'r': Re-login account currently under cursor
+            // 'R' or 'r': Re-login account under cursor
             if (str === 'r' || str === 'R') {
                 const cur = items[selectedIndex];
                 if (cur && cur.type === 'account') {
@@ -374,14 +352,49 @@ export async function runInteractiveDashboard() {
                     statusMessage = `Refreshed credentials for ${email}.`;
                     render();
                     return;
-                } else {
-                    statusMessage = 'Move cursor to an account in Saved Accounts to re-login.';
+                }
+            }
+
+            // 'T' or 't': Toggle selected account (enable/disable)
+            if (str === 't' || str === 'T') {
+                const cur = items[selectedIndex];
+                if (cur && cur.type === 'account') {
+                    const target = (cur.accountIndex + 1).toString();
+                    await toggleAccount(target);
+                    await refreshData();
+                    items = getItems();
+                    statusMessage = `Toggled Account ${target} status.`;
                     render();
                     return;
                 }
             }
 
-            // Arrow keys navigation
+            // 'D' or 'd': Delete selected account with prompt
+            if (str === 'd' || str === 'D') {
+                const cur = items[selectedIndex];
+                if (cur && cur.type === 'account') {
+                    const email = cur.account.email;
+                    process.stdout.write(c.exitAltScreen + c.enableWrap + c.showCursor);
+                    if (process.stdin.isTTY) process.stdin.setRawMode(false);
+                    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+                    const ans = await new Promise(r => rl.question(`\n${c.statusDanger}Are you sure you want to remove ${email}? [y/N]: ${c.reset}`, r));
+                    rl.close();
+                    if (ans.toLowerCase() === 'y') {
+                        await removeAccount(email);
+                        await refreshData();
+                        items = getItems();
+                        selectedIndex = Math.min(selectedIndex, items.length - 1);
+                        statusMessage = `Deleted account ${email}.`;
+                    }
+                    process.stdout.write(c.enterAltScreen + c.disableWrap + c.hideCursor);
+                    if (process.stdin.isTTY) process.stdin.setRawMode(true);
+                    process.stdin.resume();
+                    render();
+                    return;
+                }
+            }
+
+            // Navigation
             if (key.name === 'up' || key.name === 'k') {
                 do {
                     selectedIndex = (selectedIndex - 1 + items.length) % items.length;
@@ -400,7 +413,7 @@ export async function runInteractiveDashboard() {
                 return;
             }
 
-            // Selection action
+            // Enter key
             if (key.name === 'return' || key.name === 'enter') {
                 const cur = items[selectedIndex];
                 if (!cur) return;
@@ -418,8 +431,116 @@ export async function runInteractiveDashboard() {
                 }
 
                 if (cur.type === 'action') {
+                    // 1. Toggle Load Balancer Strategy
+                    if (cur.id === 'lb_strategy') {
+                        const curIdx = STRATEGY_CYCLE.findIndex(s => s.id === currentStrategy);
+                        const nextObj = STRATEGY_CYCLE[(curIdx + 1) % STRATEGY_CYCLE.length];
+                        currentStrategy = nextObj.id;
+                        saveConfig({ accountSelection: { strategy: nextObj.id } });
+                        items = getItems();
+                        statusMessage = `Strategy set to: ${nextObj.label}.`;
+                        render();
+                        return;
+                    }
+
+                    // 2. Custom GCP Project Setup
+                    if (cur.id === 'custom_project') {
+                        process.stdout.write(c.exitAltScreen + c.enableWrap + c.showCursor);
+                        if (process.stdin.isTTY) process.stdin.setRawMode(false);
+                        console.log(c.clearScreen);
+                        console.log(`${c.brandGreen}╭─────────────────────────────────────────────────────────────────╮${c.reset}`);
+                        console.log(`${c.brandGreen}│  Custom Google Cloud Project Setup Guide                        │${c.reset}`);
+                        console.log(`${c.brandGreen}╰─────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+                        console.log('You can use your own GCP Project instead of default project:');
+                        console.log('  1. Visit: https://console.cloud.google.com/');
+                        console.log('  2. Create or select a Google Cloud Project (e.g. "my-atc-agent")');
+                        console.log('  3. In "APIs & Services", enable "Cloud AI Companion API"');
+                        console.log('  4. Enter your Project ID below:\n');
+                        const curProj = config?.customProjectId || 'Default (auto-managed)';
+                        console.log(`Current Project ID: ${c.activeBright}${curProj}${c.reset}\n`);
+
+                        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+                        const ans = await new Promise(r => rl.question(`Enter Project ID (leave blank to cancel, 'default' to reset): `, r));
+                        rl.close();
+
+                        const trimmed = ans.trim();
+                        if (trimmed === 'default') {
+                            saveConfig({ customProjectId: '' });
+                            statusMessage = 'Reset project to auto-managed default.';
+                        } else if (trimmed) {
+                            saveConfig({ customProjectId: trimmed });
+                            statusMessage = `Configured custom project ID: ${trimmed}.`;
+                        }
+
+                        process.stdout.write(c.enterAltScreen + c.disableWrap + c.hideCursor);
+                        if (process.stdin.isTTY) process.stdin.setRawMode(true);
+                        process.stdin.resume();
+                        items = getItems();
+                        render();
+                        return;
+                    }
+
+                    // 3. Custom Model Mappings
+                    if (cur.id === 'model_mapping') {
+                        process.stdout.write(c.exitAltScreen + c.enableWrap + c.showCursor);
+                        if (process.stdin.isTTY) process.stdin.setRawMode(false);
+                        console.log(c.clearScreen);
+                        console.log(`${c.brandGreen}╭─────────────────────────────────────────────────────────────────╮${c.reset}`);
+                        console.log(`${c.brandGreen}│  Custom Model ID Mappings (Claude <-> Gemini)                   │${c.reset}`);
+                        console.log(`${c.brandGreen}╰─────────────────────────────────────────────────────────────────╯${c.reset}\n`);
+                        console.log('Current Mappings exposed to Claude Code:\n');
+                        const mm = config.modelMapping || {};
+                        console.log(`  • Sonnet  -> ${mm['claude-3-5-sonnet-20241022'] || 'gemini-3.8-flash-high'}`);
+                        console.log(`  • Opus    -> ${mm['claude-3-opus-20240229'] || 'gemini-3.8-flash-high'}`);
+                        console.log(`  • Haiku   -> ${mm['claude-3-5-haiku-20241022'] || 'gemini-3.1-flash-lite'}\n`);
+                        console.log('Presets:');
+                        console.log('  [1] Max-Speed: Sonnet & Opus -> gemini-3.8-flash-high, Haiku -> gemini-3.1-flash-lite');
+                        console.log('  [2] Balanced: Opus -> gemini-3.8-flash-high, Sonnet -> gemini-3.8-flash-medium, Haiku -> gemini-3.1-flash-lite');
+                        console.log('  [3] Custom Input: Enter custom mapping');
+                        console.log('  [Enter] Keep current & exit\n');
+
+                        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+                        const opt = await new Promise(r => rl.question('Select option [1-3] or press Enter to return: ', r));
+
+                        if (opt === '1') {
+                            saveConfig({
+                                modelMapping: {
+                                    'claude-3-opus-20240229': 'gemini-3.8-flash-high',
+                                    'claude-3-5-sonnet-20241022': 'gemini-3.8-flash-high',
+                                    'claude-3-5-haiku-20241022': 'gemini-3.1-flash-lite'
+                                }
+                            });
+                            statusMessage = 'Applied Preset 1: Max-Speed mappings.';
+                        } else if (opt === '2') {
+                            saveConfig({
+                                modelMapping: {
+                                    'claude-3-opus-20240229': 'gemini-3.8-flash-high',
+                                    'claude-3-5-sonnet-20241022': 'gemini-3.8-flash-medium',
+                                    'claude-3-5-haiku-20241022': 'gemini-3.1-flash-lite'
+                                }
+                            });
+                            statusMessage = 'Applied Preset 2: Balanced mappings.';
+                        } else if (opt === '3') {
+                            const cModel = await new Promise(r => rl.question('Enter Claude Model ID (e.g. claude-3-opus-20240229): ', r));
+                            const gModel = await new Promise(r => rl.question('Enter Gemini Target ID (e.g. gemini-3.8-flash-high): ', r));
+                            if (cModel.trim() && gModel.trim()) {
+                                const newMm = { ...(config.modelMapping || {}) };
+                                newMm[cModel.trim()] = gModel.trim();
+                                saveConfig({ modelMapping: newMm });
+                                statusMessage = `Mapped ${cModel.trim()} -> ${gModel.trim()}`;
+                            }
+                        }
+                        rl.close();
+
+                        process.stdout.write(c.enterAltScreen + c.disableWrap + c.hideCursor);
+                        if (process.stdin.isTTY) process.stdin.setRawMode(true);
+                        process.stdin.resume();
+                        items = getItems();
+                        render();
+                        return;
+                    }
+
                     if (cur.id === 'pick_best') {
-                        // Find ready account with highest quota
                         const liveMap = new Map();
                         if (proxyHealth && Array.isArray(proxyHealth.accounts)) {
                             for (const a of proxyHealth.accounts) liveMap.set(a.email, a);
@@ -441,12 +562,11 @@ export async function runInteractiveDashboard() {
                                 bestIdx = i + 1;
                             }
                         });
-                        statusMessage = `Picking best account (Account ${bestIdx})...`;
+                        statusMessage = `Switched to best account: Account ${bestIdx}.`;
                         render();
                         await switchAccount(bestIdx.toString());
                         await refreshData();
                         items = getItems();
-                        statusMessage = `Switched to best account: Account ${bestIdx}.`;
                         render();
                         return;
                     }
@@ -467,30 +587,16 @@ export async function runInteractiveDashboard() {
                         return;
                     }
 
-                    if (cur.id === 'models') {
-                        process.stdout.write(c.showCursor);
-                        if (process.stdin.isTTY) process.stdin.setRawMode(false);
-                        console.log(c.clearScreen);
-                        showModelMappings();
-                        console.log(`${c.textMuted}Press Enter to return to dashboard...${c.reset}`);
-                        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-                        await new Promise(r => rl.once('line', r));
-                        rl.close();
-                        if (process.stdin.isTTY) process.stdin.setRawMode(true);
-                        process.stdin.resume();
-                        render();
-                        return;
-                    }
-
                     if (cur.id === 'health_check') {
-                        process.stdout.write(c.showCursor);
+                        process.stdout.write(c.exitAltScreen + c.enableWrap + c.showCursor);
                         if (process.stdin.isTTY) process.stdin.setRawMode(false);
                         console.log(c.clearScreen);
                         await checkAccounts();
-                        console.log(`${c.textMuted}Press Enter to return to dashboard...${c.reset}`);
+                        console.log(`\n${c.textMuted}Press Enter to return to dashboard...${c.reset}`);
                         const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
                         await new Promise(r => rl.once('line', r));
                         rl.close();
+                        process.stdout.write(c.enterAltScreen + c.disableWrap + c.hideCursor);
                         if (process.stdin.isTTY) process.stdin.setRawMode(true);
                         process.stdin.resume();
                         await refreshData();
@@ -500,57 +606,20 @@ export async function runInteractiveDashboard() {
                     }
 
                     if (cur.id === 'add_account') {
-                        process.stdout.write(c.showCursor);
+                        process.stdout.write(c.exitAltScreen + c.enableWrap + c.showCursor);
                         if (process.stdin.isTTY) process.stdin.setRawMode(false);
                         console.log(c.clearScreen);
                         await loginAccount();
-                        console.log(`${c.textMuted}Press Enter to return to dashboard...${c.reset}`);
+                        console.log(`\n${c.textMuted}Press Enter to return to dashboard...${c.reset}`);
                         const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
                         await new Promise(r => rl.once('line', r));
                         rl.close();
+                        process.stdout.write(c.enterAltScreen + c.disableWrap + c.hideCursor);
                         if (process.stdin.isTTY) process.stdin.setRawMode(true);
                         process.stdin.resume();
                         await refreshData();
                         items = getItems();
                         render();
-                        return;
-                    }
-
-                    if (cur.id === 'toggle_current') {
-                        const accItem = items.find((it, idx) => idx === selectedIndex && it.type === 'account') ||
-                                        items.find(it => it.type === 'account' && it.isCurrent);
-                        if (accItem) {
-                            const target = (accItem.accountIndex + 1).toString();
-                            await toggleAccount(target);
-                            await refreshData();
-                            items = getItems();
-                            statusMessage = `Toggled account ${target}.`;
-                            render();
-                        }
-                        return;
-                    }
-
-                    if (cur.id === 'delete_current') {
-                        const accItem = items.find((it, idx) => idx === selectedIndex && it.type === 'account') ||
-                                        items.find(it => it.type === 'account' && it.isCurrent);
-                        if (accItem) {
-                            const email = accItem.account.email;
-                            process.stdout.write(c.showCursor);
-                            if (process.stdin.isTTY) process.stdin.setRawMode(false);
-                            const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-                            const ans = await new Promise(r => rl.question(`\nAre you sure you want to remove ${email}? [y/N]: `, r));
-                            rl.close();
-                            if (ans.toLowerCase() === 'y') {
-                                await removeAccount(email);
-                                await refreshData();
-                                items = getItems();
-                                selectedIndex = Math.min(selectedIndex, items.length - 1);
-                                statusMessage = `Deleted account ${email}.`;
-                            }
-                            if (process.stdin.isTTY) process.stdin.setRawMode(true);
-                            process.stdin.resume();
-                            render();
-                        }
                         return;
                     }
                 }

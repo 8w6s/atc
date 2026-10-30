@@ -674,15 +674,34 @@ app.get('/v1/models', async (req, res) => {
             { id: 'claude-opus-5.5', object: 'model', created: 1740000000, owned_by: 'anthropic', description: 'Claude Opus 5.5' },
             { id: 'claude-opus-5-5', object: 'model', created: 1740000000, owned_by: 'anthropic', description: 'Claude Opus 5.5' },
             { id: 'claude-opus-5-5-high', object: 'model', created: 1740000000, owned_by: 'anthropic', description: 'Claude Opus 5.5 High' },
+            { id: 'claude-3-opus-20240229', object: 'model', created: 1709184000, owned_by: 'anthropic', description: 'Claude 3 Opus' },
+            { id: 'claude-3-opus', object: 'model', created: 1709184000, owned_by: 'anthropic', description: 'Claude 3 Opus' },
             { id: 'claude-sonnet-5.5', object: 'model', created: 1740000000, owned_by: 'anthropic', description: 'Claude Sonnet 5.5' },
             { id: 'claude-sonnet-5-5', object: 'model', created: 1740000000, owned_by: 'anthropic', description: 'Claude Sonnet 5.5' },
             { id: 'claude-sonnet-5-5-medium', object: 'model', created: 1740000000, owned_by: 'anthropic', description: 'Claude Sonnet 5.5 Medium' },
-            { id: 'claude-haiku-4.5', object: 'model', created: 1740000000, owned_by: 'anthropic', description: 'Claude Haiku 4.5' },
-            { id: 'claude-haiku-4-5', object: 'model', created: 1740000000, owned_by: 'anthropic', description: 'Claude Haiku 4.5' },
+            { id: 'claude-sonnet-4-6', object: 'model', created: 1730000000, owned_by: 'anthropic', description: 'Claude Sonnet 4.6' },
             { id: 'claude-3-7-sonnet-20250219', object: 'model', created: 1740000000, owned_by: 'anthropic', description: 'Claude 3.7 Sonnet (Thinking)' },
             { id: 'claude-3-5-sonnet-20241022', object: 'model', created: 1729555200, owned_by: 'anthropic', description: 'Claude 3.5 Sonnet v2' },
-            { id: 'claude-3-5-haiku-20241022', object: 'model', created: 1729555200, owned_by: 'anthropic', description: 'Claude 3.5 Haiku' }
+            { id: 'claude-3-5-sonnet', object: 'model', created: 1729555200, owned_by: 'anthropic', description: 'Claude 3.5 Sonnet' },
+            { id: 'claude-haiku-4.5', object: 'model', created: 1740000000, owned_by: 'anthropic', description: 'Claude Haiku 4.5' },
+            { id: 'claude-haiku-4-5', object: 'model', created: 1740000000, owned_by: 'anthropic', description: 'Claude Haiku 4.5' },
+            { id: 'claude-haiku-5-5', object: 'model', created: 1740000000, owned_by: 'anthropic', description: 'Claude Haiku 5.5' },
+            { id: 'claude-3-5-haiku-20241022', object: 'model', created: 1729555200, owned_by: 'anthropic', description: 'Claude 3.5 Haiku' },
+            { id: 'claude-3-5-haiku', object: 'model', created: 1729555200, owned_by: 'anthropic', description: 'Claude 3.5 Haiku' }
         ];
+
+        // Also expose any user-configured custom model mappings
+        const modelMapping = config.modelMapping || {};
+        for (const [customId, target] of Object.entries(modelMapping)) {
+            const targetName = typeof target === 'string' ? target : (target?.mapping || 'custom');
+            virtualModels.push({
+                id: customId,
+                object: 'model',
+                created: 1740000000,
+                owned_by: 'anthropic',
+                description: `Custom mapped -> ${targetName}`
+            });
+        }
 
         const existingIds = new Set((models.data || []).map(m => m.id));
         const newVirtual = virtualModels.filter(m => !existingIds.has(m.id));
@@ -747,10 +766,33 @@ app.post('/v1/messages', async (req, res) => {
         const originalRequestedModel = model;
         let requestedModel = model || 'claude-3-5-sonnet-20241022';
         const modelMapping = config.modelMapping || {};
-        if (modelMapping[requestedModel] && modelMapping[requestedModel].mapping) {
-            const targetModel = modelMapping[requestedModel].mapping;
-            logger.info(`[Server] Mapping model ${requestedModel} -> ${targetModel}`);
-            requestedModel = targetModel;
+
+        let mappedTarget = null;
+        if (modelMapping[requestedModel]) {
+            mappedTarget = typeof modelMapping[requestedModel] === 'string'
+                ? modelMapping[requestedModel]
+                : modelMapping[requestedModel].mapping;
+        } else {
+            // Flexible fuzzy alias resolution
+            const lower = requestedModel.toLowerCase();
+            if (lower.includes('opus')) {
+                const k = Object.keys(modelMapping).find(key => key.toLowerCase().includes('opus'));
+                if (k) mappedTarget = typeof modelMapping[k] === 'string' ? modelMapping[k] : modelMapping[k].mapping;
+                else mappedTarget = 'gemini-3.8-flash-high'; // Sensible fast default for opus
+            } else if (lower.includes('sonnet')) {
+                const k = Object.keys(modelMapping).find(key => key.toLowerCase().includes('sonnet'));
+                if (k) mappedTarget = typeof modelMapping[k] === 'string' ? modelMapping[k] : modelMapping[k].mapping;
+                else mappedTarget = 'gemini-3.8-flash-high';
+            } else if (lower.includes('haiku')) {
+                const k = Object.keys(modelMapping).find(key => key.toLowerCase().includes('haiku'));
+                if (k) mappedTarget = typeof modelMapping[k] === 'string' ? modelMapping[k] : modelMapping[k].mapping;
+                else mappedTarget = 'gemini-3.1-flash-lite';
+            }
+        }
+
+        if (mappedTarget) {
+            logger.info(`[Server] Mapping model ${requestedModel} -> ${mappedTarget}`);
+            requestedModel = mappedTarget;
         }
 
         // Strip client context annotations like [1m] or [200k] for backend routing and validation

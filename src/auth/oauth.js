@@ -20,6 +20,168 @@ import { throttledFetch } from '../utils/helpers.js';
 import { onboardUser, getDefaultTierId } from '../account-manager/onboarding.js';
 
 /**
+ * Render modern dark-themed OAuth result page
+ */
+function renderAuthHtml({ success, title, subtitle, hint }) {
+    const accentColor = success ? '#10b981' : '#ef4444';
+    const accentBg = success ? 'rgba(16, 185, 129, 0.12)' : 'rgba(239, 68, 68, 0.12)';
+    const glowColor = success ? 'rgba(16, 185, 129, 0.25)' : 'rgba(239, 68, 68, 0.25)';
+    const iconSvg = success
+        ? `<svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>`
+        : `<svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>`;
+
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>${title} · atc</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background: radial-gradient(circle at 50% 18%, #1e293b 0%, #0f172a 50%, #020617 100%);
+            color: #f1f5f9;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+        }
+        .card {
+            background: rgba(18, 24, 38, 0.82);
+            backdrop-filter: blur(24px);
+            -webkit-backdrop-filter: blur(24px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 24px;
+            padding: 44px 36px;
+            max-width: 460px;
+            width: 100%;
+            text-align: center;
+            box-shadow: 0 30px 60px -15px rgba(0, 0, 0, 0.8), 0 0 45px ${glowColor};
+            animation: fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(16px) scale(0.97); }
+            to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        .icon-wrap {
+            width: 80px;
+            height: 80px;
+            margin: 0 auto 24px;
+            background: ${accentBg};
+            border: 1.5px solid ${accentColor}44;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 0 25px ${glowColor};
+        }
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 12px;
+            border-radius: 9999px;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: #94a3b8;
+            margin-bottom: 16px;
+        }
+        .badge-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: ${accentColor};
+            box-shadow: 0 0 8px ${accentColor};
+        }
+        h1 {
+            font-size: 24px;
+            font-weight: 700;
+            letter-spacing: -0.4px;
+            color: #ffffff;
+            margin-bottom: 10px;
+        }
+        .subtitle {
+            font-size: 14px;
+            color: #94a3b8;
+            line-height: 1.5;
+            margin-bottom: 20px;
+        }
+        .divider {
+            height: 1px;
+            background: rgba(255, 255, 255, 0.08);
+            margin: 20px 0;
+        }
+        .hint {
+            font-size: 13px;
+            color: #64748b;
+            line-height: 1.5;
+            margin-bottom: 24px;
+        }
+        .btn {
+            display: inline-block;
+            background: #1e293b;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            color: #f8fafc;
+            font-size: 14px;
+            font-weight: 600;
+            padding: 10px 24px;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .btn:hover {
+            background: #334155;
+            border-color: rgba(255, 255, 255, 0.25);
+            transform: translateY(-1px);
+        }
+        .footer-note {
+            margin-top: 18px;
+            font-size: 12px;
+            color: #475569;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="icon-wrap">
+            ${iconSvg}
+        </div>
+        <div class="badge">
+            <span class="badge-dot"></span>
+            atc · antigravity to claude
+        </div>
+        <h1>${title}</h1>
+        <p class="subtitle">${subtitle}</p>
+        <div class="divider"></div>
+        <p class="hint">${hint}</p>
+        <button class="btn" onclick="window.close()">Close Window</button>
+        ${success ? '<p class="footer-note" id="timer">Closing tab in 3 seconds...</p>' : ''}
+    </div>
+    ${success ? `
+    <script>
+        let s = 3;
+        const el = document.getElementById('timer');
+        const iv = setInterval(() => {
+            s--;
+            if (s > 0) {
+                if (el) el.textContent = 'Closing tab in ' + s + ' second' + (s > 1 ? 's...' : '...');
+            } else {
+                clearInterval(iv);
+                window.close();
+            }
+        }, 1000);
+    </script>` : ''}
+</body>
+</html>`;
+}
+
+/**
  * Parse refresh token parts (aligned with opencode-antigravity-auth)
  * Format: refreshToken|projectId|managedProjectId
  *
@@ -198,16 +360,12 @@ export function startCallbackServer(expectedState, timeoutMs = 120000) {
 
             if (error) {
                 res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
-                res.end(`
-                    <html>
-                    <head><meta charset="UTF-8"><title>Authentication Failed</title></head>
-                    <body style="font-family: system-ui; padding: 40px; text-align: center;">
-                        <h1 style="color: #dc3545;">❌ Authentication Failed</h1>
-                        <p>Error: ${error}</p>
-                        <p>You can close this window.</p>
-                    </body>
-                    </html>
-                `);
+                res.end(renderAuthHtml({
+                    success: false,
+                    title: 'Authentication Denied',
+                    subtitle: `OAuth error: ${error}`,
+                    hint: 'Please return to terminal and try again.'
+                }));
                 server.close();
                 reject(new Error(`OAuth error: ${error}`));
                 return;
@@ -215,16 +373,12 @@ export function startCallbackServer(expectedState, timeoutMs = 120000) {
 
             if (state !== expectedState) {
                 res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
-                res.end(`
-                    <html>
-                    <head><meta charset="UTF-8"><title>Authentication Failed</title></head>
-                    <body style="font-family: system-ui; padding: 40px; text-align: center;">
-                        <h1 style="color: #dc3545;">❌ Authentication Failed</h1>
-                        <p>State mismatch - possible CSRF attack.</p>
-                        <p>You can close this window.</p>
-                    </body>
-                    </html>
-                `);
+                res.end(renderAuthHtml({
+                    success: false,
+                    title: 'Security Verification Failed',
+                    subtitle: 'State mismatch detected (possible CSRF attack).',
+                    hint: 'Please initiate a fresh login from terminal.'
+                }));
                 server.close();
                 reject(new Error('State mismatch'));
                 return;
@@ -232,16 +386,12 @@ export function startCallbackServer(expectedState, timeoutMs = 120000) {
 
             if (!code) {
                 res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
-                res.end(`
-                    <html>
-                    <head><meta charset="UTF-8"><title>Authentication Failed</title></head>
-                    <body style="font-family: system-ui; padding: 40px; text-align: center;">
-                        <h1 style="color: #dc3545;">❌ Authentication Failed</h1>
-                        <p>No authorization code received.</p>
-                        <p>You can close this window.</p>
-                    </body>
-                    </html>
-                `);
+                res.end(renderAuthHtml({
+                    success: false,
+                    title: 'Authentication Incomplete',
+                    subtitle: 'No authorization code received from Google.',
+                    hint: 'Please ensure permissions are granted and try again.'
+                }));
                 server.close();
                 reject(new Error('No authorization code'));
                 return;
@@ -249,16 +399,12 @@ export function startCallbackServer(expectedState, timeoutMs = 120000) {
 
             // Success!
             res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-            res.end(`
-                <html>
-                <head><meta charset="UTF-8"><title>Authentication Successful</title></head>
-                <body style="font-family: system-ui; padding: 40px; text-align: center;">
-                    <h1 style="color: #28a745;">✅ Authentication Successful!</h1>
-                    <p>You can close this window and return to the terminal.</p>
-                    <script>setTimeout(() => window.close(), 2000);</script>
-                </body>
-                </html>
-            `);
+            res.end(renderAuthHtml({
+                success: true,
+                title: 'Authentication Successful',
+                subtitle: 'Google account linked to atc (Antigravity to Claude)',
+                hint: 'Credentials saved securely. You can now return to your terminal.'
+            }));
 
             server.close();
             resolve(code);
