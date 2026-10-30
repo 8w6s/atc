@@ -422,31 +422,37 @@ export async function runInteractiveDashboard(options = {}) {
                 const planPad = ' '.repeat(Math.max(1, 8 - planBadgeRawLen));
                 const planStr = formatPlanBadge(planTier) + planPad;
 
-                // Column 3 & 4: 5h-Cap and Weekly Quota
+                // Column 3 & 4: 5h-Cap and Weekly Quota (strict 4-char formatted percentage + 4 spaces padding = 8 chars)
                 const models = lim.limits || lim.models || acc.quota?.models || live.models || {};
                 const qSummary = getAccountQuotaSummary(models);
 
-                let fiveCol = `\x1b[38;5;120m 100%\x1b[0m   `;
+                let fiveText = '100%';
+                let fiveColor = '\x1b[38;5;120m';
                 if (isInvalid) {
-                    fiveCol = `\x1b[38;5;240m  -- \x1b[0m   `;
+                    fiveText = '  --';
+                    fiveColor = '\x1b[38;5;240m';
                 } else if (qSummary.fiveHour) {
                     const p = qSummary.fiveHour.remainingPct;
-                    const pStr = `${p.toString().padStart(3)}%`;
-                    if (p === 0) fiveCol = `\x1b[1;31m${pStr}\x1b[0m   `;
-                    else if (p < 20) fiveCol = `\x1b[38;5;214m${pStr}\x1b[0m   `;
-                    else fiveCol = `\x1b[38;5;120m${pStr}\x1b[0m   `;
+                    fiveText = `${p}%`.padStart(4, ' ');
+                    if (p === 0) fiveColor = '\x1b[1;31m';
+                    else if (p < 20) fiveColor = '\x1b[38;5;214m';
+                    else fiveColor = '\x1b[38;5;120m';
                 }
+                const fiveCol = `${fiveColor}${fiveText}\x1b[0m    `;
 
-                let weekCol = `\x1b[38;5;120m 100%\x1b[0m   `;
+                let weekText = '100%';
+                let weekColor = '\x1b[38;5;120m';
                 if (isInvalid) {
-                    weekCol = `\x1b[38;5;240m  -- \x1b[0m   `;
+                    weekText = '  --';
+                    weekColor = '\x1b[38;5;240m';
                 } else if (qSummary.weekly) {
                     const wp = qSummary.weekly.remainingPct;
-                    const wpStr = `${wp.toString().padStart(3)}%`;
-                    if (wp === 0) weekCol = `\x1b[1;31m${wpStr}\x1b[0m   `;
-                    else if (wp < 20) weekCol = `\x1b[38;5;214m${wpStr}\x1b[0m   `;
-                    else weekCol = `\x1b[38;5;120m${wpStr}\x1b[0m   `;
+                    weekText = `${wp}%`.padStart(4, ' ');
+                    if (wp === 0) weekColor = '\x1b[1;31m';
+                    else if (wp < 20) weekColor = '\x1b[38;5;214m';
+                    else weekColor = '\x1b[38;5;120m';
                 }
+                const weekCol = `${weekColor}${weekText}\x1b[0m    `;
 
                 // Column 5: Status Badge (strictly 12-char width)
                 let statusLabel = '[ok]';
