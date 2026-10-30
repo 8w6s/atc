@@ -176,4 +176,6 @@ claude
 
 ## License
 
-MIT
+MIT © 2026 [8w6s](mailto:satoharuki2321@proton.me).
+
+Free to use, modify, and distribute. Original author attribution must be preserved; claiming authorship of the original codebase is strictly prohibited.
