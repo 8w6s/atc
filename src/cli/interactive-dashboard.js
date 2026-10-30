@@ -1775,7 +1775,7 @@ export async function runInteractiveDashboard(options = {}) {
                         const confirm = await new Promise(r => rl.question('Type "yes" to confirm deletion: ', r));
                         rl.close();
                         if (confirm.trim().toLowerCase() === 'yes') {
-                            await deleteAccount(accNum.toString());
+                            await removeAccount(accNum.toString());
                             console.log(`\n${c.actionGreen}✓ Account deleted. Returning to dashboard in 1.5s...${c.reset}`);
                             await new Promise(r => setTimeout(r, 1500));
                             setStatus(`Deleted Account ${accNum}.`, 2000);
