@@ -1,3 +1,8 @@
+[v1.0.1]
+[SECURITY] Tach toan bo Google OAuth Client credentials ra khoi ma nguon, luu tru an toan tai ~/.config/atc/config.json.
+[NEW] Ho tro truyen Client ID va Client Secret linh hoat qua bien moi truong GOOGLE_OAUTH_CLIENT_ID va GOOGLE_OAUTH_CLIENT_SECRET.
+[NEW] Cong bo package chinh thuc tren npm registry: @8w6s/atc.
+
 [v1.0.0]
 [NEW] Cong bo phien ban chinh thuc v1.0.0, chuyen sang scoped package @8w6s/atc.
 [NEW] Lenh atc models (--refresh): Probe danh muc model Antigravity truc tiep tu tai khoan co plan cao nhat.
