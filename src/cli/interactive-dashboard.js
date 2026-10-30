@@ -51,6 +51,8 @@ const c = {
     
     enterAltScreen: '\x1b[?1049h',
     exitAltScreen: '\x1b[?1049l',
+    disableWrap: '\x1b[?7l',
+    enableWrap: '\x1b[?7h',
     clearScreen: '\x1b[2J\x1b[H',
     cursorHome: '\x1b[H',
     clearToEndOfLine: '\x1b[K',
@@ -179,12 +181,12 @@ export async function runInteractiveDashboard() {
     if (selectedIndex === -1) selectedIndex = items.findIndex(it => it.type === 'account') || 1;
     if (selectedIndex === -1) selectedIndex = 1;
 
-    // Enter alternate screen buffer & hide cursor for 100% flicker-free & isolated TUI
-    process.stdout.write(c.enterAltScreen + c.hideCursor);
+    // Enter alternate screen buffer, disable line wrap & hide cursor for 100% flicker-free & isolated TUI
+    process.stdout.write(c.enterAltScreen + c.disableWrap + c.hideCursor);
 
     // Flicker-free render function using virtual buffer and cursor home
     function render() {
-        let buf = c.hideCursor + c.cursorHome;
+        let buf = c.hideCursor + c.disableWrap + c.cursorHome;
 
         // Header Title (clean, no unwanted '+' symbols)
         buf += `${c.brandGreen}Accounts Dashboard (atc v2.9.1)${c.reset}${c.clearToEndOfLine}\n\n`;
@@ -257,7 +259,7 @@ export async function runInteractiveDashboard() {
 
                 buf += `${pointer}${emailStr} ${badges.join(' ')}${c.clearToEndOfLine}\n`;
 
-                // Dynamic details pane when hovered (minimalist clean layout)
+                // Dynamic details pane when hovered (minimalist clean layout, concise to fit standard width)
                 if (isSelected) {
                     const models = live.models || lim.models || {};
                     const primary = models['gemini-3.8-flash-high'] || models['gemini-3.8-flash-medium'] || Object.values(models)[0] || {};
@@ -281,11 +283,11 @@ export async function runInteractiveDashboard() {
                         }
                     }
 
-                    const projectId = lim.subscription?.projectId || acc.subscription?.projectId;
-                    const projectStr = projectId ? ` ${c.textDark}|${c.reset} ${c.textMuted}Project:${c.reset} ${projectId}` : '';
-                    const invalidHint = isInvalid ? ` ${c.textDark}|${c.reset} ${c.statusDanger}press R to re-login${c.reset}` : '';
-
-                    buf += `  ${c.textMuted}Last used:${c.reset} ${timeAgo} ${c.textDark}|${c.reset} ${c.textMuted}Usage:${c.reset} ${usageStr}${resetStr}${projectStr}${invalidHint}${c.clearToEndOfLine}\n`;
+                    if (isInvalid) {
+                        buf += `  ${c.textMuted}Last used:${c.reset} ${timeAgo} ${c.textDark}|${c.reset} ${c.statusDanger}press R to re-login${c.reset}${c.clearToEndOfLine}\n`;
+                    } else {
+                        buf += `  ${c.textMuted}Last used:${c.reset} ${timeAgo} ${c.textDark}|${c.reset} ${c.textMuted}Usage:${c.reset} ${usageStr}${resetStr}${c.clearToEndOfLine}\n`;
+                    }
                 }
             }
         }
@@ -294,10 +296,8 @@ export async function runInteractiveDashboard() {
         if (statusMessage) {
             buf += `${c.statusWarn}ℹ ${statusMessage}${c.reset}${c.clearToEndOfLine}\n`;
         }
-        buf += `${c.textMuted}↑↓ Move | Enter Select | R Re-login | 1-9 Switch | Q Back${c.reset}${c.clearToEndOfLine}\n`;
-
-        // Clear any leftover lines below to prevent double text
-        buf += c.clearToEndOfScreen;
+        // Do NOT add trailing \n to footer line to prevent terminal from auto-scrolling
+        buf += `${c.textMuted}↑↓ Move | Enter Select | R Re-login | 1-9 Switch | Q Back${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
 
         // Single write to stdout guarantees 0% screen flicker
         process.stdout.write(buf);
@@ -318,7 +318,7 @@ export async function runInteractiveDashboard() {
     return new Promise((resolve) => {
         function cleanupAndExit() {
             process.stdout.removeListener('resize', onResize);
-            process.stdout.write(c.exitAltScreen + c.showCursor);
+            process.stdout.write(c.exitAltScreen + c.enableWrap + c.showCursor);
             if (process.stdin.isTTY) {
                 process.stdin.setRawMode(false);
             }
@@ -358,7 +358,7 @@ export async function runInteractiveDashboard() {
                 const cur = items[selectedIndex];
                 if (cur && cur.type === 'account') {
                     const email = cur.account.email;
-                    process.stdout.write(c.exitAltScreen + c.showCursor);
+                    process.stdout.write(c.exitAltScreen + c.enableWrap + c.showCursor);
                     if (process.stdin.isTTY) process.stdin.setRawMode(false);
                     console.log(c.clearScreen);
                     await loginAccount({ targetEmail: email });
@@ -366,7 +366,7 @@ export async function runInteractiveDashboard() {
                     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
                     await new Promise(r => rl.once('line', r));
                     rl.close();
-                    process.stdout.write(c.enterAltScreen + c.hideCursor);
+                    process.stdout.write(c.enterAltScreen + c.disableWrap + c.hideCursor);
                     if (process.stdin.isTTY) process.stdin.setRawMode(true);
                     process.stdin.resume();
                     await refreshData();
