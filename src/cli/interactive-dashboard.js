@@ -5,7 +5,13 @@ import { ACCOUNT_CONFIG_PATH } from '../constants.js';
 import { loadAccounts, saveAccounts } from '../account-manager/storage.js';
 import { config, saveConfig, reloadConfig } from '../config.js';
 import { getPackageVersion } from '../utils/helpers.js';
+import { renderRoundedBox, padEndVisible, truncateVisible } from '../utils/terminal-box.js';
 import { SAFETY_TIPS, getTipTickerFrame } from './tips.js';
+import {
+    normalizeCustomProfile,
+    evaluateCustomProfileRisk,
+    slugifyProfileId
+} from '../account-manager/strategies/index.js';
 import {
     getProxyPort,
     getServicePid,
@@ -59,13 +65,22 @@ const c = {
     exitAltScreen: '\x1b[?1049l',
     disableWrap: '\x1b[?7l',
     enableWrap: '\x1b[?7h',
-    clearScreen: '\x1b[2J\x1b[3J\x1b[H',
+    clearScreen: '\x1b[2J\x1b[H',
     cursorHome: '\x1b[H',
     clearToEndOfLine: '\x1b[K',
     clearToEndOfScreen: '\x1b[J',
     hideCursor: '\x1b[?25l',
     showCursor: '\x1b[?25h'
 };
+
+function drawHeaderBox(titleText, innerWidth = 76) {
+    return renderRoundedBox(`  \x1b[1;38;5;48m${titleText}\x1b[0m`, {
+        innerWidth,
+        borderColor: c.brandGreen,
+        reset: c.reset,
+        lineClear: c.clearToEndOfLine
+    });
+}
 
 function formatDuration(ms) {
     if (ms <= 0 || isNaN(ms)) return '0s';
@@ -133,9 +148,40 @@ function getAccountQuotaSummary(models = {}) {
     return { fiveHour, weekly };
 }
 
+function formatDisplayEmail(email) {
+    const raw = String(email || '');
+    if (!config?.maskEmails || !raw.includes('@')) return raw;
+    const [local, domain] = raw.split('@');
+    if (local.length <= 4) {
+        return `${local[0] || '*'}***@${domain}`;
+    }
+    return `${local.slice(0, 2)}***${local.slice(-2)}@${domain}`;
+}
+
+function getTipBadgeStyle(badge) {
+    const key = String(badge || '').toUpperCase();
+    switch (key) {
+        case 'ANTI-BAN':
+            return '\x1b[1;38;5;16;48;5;214m'; // Bold black on vivid amber
+        case 'SAFETY':
+            return '\x1b[1;38;5;16;48;5;49m';  // Bold black on mint emerald
+        case 'QUOTA':
+            return '\x1b[1;38;5;16;48;5;75m';  // Bold black on sky blue
+        case 'RECOVERY':
+            return '\x1b[1;38;5;16;48;5;177m'; // Bold black on soft orchid
+        default:
+            return '\x1b[1;38;5;16;48;5;221m'; // Bold black on warm gold
+    }
+}
+
+const FIXED_TIP_BADGE_WIDTH = Math.max(
+    8,
+    ...SAFETY_TIPS.map((t) => String(t.badge || 'TIP').length)
+);
+
 function getStrategyCycle() {
     const thresholdPct = Math.round((config?.accountSelection?.stepThreshold || 0.05) * 100);
-    return [
+    const builtIns = [
         {
             id: 'locked',
             label: 'Single-Account Lock',
@@ -151,18 +197,39 @@ function getStrategyCycle() {
             desc: 'Exposes at most 1 primary + 1 standby account per calendar day; keeps remaining accounts dormant'
         },
         {
+            id: 'shift-split',
+            label: 'Workday 2x12h Shift',
+            riskTag: 'low-risk',
+            riskColor: '\x1b[38;5;120m',
+            desc: 'Splits day into 00:00–11:59 AM slot and 12:00–23:59 PM slot; single midday switch, max 2 accounts/day'
+        },
+        {
             id: 'session',
             label: 'Idle-Aware Session Shift',
             riskTag: 'low-risk',
             riskColor: '\x1b[38;5;120m',
-            desc: 'Never switches mid-conversation; rotates only after ~45m work + >=3m natural idle break'
+            desc: 'Never switches mid-conversation; rotates only after ~45m work + natural idle gap between prompts'
+        },
+        {
+            id: 'weekly-guard',
+            label: 'Weekly-Cap Preserver',
+            riskTag: 'low-risk',
+            riskColor: '\x1b[38;5;120m',
+            desc: 'Protects scarce weekly quotas (Gemini 4 Argon / Opus): holds >=15m blocks and preserves 20% weekly floor'
         },
         {
             id: 'sticky',
             label: 'Sticky Drain-to-Floor',
             riskTag: 'low-risk',
             riskColor: '\x1b[38;5;120m',
-            desc: 'Stays on one account for hours until hitting Global Quota Floor or long rate-limit'
+            desc: 'Stays on one account for hours until hitting Global 5h / Weekly Quota Floor or long rate-limit'
+        },
+        {
+            id: 'warmup',
+            label: 'Gradual Clone Warm-Up',
+            riskTag: 'moderate',
+            riskColor: '\x1b[38;5;220m',
+            desc: 'Shields newly added clones (<48h old) with light 5-req warm-up drips while seasoned accounts carry load'
         },
         {
             id: 'pipelined',
@@ -186,6 +253,23 @@ function getStrategyCycle() {
             desc: 'Cycles accounts on EVERY single request from one IP — breaks prompt cache & looks automated'
         }
     ];
+
+    const customList = Array.isArray(config?.customModes) ? config.customModes : [];
+    const customs = customList.map((raw) => {
+        const p = normalizeCustomProfile(raw);
+        const risk = evaluateCustomProfileRisk(p);
+        return {
+            id: `custom:${p.id}`,
+            label: p.name,
+            isCustom: true,
+            customProfile: p,
+            riskTag: risk.riskTag,
+            riskColor: risk.riskColor,
+            desc: `${risk.summary} [Core: ${p.baseCore}, Max/Day: ${p.maxDailyAccounts || 'all'}, Stay: ${p.minStaySec}s]`
+        };
+    });
+
+    return [...builtIns, ...customs];
 }
 
 function wrapPlainText(text, maxWidth) {
@@ -284,8 +368,9 @@ function getShimmerTitle() {
     const totalCycle = sweepMs + pauseMs; // 8000ms total
     const elapsed = Date.now() % totalCycle;
 
-    // During the 5s pause window, render base continuous gradient without shimmer
-    const isSweeping = elapsed < sweepMs;
+    // Respect Header Shimmer Effect setting while keeping static brand gradient
+    const shimmerAllowed = config?.shimmerTitle !== false;
+    const isSweeping = shimmerAllowed && elapsed < sweepMs;
     const t = isSweeping ? (elapsed / sweepMs) : 2.0; // 2.0 puts center far out of range
     const total = TITLE_CHARS.length;
     const center = t * (total + 6) - 3;
@@ -325,20 +410,23 @@ export async function runInteractiveDashboard(options = {}) {
     let proxyLimits = null;
     let statusMessage = '';
     let statusTimer = null;
+    let isSubScreenActive = false;
+    let activeSubScreenRender = null;
 
     function setStatus(msg, durationMs = 2000) {
         statusMessage = msg;
         if (statusTimer) clearTimeout(statusTimer);
-        render();
+        if (!isSubScreenActive) render();
         if (durationMs > 0) {
             statusTimer = setTimeout(() => {
                 statusMessage = '';
-                render();
+                if (!isSubScreenActive) render();
             }, durationMs);
         }
     }
     let currentStrategy = config?.accountSelection?.strategy || 'pipelined';
     const dashboardStartMs = Date.now();
+    let tipsSessionOverride = null;
     let tipsVisible = config?.showTips !== false;
     let lastRenderedTipIdx = 0;
 
@@ -352,7 +440,7 @@ export async function runInteractiveDashboard(options = {}) {
         reloadConfig();
         port = getProxyPort();
         currentStrategy = config?.accountSelection?.strategy || 'pipelined';
-        tipsVisible = config?.showTips !== false;
+        tipsVisible = tipsSessionOverride !== null ? tipsSessionOverride : (config?.showTips !== false);
 
         try {
             await fetch(`http://127.0.0.1:${port}/reload`, {
@@ -410,12 +498,13 @@ export async function runInteractiveDashboard(options = {}) {
 
         list.push({ type: 'header', label: 'Quick Actions' });
         list.push({ type: 'action', id: 'add_account', label: 'Add New Account', desc: 'Link a new Google account via OAuth browser' });
+        const customTag = stratObj.isCustom ? `\x1b[38;5;141m[custom]\x1b[0m ` : '';
         list.push({
             type: 'action',
             id: 'lb_strategy',
             label: `Load Balancer: [${stratObj.label}]`,
-            badgeStr: `${stratObj.riskColor}[${stratObj.riskTag}]${c.reset}`,
-            desc: `${stratObj.desc} (Enter to list all, ←/→ quick switch)`
+            badgeStr: `${customTag}${stratObj.riskColor}[${stratObj.riskTag}]${c.reset}`,
+            desc: `${stratObj.desc} (Enter to manage modes & custom profiles, ←/→ quick switch)`
         });
         list.push({ type: 'action', id: 'custom_project', label: `Custom GCP Project: [${customProject}]`, desc: 'Configure custom Google Cloud Project ID for quotas' });
         list.push({ type: 'action', id: 'model_mapping', label: 'Model Mappings', desc: 'Configure Claude Code models, subagents, and environment overrides' });
@@ -450,8 +539,6 @@ export async function runInteractiveDashboard(options = {}) {
     // Enter alternate screen buffer, disable line wrap & hide cursor for 100% flicker-free isolated TUI
     process.stdout.write(c.enterAltScreen + c.disableWrap + c.hideCursor);
 
-    let isSubScreenActive = false;
-
     // Fixed-height, 0% flicker render function
     function render() {
         if (isSubScreenActive) return;
@@ -460,18 +547,30 @@ export async function runInteractiveDashboard(options = {}) {
         // Header Title
         buf += `${getShimmerTitle()} ${c.textMuted}v${getPackageVersion()}${c.reset}${c.clearToEndOfLine}\n`;
 
-        // Scrolling Safety / Operational Tip Marquee Banner
+        /*
+         * High-contrast Safety & Operational Tip Ribbon.
+         * Badge pill width and right action cap width are strictly constant across
+         * all tips so viewportCols never changes between 2/4 and 3/4 — eliminating
+         * schedule boundary oscillation / flicker.
+         */
         if (tipsVisible && SAFETY_TIPS.length > 0) {
-            const termCols = Math.max(68, Math.min(process.stdout.columns || 96, 118));
-            const probeTip = SAFETY_TIPS[lastRenderedTipIdx] || SAFETY_TIPS[0];
-            const rawPrefixSample = `  TIP [${probeTip.badge} ${SAFETY_TIPS.length}/${SAFETY_TIPS.length}] `;
-            const rawSuffix = ' [Ctrl+D Detail | X Hide]';
-            const viewportCols = Math.max(22, termCols - rawPrefixSample.length - rawSuffix.length - 1);
-            const frame = getTipTickerFrame(SAFETY_TIPS, Date.now() - dashboardStartMs, viewportCols);
+            const termCols = Math.max(72, Math.min(process.stdout.columns || 98, 118));
+            const totalDigits = String(SAFETY_TIPS.length).length;
+            const pillPlainLen = 3 + FIXED_TIP_BADGE_WIDTH + 1 + totalDigits + 1 + totalDigits + 1; // " ★ BADGE____ 1/4 "
+            const capPlainLen = 22; // " Ctrl+D Info · X Hide "
+            const viewportCols = Math.max(20, termCols - 2 - pillPlainLen - capPlainLen - 2);
+            const frame = getTipTickerFrame(SAFETY_TIPS, Date.now() - dashboardStartMs, viewportCols, {
+                speed: config?.tipsScrollSpeed || 'normal'
+            });
             if (frame.tip) {
                 lastRenderedTipIdx = frame.index;
-                const badgeStr = `\x1b[1;38;5;220m[${frame.tip.badge} ${frame.index + 1}/${SAFETY_TIPS.length}]\x1b[0m`;
-                buf += `  \x1b[38;5;214m✦\x1b[0m ${badgeStr} \x1b[38;5;252m${frame.visibleText}\x1b[0m\x1b[38;5;242m${rawSuffix}\x1b[0m${c.clearToEndOfLine}\n`;
+                const paddedBadge = String(frame.tip.badge || 'TIP').padEnd(FIXED_TIP_BADGE_WIDTH, ' ');
+                const idxStr = `${String(frame.index + 1).padStart(totalDigits, ' ')}/${SAFETY_TIPS.length}`;
+                const pillStyle = getTipBadgeStyle(frame.tip.badge);
+                const pillSeg = `${pillStyle} ★ ${paddedBadge} ${idxStr} \x1b[0m`;
+                const bodySeg = `\x1b[38;5;230;48;5;236m ${frame.visibleText} \x1b[0m`;
+                const capSeg = `\x1b[38;5;117;48;5;238m Ctrl+D\x1b[38;5;250;48;5;238m Info · \x1b[38;5;220;48;5;238mX\x1b[38;5;250;48;5;238m Hide \x1b[0m`;
+                buf += `  ${pillSeg}${bodySeg}${capSeg}${c.clearToEndOfLine}\n`;
             }
         }
 
@@ -549,7 +648,7 @@ export async function runInteractiveDashboard(options = {}) {
                 ) || (live.rateLimitCooldownRemaining > 0);
 
                 // Column 1: Account / Email padded to 28 chars
-                const rawEmail = `${idx}. ${acc.email}`;
+                const rawEmail = `${idx}. ${formatDisplayEmail(acc.email)}`;
                 const paddedEmail = rawEmail.padEnd(28, ' ');
                 const emailStr = isSelected
                     ? `${c.activeBright}${paddedEmail}${c.reset}`
@@ -736,7 +835,13 @@ export async function runInteractiveDashboard(options = {}) {
     if (process.stdin.isTTY) process.stdin.setRawMode(true);
     process.stdin.resume();
 
-    const onResize = () => render();
+    const onResize = () => {
+        if (isSubScreenActive) {
+            if (typeof activeSubScreenRender === 'function') activeSubScreenRender();
+        } else {
+            render();
+        }
+    };
     process.stdout.on('resize', onResize);
 
     let shimmerTimer = setInterval(() => render(), 75);
@@ -744,8 +849,6 @@ export async function runInteractiveDashboard(options = {}) {
     render();
 
     return new Promise((resolve) => {
-        let isSubScreenActive = false;
-
         function cleanupAndExit() {
             if (shimmerTimer) clearInterval(shimmerTimer);
             process.stdout.removeListener('resize', onResize);
@@ -757,19 +860,33 @@ export async function runInteractiveDashboard(options = {}) {
             resolve();
         }
 
-        // Run interactive prompt screens cleanly inside Alternate Screen Buffer
-        // without causing layer flickering, buffer jumps, or event listener conflicts
-        async function runSubScreen(fn) {
+        /*
+         * Sub-screen runner shares the outer isSubScreenActive guard so background
+         * timers/resizes never paint dashboard rows on top of an open sub-screen.
+         * TUI sub-screens stay in raw + nowrap + hidden-cursor mode without toggling
+         * ConPTY line discipline; only readline prompts opt into lineMode = true.
+         */
+        async function runSubScreen(fn, { lineMode = false } = {}) {
             if (isSubScreenActive) return;
             isSubScreenActive = true;
+            activeSubScreenRender = null;
             if (shimmerTimer) {
                 clearInterval(shimmerTimer);
                 shimmerTimer = null;
             }
             process.stdin.removeListener('keypress', onKeypress);
-            process.stdout.write(c.clearScreen + c.cursorHome + c.enableWrap + c.showCursor);
-            if (process.stdin.isTTY) {
-                process.stdin.setRawMode(false);
+            if (lineMode) {
+                process.stdout.write(c.cursorHome + c.clearScreen + c.enableWrap + c.showCursor);
+                if (process.stdin.isTTY) {
+                    process.stdin.setRawMode(false);
+                }
+            } else {
+                if (process.stdin.isTTY) {
+                    process.stdin.setRawMode(true);
+                }
+                readline.emitKeypressEvents(process.stdin);
+                process.stdin.resume();
+                process.stdout.write(c.hideCursor + c.disableWrap + c.cursorHome + c.clearScreen);
             }
             try {
                 await fn();
@@ -777,355 +894,464 @@ export async function runInteractiveDashboard(options = {}) {
                 console.error(`\n${c.statusDanger}Error: ${err.message}${c.reset}`);
                 await new Promise(r => setTimeout(r, 1500));
             } finally {
+                activeSubScreenRender = null;
                 if (process.stdin.isTTY) {
                     process.stdin.setRawMode(true);
                 }
                 process.stdin.resume();
                 process.stdin.on('keypress', onKeypress);
-                process.stdout.write(c.clearScreen + c.cursorHome + c.disableWrap + c.hideCursor);
-                isSubScreenActive = false;
-                shimmerTimer = setInterval(() => render(), 75);
+                process.stdout.write(c.hideCursor + c.disableWrap + c.cursorHome + c.clearScreen);
                 await refreshData();
                 items = getItems();
+                isSubScreenActive = false;
                 render();
+                shimmerTimer = setInterval(() => render(), 75);
             }
         }
 
         async function openEngineSettings() {
             await runSubScreen(async () => {
                 reloadConfig();
-                let singleLock = !!config?.singleAccountLock;
-                let showTipsToggle = config?.showTips !== false;
-                let quotaFloorPct = Math.round((config?.globalQuotaThreshold ?? 0.10) * 100);
-                let hourlyCap = config?.hourlyAccountCap ?? 120;
-                let pacerMs = config?.pacerDelayMs ?? 250;
-                let thresholdPct = Math.round((config?.accountSelection?.stepThreshold || 0.05) * 100);
-                let reqCap = config?.accountSelection?.requestThreshold || 20;
-                let minStaySec = config?.accountSelection?.minStaySec ?? 180;
-                let cooldown = config?.switchAccountDelayMs ?? 5000;
-                let maxRetriesVal = config?.maxRetries ?? 2;
-                let streamTimeoutSec = config?.upstreamTimeoutSec ?? 300;
-                let quotaTtlSec = config?.quotaRefreshTtlSec ?? 300;
-                let loginTimeout = config?.loginTimeoutSec || 120;
-                let proxyPort = config?.port || 43128;
-                let secretKey = config?.apiKey || 'atc-local-key';
-                let activeSettingIdx = 0;
+
+                const state = {
+                    // Tab 1: Anti-Ban & Pacing
+                    singleLock: !!config?.singleAccountLock,
+                    pacerMs: config?.pacerDelayMs ?? 250,
+                    pacerJitterPct: config?.pacerJitterPct ?? 30,
+                    hourlyCap: config?.hourlyAccountCap ?? 120,
+                    sanitizePrompts: config?.sanitizeClientPrompts !== false,
+                    pauseOnVerify: config?.pauseOnVerifyReq !== false,
+                    keepAliveSec: config?.keepAliveIdleSec ?? 30,
+
+                    // Tab 2: Pool & Failover
+                    quotaFloorPct: Math.round((config?.globalQuotaThreshold ?? 0.10) * 100),
+                    weeklyFloorPct: Math.round((config?.weeklyQuotaThreshold ?? 0.05) * 100),
+                    thresholdPct: Math.round((config?.accountSelection?.stepThreshold || 0.05) * 100),
+                    minStaySec: config?.accountSelection?.minStaySec ?? 180,
+                    idleBreakSec: config?.accountSelection?.idleBreakSec ?? 180,
+                    reqCap: config?.accountSelection?.requestThreshold || 20,
+                    cooldownMs: config?.switchAccountDelayMs ?? 5000,
+                    maxRetriesVal: config?.maxRetries ?? 2,
+
+                    // Tab 3: UI & Tips Banner
+                    showTips: config?.showTips !== false,
+                    tipsDismissScope: config?.tipsDismissScope === 'permanent' ? 'permanent' : 'session',
+                    tipsScrollSpeed: ['slow', 'normal', 'fast', 'static'].includes(config?.tipsScrollSpeed)
+                        ? config.tipsScrollSpeed
+                        : 'normal',
+                    maskEmails: !!config?.maskEmails,
+                    shimmerTitle: config?.shimmerTitle !== false,
+
+                    // Tab 4: Network & Daemon
+                    proxyPort: config?.port || port || 43128,
+                    bindHost: config?.bindHost === '0.0.0.0' ? '0.0.0.0' : '127.0.0.1',
+                    secretKey: config?.apiKey || 'atc-local-key',
+                    streamTimeoutSec: config?.upstreamTimeoutSec ?? 300,
+                    quotaTtlSec: config?.quotaRefreshTtlSec ?? 300,
+                    loginTimeoutSec: config?.loginTimeoutSec || 120,
+                    debugMode: !!config?.debug
+                };
+
+                const TABS = [
+                    { id: 'anti_ban', num: '1', title: 'Anti-Ban & Pacing' },
+                    { id: 'pool', num: '2', title: 'Pool & Failover' },
+                    { id: 'ui_tips', num: '3', title: 'UI & Tips Banner' },
+                    { id: 'network', num: '4', title: 'Network & Daemon' }
+                ];
+
+                const ALL_ITEMS = [
+                    // --- Tab 1: Anti-Ban & Pacing ---
+                    {
+                        tab: 'anti_ban', key: 'singleLock', label: 'Single-Account Lock', type: 'bool',
+                        onText: 'ON (Locked)', offText: 'OFF', onColor: '\x1b[1;38;5;49m',
+                        guide: 'safest for 1 pool',
+                        desc: 'Hard-pins 100% traffic to the active account; completely disables multi-account rotation'
+                    },
+                    {
+                        tab: 'anti_ban', key: 'pacerMs', label: 'Per-Account Burst Pacer', type: 'num', unit: 'ms',
+                        min: 0, max: 5000, step: 50, safeMin: 150, safeMax: 1000,
+                        guide: 'safe: 150–1000ms',
+                        warnLow: 'Below 150ms: parallel subagent calls hit Cloud Code simultaneously in a tight spike',
+                        warnHigh: 'Above 1000ms: parallel subagent tool calls queue noticeably slower',
+                        desc: 'Minimum stagger gap between simultaneous subagent requests on the same account (0ms when idle)'
+                    },
+                    {
+                        tab: 'anti_ban', key: 'pacerJitterPct', label: 'Burst Pacer Random Jitter', type: 'num', unit: '%',
+                        min: 0, max: 80, step: 5, safeMin: 15, safeMax: 55,
+                        guide: 'safe: 15–55%',
+                        warnLow: 'Below 15%: burst spacing looks robotic and metronomic',
+                        warnHigh: 'Above 55%: wide variance adds occasional extra latency on bursts',
+                        desc: 'Randomizes per-account burst spacing so staggered requests never fire at fixed intervals'
+                    },
+                    {
+                        tab: 'anti_ban', key: 'hourlyCap', label: 'Hourly Cap / Account', type: 'num', unit: '/h',
+                        min: 0, max: 600, step: 10, safeMin: 30, safeMax: 240,
+                        guide: 'safe: 30–240/h',
+                        warnLow: '0 disables runaway loop protection; <30/h may cap active coding turns',
+                        warnHigh: 'Above 240/h: permits sustained high-velocity automated bursts on one consumer account',
+                        desc: 'Soft circuit breaker limiting successful requests per hour per account (0 = unlimited)'
+                    },
+                    {
+                        tab: 'anti_ban', key: 'sanitizePrompts', label: 'Prompt Hygiene (Sanitize)', type: 'bool',
+                        onText: 'Enabled', offText: 'Disabled',
+                        guide: 'strips SDK markers',
+                        desc: 'Strips third-party SDK billing headers and agent vendor strings that trigger opaque 429s'
+                    },
+                    {
+                        tab: 'anti_ban', key: 'pauseOnVerify', label: 'Auto-Pause on [verify-req]', type: 'bool',
+                        onText: 'Enabled', offText: 'Disabled',
+                        guide: 'holds 403 accounts',
+                        desc: 'Automatically halts routing to accounts flagged with 403 VALIDATION_REQUIRED until verified via [V]'
+                    },
+                    {
+                        tab: 'anti_ban', key: 'keepAliveSec', label: 'Socket Keep-Alive Idle TTL', type: 'num', unit: 's',
+                        min: 5, max: 180, step: 5, safeMin: 15, safeMax: 90,
+                        guide: 'safe: 15–90s',
+                        warnLow: 'Below 15s: causes frequent TLS handshakes between consecutive prompts',
+                        warnHigh: 'Above 90s: approaches Google Frontend idle socket cutoff (~240s)',
+                        desc: 'Idle lifetime for isolated per-account HTTP/1.1 TLS sockets before clean close'
+                    },
+
+                    // --- Tab 2: Pool & Failover ---
+                    {
+                        tab: 'pool', key: 'quotaFloorPct', label: 'Global 5h Quota Floor', type: 'num', unit: '%',
+                        min: 0, max: 50, step: 5, safeMin: 5, safeMax: 25,
+                        guide: 'safe: 5–25%',
+                        warnLow: '0%: accounts drain all the way into hard 0% 429 exhaustion',
+                        warnHigh: 'Above 25%: leaves substantial 5h quota unused before rotating',
+                        desc: 'Safety 5-hour quota reserve where healthy pool stops draining an account'
+                    },
+                    {
+                        tab: 'pool', key: 'weeklyFloorPct', label: 'Weekly Quota Floor', type: 'num', unit: '%',
+                        min: 0, max: 50, step: 5, safeMin: 5, safeMax: 25,
+                        guide: 'safe: 5–25%',
+                        warnLow: '0%: allows flagship models (Argon / Opus) to burn 100% of weekly cap',
+                        warnHigh: 'Above 25%: holds back a large portion of weekly model quota',
+                        desc: 'Safety reserve protecting scarce 7-day model quotas (Gemini 4 Argon / Opus) when alternates exist'
+                    },
+                    {
+                        tab: 'pool', key: 'thresholdPct', label: 'Quota Rotation Step', type: 'num', unit: '%',
+                        min: 1, max: 50, step: 1, safeMin: 3, safeMax: 15,
+                        guide: 'safe: 3–15%',
+                        warnLow: 'Below 3%: causes frequent multi-account cycling from one IP',
+                        warnHigh: 'Above 15%: drains each account deeper before staggering 5h recovery',
+                        desc: 'Quota drop percentage before Pipelined mode rotates to the next account'
+                    },
+                    {
+                        tab: 'pool', key: 'minStaySec', label: 'Min Account Stay Time', type: 'num', unit: 's',
+                        min: 0, max: 3600, step: 30, safeMin: 60, safeMax: 900,
+                        guide: 'safe: 60–900s',
+                        warnLow: 'Below 60s: rapid multi-account hopping under subagent bursts raises ban risk',
+                        warnHigh: 'Above 900s: behaves closer to Sticky/Session mode with long single-account blocks',
+                        desc: 'Minimum seconds (+random jitter) on a healthy account before proactive rotation is allowed'
+                    },
+                    {
+                        tab: 'pool', key: 'idleBreakSec', label: 'Idle Session Break Gap', type: 'num', unit: 's',
+                        min: 30, max: 1800, step: 30, safeMin: 90, safeMax: 600,
+                        guide: 'safe: 90–600s',
+                        warnLow: 'Below 90s: may mistake a long file read or user pause for a finished session',
+                        warnHigh: 'Above 600s: requires >10m quiet break before Session mode rotates',
+                        desc: 'Quiet pause required between turns before Idle-Aware Session mode hands off accounts'
+                    },
+                    {
+                        tab: 'pool', key: 'reqCap', label: 'Fallback Request Cap', type: 'num', unit: ' reqs',
+                        min: 5, max: 200, step: 5, safeMin: 10, safeMax: 50,
+                        guide: 'safe: 10–50 reqs',
+                        warnLow: 'Below 10 reqs: switches accounts too often when telemetry lags',
+                        warnHigh: 'Above 50 reqs: single account may drain heavily before fallback rotation',
+                        desc: 'Fallback request counter before rotating if upstream quota telemetry has not updated'
+                    },
+                    {
+                        tab: 'pool', key: 'cooldownMs', label: 'Switch Delay Cooldown', type: 'num', unit: 'ms',
+                        min: 500, max: 30000, step: 500, safeMin: 2000, safeMax: 10000,
+                        guide: 'safe: 2000–10000ms',
+                        warnLow: 'Below 2000ms: instant cross-account failover looks like automated credential rotation',
+                        warnHigh: 'Above 10000ms: adds noticeable wait when failing over from a rate-limited account',
+                        desc: 'Mandatory jittered pause before failing over to another account after an error'
+                    },
+                    {
+                        tab: 'pool', key: 'maxRetriesVal', label: 'Max Failover Retries', type: 'num', unit: '',
+                        min: 0, max: 5, step: 1, safeMin: 1, safeMax: 3,
+                        guide: 'safe: 1–3',
+                        warnLow: '0 retries: any transient error immediately fails the request',
+                        warnHigh: 'Above 3 retries: fans a failing prompt across too many accounts in a single turn',
+                        desc: 'Maximum failover attempts across accounts per request before returning an error'
+                    },
+
+                    // --- Tab 3: UI & Tips Banner ---
+                    {
+                        tab: 'ui_tips', key: 'showTips', label: 'Tips Banner on Startup', type: 'bool',
+                        onText: 'Enabled', offText: 'Disabled',
+                        guide: 'top safety ribbon',
+                        desc: 'Enable or disable the high-contrast safety & operational tips ribbon whenever atc opens'
+                    },
+                    {
+                        tab: 'ui_tips', key: 'tipsDismissScope', label: 'Dismiss Key [X] Behavior', type: 'enum',
+                        choices: [
+                            { val: 'session', label: 'Session Only' },
+                            { val: 'permanent', label: 'Save Permanently' }
+                        ],
+                        guide: 'how [X] hides ribbon',
+                        desc: 'Session Only hides the tip ribbon until atc exits; Save Permanently flips Startup setting to Disabled'
+                    },
+                    {
+                        tab: 'ui_tips', key: 'tipsScrollSpeed', label: 'Tips Banner Scroll Speed', type: 'enum',
+                        choices: [
+                            { val: 'slow', label: 'Slow (240ms)' },
+                            { val: 'normal', label: 'Normal (150ms)' },
+                            { val: 'fast', label: 'Fast (85ms)' },
+                            { val: 'static', label: 'Static Slides' }
+                        ],
+                        guide: 'zero-flicker ticker',
+                        desc: 'Adjust horizontal marquee speed or switch to non-scrolling static slides (7s per tip)'
+                    },
+                    {
+                        tab: 'ui_tips', key: 'maskEmails', label: 'Mask Account Emails', type: 'bool',
+                        onText: 'Enabled (sa***21)', offText: 'Disabled',
+                        guide: 'safe screenshots',
+                        desc: 'Redact middle characters of emails on the dashboard so you can share screenshots safely'
+                    },
+                    {
+                        tab: 'ui_tips', key: 'shimmerTitle', label: 'Header Shimmer Animation', type: 'bool',
+                        onText: 'Enabled', offText: 'Disabled',
+                        guide: 'metallic sweep',
+                        desc: 'Toggle the periodic silver sheen sweep across the atc header title'
+                    },
+
+                    // --- Tab 4: Network & Daemon ---
+                    {
+                        tab: 'network', key: 'proxyPort', label: 'Proxy Listen Port', type: 'num', unit: '',
+                        min: 1024, max: 65535, step: 1, safeMin: 1024, safeMax: 65535,
+                        guide: 'syncs Claude Code',
+                        warnLow: 'Ports below 1024 require elevated OS privileges',
+                        warnHigh: 'Port out of valid TCP range',
+                        desc: 'Local HTTP listen port (auto-updates ANTHROPIC_BASE_URL; run atc restart to rebind socket)'
+                    },
+                    {
+                        tab: 'network', key: 'bindHost', label: 'Proxy Bind Address', type: 'enum',
+                        choices: [
+                            { val: '127.0.0.1', label: '127.0.0.1 (Loopback)' },
+                            { val: '0.0.0.0', label: '0.0.0.0 (All NICs)' }
+                        ],
+                        guide: '127.0.0.1 recommended',
+                        desc: 'Keep on 127.0.0.1 unless connecting from a local VM/WSL/container with a strong Secret API Key'
+                    },
+                    {
+                        tab: 'network', key: 'secretKey', label: 'Secret API Key', type: 'text',
+                        guide: 'syncs ANTHROPIC_API_KEY',
+                        desc: 'Local bearer key required on proxy requests; automatically synced to ~/.claude/settings.json'
+                    },
+                    {
+                        tab: 'network', key: 'streamTimeoutSec', label: 'Active Stream Timeout', type: 'num', unit: 's',
+                        min: 60, max: 900, step: 30, safeMin: 120, safeMax: 600,
+                        guide: 'safe: 120–600s',
+                        warnLow: 'Below 120s: long thinking models may time out mid-reasoning',
+                        warnHigh: 'Above 600s: hung upstream sockets stay open longer',
+                        desc: 'Maximum socket wait for active streaming/thinking responses before aborting'
+                    },
+                    {
+                        tab: 'network', key: 'quotaTtlSec', label: 'Quota Poll Cache TTL', type: 'num', unit: 's',
+                        min: 30, max: 3600, step: 30, safeMin: 120, safeMax: 1800,
+                        guide: 'safe: 120–1800s',
+                        warnLow: 'Below 120s: frequent multi-account quota probes from one IP increase noise',
+                        warnHigh: 'Above 1800s: displayed quota percentages refresh less frequently',
+                        desc: 'Cache lifetime for /account-limits probes to avoid multi-account polling bursts'
+                    },
+                    {
+                        tab: 'network', key: 'loginTimeoutSec', label: 'OAuth Login Timeout', type: 'num', unit: 's',
+                        min: 30, max: 600, step: 15, safeMin: 60, safeMax: 300,
+                        guide: 'safe: 60–300s',
+                        warnLow: 'Below 60s: browser sign-in or 2FA may time out prematurely',
+                        warnHigh: 'Above 300s: temporary OAuth callback port stays open longer if cancelled',
+                        desc: 'Maximum wait time for Google OAuth browser callback during account login'
+                    },
+                    {
+                        tab: 'network', key: 'debugMode', label: 'Debug Verbose Logging', type: 'bool',
+                        onText: 'Enabled', offText: 'Disabled',
+                        guide: 'for troubleshooting',
+                        desc: 'Emit detailed request conversion and strategy trace logs to server output'
+                    }
+                ];
+
+                let activeTabIdx = 0;
+                let rowIdx = 0;
                 let isFocusEditing = false;
                 let editBuffer = '';
                 let notice = '';
 
-                const settingsMeta = [
-                    {
-                        id: 'singleLock',
-                        label: 'Single-Account Lock',
-                        isBoolean: true,
-                        desc: 'Hard-locks all traffic to the active account; disables automatic multi-account rotation'
-                    },
-                    {
-                        id: 'showTips',
-                        label: 'Safety Tips Banner',
-                        isBoolean: true,
-                        desc: 'Show scrolling anti-ban & operational tips marquee at top of dashboard (Ctrl+D for details)'
-                    },
-                    {
-                        id: 'quotaFloor',
-                        label: 'Global Quota Floor',
-                        unit: '%',
-                        isNumeric: true,
-                        desc: 'Safety reserve % where healthy pool stops draining an account before hitting 0% hard 429',
-                        min: 0, max: 50, step: 5,
-                        safeMin: 5, safeMax: 25,
-                        warnLow: '0%: accounts can drain all the way to 0% hard 429 exhaustion',
-                        warnHigh: 'Above 25%: leaves a large portion of 5h quota unused before rotating'
-                    },
-                    {
-                        id: 'hourlyCap',
-                        label: 'Hourly Cap / Account',
-                        unit: '/h',
-                        isNumeric: true,
-                        desc: 'Circuit breaker limiting successful requests per hour per account (0 = unlimited)',
-                        min: 0, max: 600, step: 10,
-                        safeMin: 30, safeMax: 240,
-                        warnLow: '0 or very low: 0 disables runaway loop protection; <30 may cap heavy coding sessions',
-                        warnHigh: 'Above 240/h: permits sustained high-velocity automated bursts on one consumer account'
-                    },
-                    {
-                        id: 'pacerMs',
-                        label: 'Per-Account Burst Pacer',
-                        unit: 'ms',
-                        isNumeric: true,
-                        desc: 'Minimum stagger gap between parallel subagent requests on the same account (0ms when idle)',
-                        min: 0, max: 5000, step: 50,
-                        safeMin: 150, safeMax: 1000,
-                        warnLow: 'Below 150ms: parallel Claude Code subagents hit Google simultaneously in a tight spike',
-                        warnHigh: 'Above 1000ms: parallel subagent startups queue noticeably slower'
-                    },
-                    {
-                        id: 'threshold',
-                        label: 'Quota Rotation Threshold',
-                        unit: '%',
-                        isNumeric: true,
-                        desc: 'Rotates account after using this quota % to stagger 5h recovery in parallel',
-                        min: 1, max: 50, step: 1,
-                        safeMin: 3, safeMax: 15,
-                        warnLow: 'Below 3%: rapid account cycling from same IP may trigger Google scrutiny',
-                        warnHigh: 'Above 15%: single account quota drains heavily before rotation'
-                    },
-                    {
-                        id: 'reqCap',
-                        label: 'Fallback Request Cap',
-                        unit: 'reqs',
-                        isNumeric: true,
-                        desc: 'Rotates account after this many requests if quota telemetry delayed',
-                        min: 5, max: 200, step: 5,
-                        safeMin: 10, safeMax: 50,
-                        warnLow: 'Below 10 reqs: switches accounts excessively during slow telemetry',
-                        warnHigh: 'Above 50 reqs: risk of depleting account quota before switching'
-                    },
-                    {
-                        id: 'minStay',
-                        label: 'Min Account Stay Time',
-                        unit: 's',
-                        isNumeric: true,
-                        desc: 'Minimum seconds (+random jitter) on a healthy account before proactive rotation',
-                        min: 0, max: 1800, step: 30,
-                        safeMin: 60, safeMax: 600,
-                        warnLow: 'Below 60s: fast multi-account hopping under subagent bursts increases ban risk',
-                        warnHigh: 'Above 600s: single account absorbs longer bursts before pipelined rotation'
-                    },
-                    {
-                        id: 'cooldown',
-                        label: 'Switch Delay Cooldown',
-                        unit: 'ms',
-                        isNumeric: true,
-                        desc: 'Mandatory jittered pause in milliseconds before failing over to next account on error',
-                        min: 500, max: 30000, step: 500,
-                        safeMin: 2000, safeMax: 10000,
-                        warnLow: 'Below 2000ms: rapid failovers across consumer accounts look like automated proxy hopping',
-                        warnHigh: 'Above 10000ms: slower failover recovery when an account hits rate limit'
-                    },
-                    {
-                        id: 'maxRetries',
-                        label: 'Max Failover Retries',
-                        unit: '',
-                        isNumeric: true,
-                        desc: 'Maximum failover attempts per request before returning error to client',
-                        min: 0, max: 5, step: 1,
-                        safeMin: 1, safeMax: 3,
-                        warnLow: '0 retries: transient network blip immediately fails the turn',
-                        warnHigh: 'Above 3 retries: fans a failing request across too many accounts in one turn'
-                    },
-                    {
-                        id: 'streamTimeout',
-                        label: 'Active Stream Timeout',
-                        unit: 's',
-                        isNumeric: true,
-                        desc: 'Socket timeout for active thinking/streaming responses before aborting hung connection',
-                        min: 60, max: 900, step: 30,
-                        safeMin: 120, safeMax: 600,
-                        warnLow: 'Below 120s: deep thinking models may be cut off mid-thought',
-                        warnHigh: 'Above 600s: dead upstream sockets take very long to release'
-                    },
-                    {
-                        id: 'quotaTtl',
-                        label: 'Quota Poll Cache TTL',
-                        unit: 's',
-                        isNumeric: true,
-                        desc: 'Cache lifetime for /account-limits telemetry to prevent multi-account polling storms',
-                        min: 30, max: 3600, step: 30,
-                        safeMin: 120, safeMax: 1800,
-                        warnLow: 'Below 120s: frequent multi-account quota probes from one IP may trigger scrutiny',
-                        warnHigh: 'Above 1800s: dashboard quota percentages may lag behind real usage'
-                    },
-                    {
-                        id: 'loginTimeout',
-                        label: 'OAuth Login Timeout',
-                        unit: 's',
-                        isNumeric: true,
-                        desc: 'Maximum duration to wait for Google sign-in browser callback before aborting',
-                        min: 30, max: 600, step: 15,
-                        safeMin: 60, safeMax: 300,
-                        warnLow: 'Below 60s: risk of premature timeout while completing sign-in or MFA',
-                        warnHigh: 'Above 300s: local auth listener remains open longer if abandoned'
-                    },
-                    {
-                        id: 'port',
-                        label: 'Proxy Listen Port',
-                        unit: '',
-                        isNumeric: true,
-                        desc: 'Local HTTP proxy listen port (auto-syncs ANTHROPIC_BASE_URL; run atc restart to rebind)',
-                        min: 1024, max: 65535, step: 1,
-                        safeMin: 1024, safeMax: 65535,
-                        warnLow: 'Ports below 1024 require root/administrator privileges',
-                        warnHigh: 'Port number out of valid TCP range'
-                    },
-                    {
-                        id: 'secretKey',
-                        label: 'Secret API Key',
-                        unit: '',
-                        desc: 'Internal API Key required for Claude Code requests (auto-syncs to ~/.claude/settings.json)',
-                        isText: true
-                    },
-                    {
-                        id: 'reset',
-                        label: 'Reset All to Safe Defaults',
-                        unit: '',
-                        desc: 'Restore anti-burst safe defaults (10% floor, 120/h cap, 250ms pacer, 180s stay, 5000ms switch)'
-                    },
-                    {
-                        id: 'save',
-                        label: 'Save & Return to Dashboard',
-                        unit: '',
-                        desc: 'Save all parameters to ~/.config/atc/config.json, sync Claude Code, and hot-reload daemon'
+                function getVisibleRows() {
+                    const tabId = TABS[activeTabIdx].id;
+                    const tabSettings = ALL_ITEMS.filter((it) => it.tab === tabId);
+                    return [
+                        ...tabSettings,
+                        { type: 'action', id: 'reset_tab', label: `Reset "${TABS[activeTabIdx].title}" Tab to Safe Defaults`, desc: 'Restore safe recommended values for the settings in this tab only' },
+                        { type: 'action', id: 'reset_all', label: 'Reset All 4 Tabs to Safe Defaults', desc: 'Restore recommended anti-ban & operational defaults across every tab' },
+                        { type: 'action', id: 'save', label: 'Save All Settings & Return to Dashboard', desc: 'Persist all 4 tabs to ~/.config/atc/config.json, sync Claude Code, and reload daemon' }
+                    ];
+                }
+
+                function resetTabDefaults(tabId) {
+                    if (tabId === 'anti_ban' || tabId === 'all') {
+                        state.singleLock = false;
+                        state.pacerMs = 250;
+                        state.pacerJitterPct = 30;
+                        state.hourlyCap = 120;
+                        state.sanitizePrompts = true;
+                        state.pauseOnVerify = true;
+                        state.keepAliveSec = 30;
                     }
-                ];
-
-                function getValNum(idx) {
-                    const id = settingsMeta[idx]?.id;
-                    if (id === 'quotaFloor') return quotaFloorPct;
-                    if (id === 'hourlyCap') return hourlyCap;
-                    if (id === 'pacerMs') return pacerMs;
-                    if (id === 'threshold') return thresholdPct;
-                    if (id === 'reqCap') return reqCap;
-                    if (id === 'minStay') return minStaySec;
-                    if (id === 'cooldown') return cooldown;
-                    if (id === 'maxRetries') return maxRetriesVal;
-                    if (id === 'streamTimeout') return streamTimeoutSec;
-                    if (id === 'quotaTtl') return quotaTtlSec;
-                    if (id === 'loginTimeout') return loginTimeout;
-                    if (id === 'port') return proxyPort;
-                    return 0;
+                    if (tabId === 'pool' || tabId === 'all') {
+                        state.quotaFloorPct = 10;
+                        state.weeklyFloorPct = 5;
+                        state.thresholdPct = 5;
+                        state.minStaySec = 180;
+                        state.idleBreakSec = 180;
+                        state.reqCap = 20;
+                        state.cooldownMs = 5000;
+                        state.maxRetriesVal = 2;
+                    }
+                    if (tabId === 'ui_tips' || tabId === 'all') {
+                        state.showTips = true;
+                        state.tipsDismissScope = 'session';
+                        state.tipsScrollSpeed = 'normal';
+                        state.maskEmails = false;
+                        state.shimmerTitle = true;
+                    }
+                    if (tabId === 'network' || tabId === 'all') {
+                        state.proxyPort = port || 43128;
+                        state.bindHost = '127.0.0.1';
+                        state.secretKey = state.secretKey || 'atc-local-key';
+                        state.streamTimeoutSec = 300;
+                        state.quotaTtlSec = 300;
+                        state.loginTimeoutSec = 120;
+                        state.debugMode = false;
+                    }
                 }
 
-                function setValNum(idx, num) {
-                    const meta = settingsMeta[idx];
-                    if (!meta?.isNumeric) return;
-                    const clamped = Math.max(meta.min, Math.min(meta.max, num));
-                    if (meta.id === 'quotaFloor') quotaFloorPct = clamped;
-                    else if (meta.id === 'hourlyCap') hourlyCap = clamped;
-                    else if (meta.id === 'pacerMs') pacerMs = clamped;
-                    else if (meta.id === 'threshold') thresholdPct = clamped;
-                    else if (meta.id === 'reqCap') reqCap = clamped;
-                    else if (meta.id === 'minStay') minStaySec = clamped;
-                    else if (meta.id === 'cooldown') cooldown = clamped;
-                    else if (meta.id === 'maxRetries') maxRetriesVal = clamped;
-                    else if (meta.id === 'streamTimeout') streamTimeoutSec = clamped;
-                    else if (meta.id === 'quotaTtl') quotaTtlSec = clamped;
-                    else if (meta.id === 'loginTimeout') loginTimeout = clamped;
-                    else if (meta.id === 'port') proxyPort = clamped;
-                }
-
-                function getWarning(idx) {
-                    const meta = settingsMeta[idx];
-                    if (!meta?.isNumeric) return null;
-                    const val = getValNum(idx);
-                    if (meta.id === 'hourlyCap' && val === 0) return meta.warnLow;
-                    if (val < meta.safeMin) return meta.warnLow;
-                    if (val > meta.safeMax) return meta.warnHigh;
-                    return null;
-                }
-
-                function getDisplayVal(idx) {
-                    const id = settingsMeta[idx]?.id;
-                    if (id === 'singleLock') return singleLock ? 'ON (Locked)' : 'OFF';
-                    if (id === 'showTips') return showTipsToggle ? 'ON' : 'OFF';
-                    if (id === 'quotaFloor') return quotaFloorPct + '%';
-                    if (id === 'hourlyCap') return hourlyCap === 0 ? 'OFF (Unlimited)' : `${hourlyCap}/h`;
-                    if (id === 'pacerMs') return pacerMs + 'ms';
-                    if (id === 'threshold') return thresholdPct + '%';
-                    if (id === 'reqCap') return reqCap + ' reqs';
-                    if (id === 'minStay') return minStaySec + 's';
-                    if (id === 'cooldown') return cooldown + 'ms';
-                    if (id === 'maxRetries') return maxRetriesVal.toString();
-                    if (id === 'streamTimeout') return streamTimeoutSec + 's';
-                    if (id === 'quotaTtl') return quotaTtlSec + 's';
-                    if (id === 'loginTimeout') return loginTimeout + 's';
-                    if (id === 'port') return proxyPort.toString();
-                    if (id === 'secretKey') return secretKey || '(none)';
+                function formatItemDisplay(it) {
+                    const val = state[it.key];
+                    if (it.type === 'bool') return val ? it.onText : it.offText;
+                    if (it.type === 'enum') {
+                        const found = it.choices.find((ch) => ch.val === val);
+                        return found ? found.label : String(val);
+                    }
+                    if (it.type === 'num') {
+                        if (it.key === 'hourlyCap' && val === 0) return 'Unlimited';
+                        return it.unit ? `${val}${it.unit.startsWith(' ') ? it.unit : ' ' + it.unit}`.trim() : String(val);
+                    }
+                    if (it.type === 'text') return val || '(none)';
                     return '';
                 }
 
+                function getItemWarning(it) {
+                    if (it.type !== 'num') {
+                        if (it.key === 'bindHost' && state.bindHost === '0.0.0.0') {
+                            return '0.0.0.0 exposes proxy on LAN — ensure Secret API Key is strong';
+                        }
+                        return null;
+                    }
+                    const val = state[it.key];
+                    if (it.key === 'hourlyCap' && val === 0) return it.warnLow;
+                    if (val < it.safeMin) return it.warnLow;
+                    if (val > it.safeMax) return it.warnHigh;
+                    return null;
+                }
+
                 function renderScreen() {
-                    let out = c.clearScreen + c.cursorHome;
-                    out += `${c.brandGreen}╭─────────────────────────────────────────────────────────────────╮${c.reset}\n`;
-                    out += `${c.brandGreen}│  atc Engine & Anti-Burst Safety Settings                        │${c.reset}\n`;
-                    out += `${c.brandGreen}╰─────────────────────────────────────────────────────────────────╯${c.reset}\n\n`;
+                    const rows = getVisibleRows();
+                    if (rowIdx >= rows.length) rowIdx = rows.length - 1;
+                    let out = c.cursorHome;
+                    out += drawHeaderBox('atc Engine, Anti-Ban & Interface Settings', 76);
 
-                    const termRows = process.stdout.rows || 28;
-                    const maxVisible = Math.max(8, Math.min(settingsMeta.length, termRows - 10));
-                    let startIdx = 0;
-                    if (settingsMeta.length > maxVisible) {
-                        startIdx = Math.max(0, Math.min(activeSettingIdx - Math.floor(maxVisible / 2), settingsMeta.length - maxVisible));
-                    }
-                    const endIdx = Math.min(settingsMeta.length, startIdx + maxVisible);
+                    // Balanced Category Tab Bar
+                    let tabLine = '  ';
+                    TABS.forEach((t, idx) => {
+                        const count = ALL_ITEMS.filter((it) => it.tab === t.id).length;
+                        const active = idx === activeTabIdx;
+                        const pill = active
+                            ? `\x1b[1;38;5;16;48;5;48m ${t.num}. ${t.title} (${count}) \x1b[0m`
+                            : `\x1b[38;5;249;48;5;236m ${t.num}. ${t.title} (${count}) \x1b[0m`;
+                        tabLine += pill + ' ';
+                    });
+                    out += `${tabLine}${c.clearToEndOfLine}\n`;
+                    out += `  \x1b[38;5;238m${'─'.repeat(76)}\x1b[0m${c.clearToEndOfLine}\n`;
+                    out += `    \x1b[38;5;242m${'Parameter'.padEnd(28, ' ')}  ${'Current Value'.padEnd(20, ' ')}  Guidance / Status\x1b[0m${c.clearToEndOfLine}\n`;
 
-                    if (startIdx > 0) {
-                        out += `  ${c.textMuted}↑ (${startIdx} more above)${c.reset}${c.clearToEndOfLine}\n`;
-                    }
-
-                    for (let i = startIdx; i < endIdx; i++) {
-                        const meta = settingsMeta[i];
-                        const isSel = i === activeSettingIdx;
+                    let renderedDivider = false;
+                    for (let i = 0; i < rows.length; i++) {
+                        const it = rows[i];
+                        const isSel = i === rowIdx;
                         const pointer = isSel ? `  \x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
-                        const warn = getWarning(i);
 
-                        let line = '';
-                        if (meta.isNumeric || meta.isText || meta.isBoolean) {
-                            let valBox = '';
-                            if (isSel && isFocusEditing) {
-                                valBox = `\x1b[1;38;5;226;48;5;236m[ ${editBuffer || ''}_ ]\x1b[0m \x1b[38;5;220m✎ editing\x1b[0m`;
-                            } else {
-                                const displayStr = getDisplayVal(i);
-                                if (meta.isBoolean) {
-                                    const boolVal = meta.id === 'showTips' ? showTipsToggle : singleLock;
-                                    const badgeColor = meta.id === 'singleLock'
-                                        ? (boolVal ? '\x1b[1;38;5;49m' : '\x1b[38;5;246m')
-                                        : (boolVal ? '\x1b[38;5;120m' : '\x1b[38;5;246m');
-                                    valBox = `${badgeColor}[${displayStr}]\x1b[0m`;
-                                } else {
-                                    valBox = isSel
-                                        ? `\x1b[1;38;5;120m[${displayStr}]\x1b[0m`
-                                        : `\x1b[38;5;147m[${displayStr}]\x1b[0m`;
-                                }
+                        if (it.type === 'action') {
+                            if (!renderedDivider) {
+                                out += `  \x1b[38;5;238m${'─'.repeat(76)}\x1b[0m${c.clearToEndOfLine}\n`;
+                                renderedDivider = true;
                             }
-
-                            let warnBadge = '';
-                            if (warn) {
-                                warnBadge = ` \x1b[38;5;214m▲ outside safe zone\x1b[0m`;
-                            }
-
-                            line = isSel
-                                ? `\x1b[1;38;5;255m${meta.label}:\x1b[0m ${valBox}${warnBadge}`
-                                : `\x1b[38;5;250m${meta.label}:\x1b[0m ${valBox}${warnBadge}`;
-                        } else {
-                            line = isSel
-                                ? `\x1b[1;38;5;255m${meta.label}${c.reset}`
-                                : `\x1b[38;5;248m${meta.label}${c.reset}`;
+                            const actColor = it.id === 'save'
+                                ? (isSel ? '\x1b[1;38;5;120m' : '\x1b[38;5;42m')
+                                : (isSel ? '\x1b[1;38;5;255m' : '\x1b[38;5;246m');
+                            out += `${pointer}${actColor}${it.label}${c.reset}${c.clearToEndOfLine}\n`;
+                            continue;
                         }
 
-                        out += `${pointer}${line}${c.clearToEndOfLine}\n`;
+                        const warn = getItemWarning(it);
+                        const labelCol = isSel
+                            ? `\x1b[1;38;5;255m${it.label.padEnd(28, ' ')}\x1b[0m`
+                            : `\x1b[38;5;250m${it.label.padEnd(28, ' ')}\x1b[0m`;
+
+                        let valStyled = '';
+                        let valPlainLen = 0;
+                        if (isSel && isFocusEditing) {
+                            const rawBox = `[ ${editBuffer || ''}_ ]`;
+                            valPlainLen = rawBox.length;
+                            valStyled = `\x1b[1;38;5;226;48;5;236m${rawBox}\x1b[0m`;
+                        } else {
+                            const disp = formatItemDisplay(it);
+                            const rawBox = `[${disp}]`;
+                            valPlainLen = rawBox.length;
+                            if (it.type === 'bool') {
+                                const boolOn = !!state[it.key];
+                                const col = boolOn ? (it.onColor || '\x1b[38;5;120m') : '\x1b[38;5;244m';
+                                valStyled = `${col}${rawBox}\x1b[0m`;
+                            } else if (it.type === 'enum') {
+                                valStyled = isSel ? `\x1b[1;38;5;117m${rawBox}\x1b[0m` : `\x1b[38;5;110m${rawBox}\x1b[0m`;
+                            } else {
+                                valStyled = isSel ? `\x1b[1;38;5;120m${rawBox}\x1b[0m` : `\x1b[38;5;147m${rawBox}\x1b[0m`;
+                            }
+                        }
+                        const valPad = ' '.repeat(Math.max(2, 22 - valPlainLen));
+
+                        const statusCol = isSel && isFocusEditing
+                            ? `\x1b[38;5;220m✎ type value, Enter confirm\x1b[0m`
+                            : (warn
+                                ? `\x1b[38;5;214m▲ outside safe zone\x1b[0m`
+                                : `\x1b[38;5;241m${it.guide || ''}\x1b[0m`);
+
+                        out += `${pointer}${labelCol}  ${valStyled}${valPad}${statusCol}${c.clearToEndOfLine}\n`;
                     }
 
-                    if (endIdx < settingsMeta.length) {
-                        out += `  ${c.textMuted}↓ (${settingsMeta.length - endIdx} more below)${c.reset}${c.clearToEndOfLine}\n`;
-                    }
+                    const curIt = rows[rowIdx];
+                    const curWarn = curIt && curIt.type !== 'action' ? getItemWarning(curIt) : null;
+                    const wrapCols = Math.max(58, Math.min((process.stdout.columns || 88) - 6, 78));
 
                     out += `\n`;
-                    const curMeta = settingsMeta[activeSettingIdx];
-                    const activeWarn = getWarning(activeSettingIdx);
-
                     if (notice) {
-                        out += `\x1b[38;5;153m› ${notice}${c.reset}${c.clearToEndOfLine}\n`;
-                    } else if (activeWarn) {
-                        out += `${c.textMuted}Details:${c.reset} \x1b[1;38;5;214m▲ ${activeWarn}${c.reset}${c.clearToEndOfLine}\n`;
-                    } else {
-                        out += `${c.textMuted}Details:${c.reset} ${c.textNormal}${curMeta.desc}${c.reset}${c.clearToEndOfLine}\n`;
+                        out += `  \x1b[38;5;120m✓ ${notice}\x1b[0m${c.clearToEndOfLine}\n`;
+                    } else if (curWarn) {
+                        for (const wl of wrapPlainText(`▲ ${curWarn}`, wrapCols)) {
+                            out += `  \x1b[1;38;5;214m${wl}\x1b[0m${c.clearToEndOfLine}\n`;
+                        }
+                    } else if (curIt?.desc) {
+                        for (const dl of wrapPlainText(curIt.desc, wrapCols)) {
+                            out += `  ${c.textMuted}Info:${c.reset} ${c.textNormal}${dl}${c.reset}${c.clearToEndOfLine}\n`;
+                        }
                     }
 
                     if (isFocusEditing) {
-                        out += `${c.textMuted}Type Value | Backspace Delete | Enter/ESC Confirm${c.reset}${c.clearToEndOfLine}`;
+                        out += `  ${c.textMuted}[0-9 / Text] Type  ·  [Backspace] Delete  ·  [Enter] Confirm  ·  [ESC] Cancel Edit${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
                     } else {
-                        out += `${c.textMuted}↑↓ Move | Enter Edit/Toggle | ←→ Adjust | ESC Save & Return${c.reset}${c.clearToEndOfLine}`;
+                        out += `  ${c.textMuted}[Tab / 1-4] Switch Tab  ·  [↑↓] Move  ·  [←/→ / Space] Change  ·  [Enter] Edit  ·  [ESC] Save & Exit${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
                     }
 
                     process.stdout.write(out);
@@ -1134,31 +1360,47 @@ export async function runInteractiveDashboard(options = {}) {
                 async function saveAllSettings() {
                     const accSel = {
                         ...(config.accountSelection || {}),
-                        stepThreshold: thresholdPct / 100,
-                        requestThreshold: reqCap,
-                        minStaySec
+                        stepThreshold: state.thresholdPct / 100,
+                        requestThreshold: state.reqCap,
+                        minStaySec: state.minStaySec,
+                        idleBreakSec: state.idleBreakSec
                     };
                     saveConfig({
-                        singleAccountLock: singleLock,
-                        showTips: showTipsToggle,
-                        globalQuotaThreshold: quotaFloorPct / 100,
-                        hourlyAccountCap: hourlyCap,
-                        pacerDelayMs: pacerMs,
+                        singleAccountLock: state.singleLock,
+                        pacerDelayMs: state.pacerMs,
+                        pacerJitterPct: state.pacerJitterPct,
+                        hourlyAccountCap: state.hourlyCap,
+                        sanitizeClientPrompts: state.sanitizePrompts,
+                        pauseOnVerifyReq: state.pauseOnVerify,
+                        keepAliveIdleSec: state.keepAliveSec,
+                        globalQuotaThreshold: state.quotaFloorPct / 100,
+                        weeklyQuotaThreshold: state.weeklyFloorPct / 100,
                         accountSelection: accSel,
-                        switchAccountDelayMs: cooldown,
-                        maxRetries: maxRetriesVal,
-                        upstreamTimeoutSec: streamTimeoutSec,
-                        quotaRefreshTtlSec: quotaTtlSec,
-                        loginTimeoutSec: loginTimeout,
-                        port: proxyPort,
-                        apiKey: secretKey
+                        switchAccountDelayMs: state.cooldownMs,
+                        maxRetries: state.maxRetriesVal,
+                        showTips: state.showTips,
+                        tipsDismissScope: state.tipsDismissScope,
+                        tipsScrollSpeed: state.tipsScrollSpeed,
+                        maskEmails: state.maskEmails,
+                        shimmerTitle: state.shimmerTitle,
+                        port: state.proxyPort,
+                        bindHost: state.bindHost,
+                        apiKey: state.secretKey,
+                        upstreamTimeoutSec: state.streamTimeoutSec,
+                        quotaRefreshTtlSec: state.quotaTtlSec,
+                        loginTimeoutSec: state.loginTimeoutSec,
+                        debug: state.debugMode
                     });
+
+                    tipsSessionOverride = null;
+                    tipsVisible = state.showTips;
+
                     const cs = readClaudeSettings();
                     cs.env = cs.env || {};
-                    cs.env.ANTHROPIC_API_KEY = secretKey;
-                    cs.env.ANTHROPIC_BASE_URL = `http://localhost:${proxyPort}`;
+                    cs.env.ANTHROPIC_API_KEY = state.secretKey;
+                    cs.env.ANTHROPIC_BASE_URL = `http://localhost:${state.proxyPort}`;
                     writeClaudeSettings(cs);
-                    port = proxyPort;
+                    port = state.proxyPort;
                     try {
                         await fetch(`http://127.0.0.1:${port}/reload`, {
                             method: 'POST',
@@ -1171,174 +1413,143 @@ export async function runInteractiveDashboard(options = {}) {
                     if (process.stdin.isTTY) process.stdin.setRawMode(true);
                     readline.emitKeypressEvents(process.stdin);
 
+                    function stepChoice(it, dir) {
+                        if (it.type === 'bool') {
+                            state[it.key] = !state[it.key];
+                            notice = `${it.label} -> ${formatItemDisplay(it)}`;
+                        } else if (it.type === 'enum') {
+                            const idx = Math.max(0, it.choices.findIndex((ch) => ch.val === state[it.key]));
+                            const next = it.choices[(idx + dir + it.choices.length) % it.choices.length];
+                            state[it.key] = next.val;
+                            notice = `${it.label} -> ${next.label}`;
+                        } else if (it.type === 'num') {
+                            const nextVal = Math.max(it.min, Math.min(it.max, state[it.key] + dir * it.step));
+                            state[it.key] = nextVal;
+                            notice = '';
+                        }
+                    }
+
                     function onKey(str, key) {
                         if (!key) return;
-                        const activeMeta = settingsMeta[activeSettingIdx];
-
-                        if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
-                            if (isFocusEditing) {
-                                if (activeMeta?.isText) {
-                                    if (editBuffer) secretKey = editBuffer;
-                                } else if (editBuffer) {
-                                    const parsed = parseInt(editBuffer, 10);
-                                    if (!isNaN(parsed)) setValNum(activeSettingIdx, parsed);
-                                }
-                                isFocusEditing = false;
-                                editBuffer = '';
-                                renderScreen();
-                                return;
-                            }
-
-                            cleanup();
-                            saveAllSettings().finally(resolve);
-                            return;
-                        }
+                        const rows = getVisibleRows();
+                        const cur = rows[rowIdx];
 
                         if (isFocusEditing) {
-                            if (key.name === 'return' || key.name === 'enter') {
-                                if (activeMeta?.isText) {
-                                    secretKey = editBuffer.trim() || 'atc-local-key';
-                                } else if (editBuffer) {
-                                    const parsed = parseInt(editBuffer, 10);
-                                    if (!isNaN(parsed)) setValNum(activeSettingIdx, parsed);
-                                }
+                            if (key.name === 'escape') {
                                 isFocusEditing = false;
                                 editBuffer = '';
-                                notice = `Updated ${activeMeta.label} to ${getDisplayVal(activeSettingIdx)}`;
                                 renderScreen();
                                 return;
                             }
-
+                            if (key.name === 'return' || key.name === 'enter') {
+                                if (cur.type === 'text') {
+                                    state[cur.key] = editBuffer.trim() || 'atc-local-key';
+                                } else if (cur.type === 'num' && editBuffer.trim() !== '') {
+                                    const parsed = parseInt(editBuffer.trim(), 10);
+                                    if (!Number.isNaN(parsed)) {
+                                        state[cur.key] = Math.max(cur.min, Math.min(cur.max, parsed));
+                                    }
+                                }
+                                isFocusEditing = false;
+                                editBuffer = '';
+                                notice = `Updated ${cur.label} -> ${formatItemDisplay(cur)}`;
+                                renderScreen();
+                                return;
+                            }
                             if (key.name === 'backspace') {
                                 editBuffer = editBuffer.slice(0, -1);
                                 renderScreen();
                                 return;
                             }
-
-                            if (activeMeta?.isText) {
+                            if (cur.type === 'text') {
                                 if (str && /^[a-zA-Z0-9_\-\.]$/.test(str) && editBuffer.length < 64) {
                                     editBuffer += str;
                                     renderScreen();
                                 }
-                                return;
-                            }
-
-                            if (/^[0-9]$/.test(str)) {
-                                if (editBuffer.length < 5) {
-                                    editBuffer += str;
-                                }
+                            } else if (/^[0-9]$/.test(str) && editBuffer.length < 6) {
+                                editBuffer += str;
                                 renderScreen();
-                                return;
                             }
+                            return;
+                        }
 
-                            if (key.name === 'left') {
-                                let current = parseInt(editBuffer, 10);
-                                if (isNaN(current)) current = getValNum(activeSettingIdx);
-                                const updated = Math.max(activeMeta.min, current - activeMeta.step);
-                                editBuffer = updated.toString();
-                                renderScreen();
-                                return;
-                            }
+                        if (key.name === 'escape' || (key.ctrl && key.name === 'c') || (key.ctrl && key.name === 's')) {
+                            cleanup();
+                            saveAllSettings().finally(resolve);
+                            return;
+                        }
 
-                            if (key.name === 'right') {
-                                let current = parseInt(editBuffer, 10);
-                                if (isNaN(current)) current = getValNum(activeSettingIdx);
-                                const updated = Math.min(activeMeta.max, current + activeMeta.step);
-                                editBuffer = updated.toString();
-                                renderScreen();
-                                return;
-                            }
+                        if (key.name === 'tab' || str === ']' || str === '[') {
+                            notice = '';
+                            const dir = (key.shift || str === '[') ? -1 : 1;
+                            activeTabIdx = (activeTabIdx + dir + TABS.length) % TABS.length;
+                            rowIdx = 0;
+                            renderScreen();
+                            return;
+                        }
+
+                        if (!key.ctrl && !key.meta && ['1', '2', '3', '4'].includes(str)) {
+                            notice = '';
+                            activeTabIdx = parseInt(str, 10) - 1;
+                            rowIdx = 0;
+                            renderScreen();
                             return;
                         }
 
                         if (key.name === 'up' || key.name === 'k') {
                             notice = '';
-                            activeSettingIdx = (activeSettingIdx - 1 + settingsMeta.length) % settingsMeta.length;
+                            rowIdx = (rowIdx - 1 + rows.length) % rows.length;
                             renderScreen();
                             return;
                         }
 
                         if (key.name === 'down' || key.name === 'j') {
                             notice = '';
-                            activeSettingIdx = (activeSettingIdx + 1) % settingsMeta.length;
+                            rowIdx = (rowIdx + 1) % rows.length;
                             renderScreen();
                             return;
                         }
 
-                        if ((key.name === 'left' || key.name === 'right' || key.name === 'space') && activeMeta?.isBoolean) {
-                            if (activeMeta.id === 'showTips') {
-                                showTipsToggle = !showTipsToggle;
-                                notice = `Safety Tips Banner ${showTipsToggle ? 'ENABLED' : 'HIDDEN'}`;
-                            } else {
-                                singleLock = !singleLock;
-                                notice = `Single-Account Lock ${singleLock ? 'ENABLED (auto-rotation disabled)' : 'DISABLED'}`;
-                            }
+                        if (key.name === 'left' && cur && cur.type !== 'action' && cur.type !== 'text') {
+                            stepChoice(cur, -1);
                             renderScreen();
                             return;
                         }
 
-                        if (key.name === 'left' && activeMeta?.isNumeric) {
-                            notice = '';
-                            const cur = getValNum(activeSettingIdx);
-                            setValNum(activeSettingIdx, Math.max(activeMeta.min, cur - activeMeta.step));
-                            renderScreen();
-                            return;
-                        }
-
-                        if (key.name === 'right' && activeMeta?.isNumeric) {
-                            notice = '';
-                            const cur = getValNum(activeSettingIdx);
-                            setValNum(activeSettingIdx, Math.min(activeMeta.max, cur + activeMeta.step));
+                        if ((key.name === 'right' || key.name === 'space') && cur && cur.type !== 'action' && cur.type !== 'text') {
+                            stepChoice(cur, 1);
                             renderScreen();
                             return;
                         }
 
                         if (key.name === 'return' || key.name === 'enter') {
-                            notice = '';
-                            if (activeMeta?.isBoolean) {
-                                if (activeMeta.id === 'showTips') {
-                                    showTipsToggle = !showTipsToggle;
-                                    notice = `Safety Tips Banner ${showTipsToggle ? 'ENABLED' : 'HIDDEN'}`;
-                                } else {
-                                    singleLock = !singleLock;
-                                    notice = `Single-Account Lock ${singleLock ? 'ENABLED (auto-rotation disabled)' : 'DISABLED'}`;
-                                }
+                            if (!cur) return;
+                            if (cur.type === 'bool' || cur.type === 'enum') {
+                                stepChoice(cur, 1);
                                 renderScreen();
                                 return;
                             }
-
-                            if (activeMeta?.isNumeric || activeMeta?.isText) {
+                            if (cur.type === 'num' || cur.type === 'text') {
                                 isFocusEditing = true;
-                                editBuffer = activeMeta.isText ? secretKey : getValNum(activeSettingIdx).toString();
+                                editBuffer = String(state[cur.key] ?? '');
                                 renderScreen();
                                 return;
                             }
-
-                            if (activeMeta?.id === 'reset') {
-                                singleLock = false;
-                                showTipsToggle = true;
-                                quotaFloorPct = 10;
-                                hourlyCap = 120;
-                                pacerMs = 250;
-                                thresholdPct = 5;
-                                reqCap = 20;
-                                minStaySec = 180;
-                                cooldown = 5000;
-                                maxRetriesVal = 2;
-                                streamTimeoutSec = 300;
-                                quotaTtlSec = 300;
-                                loginTimeout = 120;
-                                proxyPort = port || 43128;
-                                secretKey = 'atc-local-key';
-                                notice = 'Reset all settings to recommended anti-burst safe defaults';
+                            if (cur.id === 'reset_tab') {
+                                resetTabDefaults(TABS[activeTabIdx].id);
+                                notice = `Reset "${TABS[activeTabIdx].title}" tab to safe defaults`;
                                 renderScreen();
                                 return;
                             }
-
-                            if (activeMeta?.id === 'save') {
+                            if (cur.id === 'reset_all') {
+                                resetTabDefaults('all');
+                                notice = 'Reset all 4 tabs to recommended anti-ban defaults';
+                                renderScreen();
+                                return;
+                            }
+                            if (cur.id === 'save') {
                                 cleanup();
                                 saveAllSettings().finally(resolve);
-                                return;
                             }
                         }
                     }
@@ -1347,11 +1558,12 @@ export async function runInteractiveDashboard(options = {}) {
                         process.stdin.removeListener('keypress', onKey);
                     }
 
+                    activeSubScreenRender = renderScreen;
                     process.stdin.on('keypress', onKey);
                     renderScreen();
                 });
 
-                setStatus(`Saved Engine Settings & synced daemon.`, 2000);
+                setStatus('Saved Engine Settings & synced live daemon.', 2200);
             });
         }
 
@@ -1376,48 +1588,396 @@ export async function runInteractiveDashboard(options = {}) {
             setStatus(`Load Balancer -> ${nextObj.label} [${nextObj.riskTag}]`, 2500);
         }
 
+        async function runCustomModeBuilderInline(initialProfile = null) {
+            const draft = normalizeCustomProfile(initialProfile || {
+                name: `My Safe Mode ${(Array.isArray(config?.customModes) ? config.customModes.length : 0) + 1}`,
+                baseCore: 'day-slots',
+                maxDailyAccounts: 2,
+                requireIdleGap: true,
+                minIdleSec: 180,
+                minStaySec: 600,
+                quotaStepPct: 10,
+                floor5hPct: 15,
+                floorWeeklyPct: 15,
+                candidateOrder: 'highest-5h',
+                onUnavailable: 'failover'
+            });
+            const originalId = initialProfile ? slugifyProfileId(initialProfile.id || initialProfile.name) : null;
+
+            const FIELDS = [
+                {
+                    key: 'name', label: 'Profile Name', type: 'text',
+                    guide: 'press Enter to rename',
+                    desc: 'Display name shown on Dashboard and Load Balancer selector (saved in config.customModes)'
+                },
+                {
+                    key: 'baseCore', label: 'Routing Core Engine', type: 'enum',
+                    choices: [
+                        { val: 'day-slots', label: 'Daily Slot Cap' },
+                        { val: 'session-idle', label: 'Idle-Break Session' },
+                        { val: 'sticky-floor', label: 'Sticky Drain-to-Floor' },
+                        { val: 'quota-step', label: 'Quota Step Shift' },
+                        { val: 'locked', label: 'Locked 1-Account' }
+                    ],
+                    guide: 'core switching behavior',
+                    desc: 'Underlying rotation trigger: cap daily accounts, shift on idle breaks, drain to floor, or step by %'
+                },
+                {
+                    key: 'maxDailyAccounts', label: 'Max Active Accounts / Day', type: 'num', unit: '/day',
+                    min: 0, max: 10, step: 1,
+                    guide: '1–2 safest (0 = all)',
+                    desc: 'Maximum accounts exposed to Cloud Code per calendar day; extra accounts stay completely dormant'
+                },
+                {
+                    key: 'requireIdleGap', label: 'Require Quiet Idle Gap', type: 'bool',
+                    onText: 'Enabled', offText: 'Disabled',
+                    guide: 'never switch mid-turn',
+                    desc: 'Wait for a natural pause between prompts before performing any proactive account switch'
+                },
+                {
+                    key: 'minIdleSec', label: 'Min Quiet Idle Gap', type: 'num', unit: 's',
+                    min: 0, max: 3600, step: 30,
+                    guide: 'rec: 120–300s',
+                    desc: 'Seconds of user inactivity required when "Require Quiet Idle Gap" is Enabled'
+                },
+                {
+                    key: 'minStaySec', label: 'Min Stay Time on Account', type: 'num', unit: 's',
+                    min: 0, max: 7200, step: 60,
+                    guide: 'rec: 300–1800s',
+                    desc: 'Minimum duration to keep traffic bound to an account before any proactive handover'
+                },
+                {
+                    key: 'quotaStepPct', label: 'Proactive Quota Drop Step', type: 'num', unit: '%',
+                    min: 0, max: 80, step: 5,
+                    guide: '0% = drain to floor',
+                    desc: '5-hour quota % consumed before proactive rotation (used by Quota Step & Session cores)'
+                },
+                {
+                    key: 'floor5hPct', label: '5h Quota Reserve Floor', type: 'num', unit: '%',
+                    min: 0, max: 50, step: 5,
+                    guide: 'rec: 10–20%',
+                    desc: 'Stop draining the current account before hitting 0% 5-hour hard 429 exhaustion'
+                },
+                {
+                    key: 'floorWeeklyPct', label: 'Weekly Quota Reserve Floor', type: 'num', unit: '%',
+                    min: 0, max: 50, step: 5,
+                    guide: 'rec: 10–25% (Argon)',
+                    desc: 'Preserve weekly quota on flagship models (Gemini 4 Argon / Opus) by rotating early'
+                },
+                {
+                    key: 'candidateOrder', label: 'Next Account Preference', type: 'enum',
+                    choices: [
+                        { val: 'highest-5h', label: 'Highest 5h Quota' },
+                        { val: 'highest-weekly', label: 'Highest Weekly Quota' },
+                        { val: 'lru', label: 'Longest Rested (LRU)' },
+                        { val: 'sequential', label: 'Sequential Order' }
+                    ],
+                    guide: 'standby election rule',
+                    desc: 'How the next healthy standby account is ranked when a handover occurs'
+                },
+                {
+                    key: 'onUnavailable', label: 'When Active Hits Hard 429', type: 'enum',
+                    choices: [
+                        { val: 'failover', label: 'Failover to Standby' },
+                        { val: 'wait', label: 'Wait in Place (No Hop)' }
+                    ],
+                    guide: 'wait = strictest safety',
+                    desc: 'Either fail over to a healthy daily slot or wait on the current account without hopping'
+                },
+                { type: 'action', id: 'save_profile', label: 'Save Custom Profile & Activate Now', desc: 'Save profile into ~/.config/atc/config.json and activate it immediately on the proxy daemon' },
+                { type: 'action', id: 'cancel_profile', label: 'Cancel & Back to Load Balancer List', desc: 'Discard unsaved edits and return to Load Balancer modes' }
+            ];
+
+            let fIdx = 0;
+            let editingText = false;
+            let bufText = '';
+
+            function fmtVal(f) {
+                const v = draft[f.key];
+                if (f.type === 'bool') return v ? f.onText : f.offText;
+                if (f.type === 'enum') return f.choices.find((c0) => c0.val === v)?.label || String(v);
+                if (f.type === 'num') {
+                    if (f.key === 'maxDailyAccounts' && v === 0) return 'All Accounts';
+                    if (f.key === 'quotaStepPct' && v === 0) return 'Drain to Floor';
+                    return `${v}${f.unit}`;
+                }
+                return String(v || '');
+            }
+
+            let savedResult = null;
+
+            await new Promise((resolve) => {
+                function renderBuilder() {
+                    const risk = evaluateCustomProfileRisk(draft);
+                    let out = c.cursorHome;
+                    out += drawHeaderBox('Custom Load Balancer Profile Builder', 76);
+                    out += `  ${c.textMuted}Live Risk Meter:${c.reset} ${risk.riskColor}[${risk.riskTag}]${c.reset} \x1b[38;5;245m— ${risk.summary}\x1b[0m${c.clearToEndOfLine}\n`;
+                    out += `  \x1b[38;5;238m${'─'.repeat(76)}\x1b[0m${c.clearToEndOfLine}\n`;
+
+                    let drewSep = false;
+                    for (let i = 0; i < FIELDS.length; i++) {
+                        const f = FIELDS[i];
+                        const isSel = i === fIdx;
+                        const pointer = isSel ? `  \x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
+
+                        if (f.type === 'action') {
+                            if (!drewSep) {
+                                out += `  \x1b[38;5;238m${'─'.repeat(76)}\x1b[0m${c.clearToEndOfLine}\n`;
+                                drewSep = true;
+                            }
+                            const col = f.id === 'save_profile'
+                                ? (isSel ? '\x1b[1;38;5;120m' : '\x1b[38;5;42m')
+                                : (isSel ? '\x1b[1;38;5;255m' : '\x1b[38;5;245m');
+                            out += `${pointer}${col}${f.label}${c.reset}${c.clearToEndOfLine}\n`;
+                            continue;
+                        }
+
+                        const lbl = isSel
+                            ? `\x1b[1;38;5;255m${f.label.padEnd(28, ' ')}\x1b[0m`
+                            : `\x1b[38;5;250m${f.label.padEnd(28, ' ')}\x1b[0m`;
+
+                        let valBox = '';
+                        let plainLen = 0;
+                        if (isSel && editingText) {
+                            const raw = `[ ${bufText}_ ]`;
+                            plainLen = raw.length;
+                            valBox = `\x1b[1;38;5;226;48;5;236m${raw}\x1b[0m`;
+                        } else {
+                            const raw = `[${fmtVal(f)}]`;
+                            plainLen = raw.length;
+                            valBox = isSel ? `\x1b[1;38;5;120m${raw}\x1b[0m` : `\x1b[38;5;147m${raw}\x1b[0m`;
+                        }
+                        const pad = ' '.repeat(Math.max(2, 24 - plainLen));
+                        out += `${pointer}${lbl}  ${valBox}${pad}\x1b[38;5;241m${f.guide || ''}\x1b[0m${c.clearToEndOfLine}\n`;
+                    }
+
+                    const curF = FIELDS[fIdx];
+                    out += `\n  ${c.textMuted}Details:${c.reset} ${c.textNormal}${curF?.desc || ''}${c.reset}${c.clearToEndOfLine}\n`;
+                    if (editingText) {
+                        out += `  ${c.textMuted}Type value  ·  [Backspace] Delete  ·  [Enter] Confirm  ·  [ESC] Cancel${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
+                    } else {
+                        out += `  ${c.textMuted}[↑↓] Move  ·  [←/→ / Space] Adjust  ·  [Enter] Edit / Save  ·  [ESC] Cancel${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
+                    }
+                    process.stdout.write(out);
+                }
+
+                function onBuilderKey(str, key) {
+                    if (!key) return;
+                    const f = FIELDS[fIdx];
+
+                    if (editingText) {
+                        if (key.name === 'escape') {
+                            editingText = false;
+                            bufText = '';
+                            renderBuilder();
+                            return;
+                        }
+                        if (key.name === 'return' || key.name === 'enter') {
+                            if (f.type === 'text') {
+                                const cleaned = bufText.trim().slice(0, 30);
+                                if (cleaned) draft.name = cleaned;
+                            } else if (f.type === 'num' && bufText.trim() !== '') {
+                                const n = parseInt(bufText.trim(), 10);
+                                if (!Number.isNaN(n)) draft[f.key] = Math.max(f.min, Math.min(f.max, n));
+                            }
+                            editingText = false;
+                            bufText = '';
+                            renderBuilder();
+                            return;
+                        }
+                        if (key.name === 'backspace') {
+                            bufText = bufText.slice(0, -1);
+                            renderBuilder();
+                            return;
+                        }
+                        if (f.type === 'text') {
+                            if (str && str.length === 1 && !key.ctrl && !key.meta && bufText.length < 30) {
+                                bufText += str;
+                                renderBuilder();
+                            }
+                        } else if (/^[0-9]$/.test(str) && bufText.length < 5) {
+                            bufText += str;
+                            renderBuilder();
+                        }
+                        return;
+                    }
+
+                    if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
+                        process.stdin.removeListener('keypress', onBuilderKey);
+                        resolve();
+                        return;
+                    }
+                    if (key.name === 'up' || key.name === 'k') {
+                        fIdx = (fIdx - 1 + FIELDS.length) % FIELDS.length;
+                        renderBuilder();
+                        return;
+                    }
+                    if (key.name === 'down' || key.name === 'j') {
+                        fIdx = (fIdx + 1) % FIELDS.length;
+                        renderBuilder();
+                        return;
+                    }
+
+                    const adjust = (dir) => {
+                        if (!f || f.type === 'action' || f.type === 'text') return;
+                        if (f.type === 'bool') draft[f.key] = !draft[f.key];
+                        else if (f.type === 'enum') {
+                            const ci = Math.max(0, f.choices.findIndex((c0) => c0.val === draft[f.key]));
+                            draft[f.key] = f.choices[(ci + dir + f.choices.length) % f.choices.length].val;
+                        } else if (f.type === 'num') {
+                            draft[f.key] = Math.max(f.min, Math.min(f.max, draft[f.key] + dir * f.step));
+                        }
+                    };
+
+                    if (key.name === 'left') {
+                        adjust(-1);
+                        renderBuilder();
+                        return;
+                    }
+                    if (key.name === 'right' || key.name === 'space') {
+                        adjust(1);
+                        renderBuilder();
+                        return;
+                    }
+
+                    if (key.name === 'return' || key.name === 'enter') {
+                        if (!f) return;
+                        if (f.type === 'text' || f.type === 'num') {
+                            editingText = true;
+                            bufText = String(draft[f.key] ?? '');
+                            renderBuilder();
+                            return;
+                        }
+                        if (f.type === 'bool' || f.type === 'enum') {
+                            adjust(1);
+                            renderBuilder();
+                            return;
+                        }
+                        if (f.id === 'save_profile') {
+                            const finalProfile = normalizeCustomProfile({
+                                ...draft,
+                                id: slugifyProfileId(draft.name)
+                            });
+                            const existingList = Array.isArray(config?.customModes) ? [...config.customModes] : [];
+                            const filtered = existingList.filter((item) => {
+                                const itemSlug = slugifyProfileId(item?.id || item?.name);
+                                return itemSlug !== finalProfile.id && (!originalId || itemSlug !== originalId);
+                            });
+                            filtered.push(finalProfile);
+                            saveConfig({ customModes: filtered });
+                            savedResult = finalProfile;
+                            process.stdin.removeListener('keypress', onBuilderKey);
+                            resolve();
+                            return;
+                        }
+                        if (f.id === 'cancel_profile') {
+                            process.stdin.removeListener('keypress', onBuilderKey);
+                            resolve();
+                        }
+                    }
+                }
+
+                activeSubScreenRender = renderBuilder;
+                process.stdin.on('keypress', onBuilderKey);
+                renderBuilder();
+            });
+
+            return savedResult;
+        }
+
         async function openLoadBalancerSelector() {
             await runSubScreen(async () => {
                 reloadConfig();
-                const stratCycle = getStrategyCycle();
-                const effectiveId = config?.singleAccountLock ? 'locked' : currentStrategy;
-                let selIdx = Math.max(0, stratCycle.findIndex((s) => s.id === effectiveId));
                 let chosen = null;
+                let lbNotice = '';
+
+                function buildRows() {
+                    const stratCycle = getStrategyCycle();
+                    return [
+                        ...stratCycle,
+                        { id: '__create_custom__', isBuilderAction: true, label: '+ Create New Custom Load Balancer Profile...', desc: 'Design your own anti-ban routing profile in a visual config table and save it' }
+                    ];
+                }
+
+                let rows = buildRows();
+                const effectiveId = config?.singleAccountLock ? 'locked' : currentStrategy;
+                let selIdx = Math.max(0, rows.findIndex((s) => s.id === effectiveId));
 
                 function renderScreen() {
-                    let out = c.clearScreen + c.cursorHome;
-                    out += `${c.brandGreen}╭─────────────────────────────────────────────────────────────────╮${c.reset}\n`;
-                    out += `${c.brandGreen}│  Load Balancer Mode & Anti-Ban Risk Profile                     │${c.reset}\n`;
-                    out += `${c.brandGreen}╰─────────────────────────────────────────────────────────────────╯${c.reset}\n\n`;
+                    rows = buildRows();
+                    if (selIdx >= rows.length) selIdx = rows.length - 1;
+                    const curEff = config?.singleAccountLock ? 'locked' : currentStrategy;
 
-                    for (let i = 0; i < stratCycle.length; i++) {
-                        const st = stratCycle[i];
+                    let out = c.cursorHome;
+                    out += drawHeaderBox('Load Balancer Modes, Anti-Ban Risk Profiles & Custom Builder', 76);
+                    out += `${c.clearToEndOfLine}\n`;
+
+                    let drewCustomHeader = false;
+                    for (let i = 0; i < rows.length; i++) {
+                        const st = rows[i];
                         const isSel = i === selIdx;
-                        const isActive = st.id === effectiveId;
                         const pointer = isSel ? `  \x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
+
+                        if (st.isCustom && !drewCustomHeader) {
+                            out += `  \x1b[38;5;141mSaved Custom Profiles\x1b[0m${c.clearToEndOfLine}\n`;
+                            drewCustomHeader = true;
+                        }
+
+                        if (st.isBuilderAction) {
+                            out += `  \x1b[38;5;238m${'─'.repeat(74)}\x1b[0m${c.clearToEndOfLine}\n`;
+                            const btnCol = isSel ? '\x1b[1;38;5;120m' : '\x1b[38;5;42m';
+                            out += `${pointer}${btnCol}${st.label}\x1b[0m \x1b[38;5;244m[N]\x1b[0m${c.clearToEndOfLine}\n`;
+                            continue;
+                        }
+
+                        const isActive = st.id === curEff;
                         const activeMark = isActive ? ` ${c.statusCurrent}[active]${c.reset}` : '';
+                        const customMark = st.isCustom ? `\x1b[38;5;141m[custom]\x1b[0m ` : '';
                         const nameStyled = isSel
-                            ? `\x1b[1;38;5;255m${st.label.padEnd(28, ' ')}${c.reset}`
-                            : `\x1b[38;5;250m${st.label.padEnd(28, ' ')}${c.reset}`;
+                            ? `\x1b[1;38;5;255m${st.label.padEnd(30, ' ')}${c.reset}`
+                            : `\x1b[38;5;250m${st.label.padEnd(30, ' ')}${c.reset}`;
                         const riskStyled = `${st.riskColor}[${st.riskTag}]${c.reset}`;
-                        out += `${pointer}${nameStyled} ${riskStyled}${activeMark}${c.clearToEndOfLine}\n`;
+                        out += `${pointer}${nameStyled} ${customMark}${riskStyled}${activeMark}${c.clearToEndOfLine}\n`;
                     }
 
-                    const curSt = stratCycle[selIdx];
-                    const wrapCols = Math.max(54, Math.min((process.stdout.columns || 86) - 6, 82));
-                    const wrappedDesc = wrapPlainText(curSt.desc, wrapCols);
-                    out += `\n${c.textMuted}───────────────────────────────────────────────────────────────────${c.reset}\n`;
-                    out += `${c.textMuted}Risk Profile:${c.reset} ${curSt.riskColor}[${curSt.riskTag}]${c.reset}\n`;
-                    for (const dl of wrappedDesc) {
+                    const curSt = rows[selIdx];
+                    const wrapCols = Math.max(58, Math.min((process.stdout.columns || 88) - 6, 78));
+                    out += `\n  \x1b[38;5;238m${'─'.repeat(74)}\x1b[0m\n`;
+                    if (lbNotice) {
+                        out += `  \x1b[38;5;120m✓ ${lbNotice}\x1b[0m${c.clearToEndOfLine}\n`;
+                    } else if (curSt?.riskTag) {
+                        out += `  ${c.textMuted}Risk Profile:${c.reset} ${curSt.riskColor}[${curSt.riskTag}]${c.reset}${curSt.isCustom ? '  \x1b[38;5;244m([E] Edit Profile · [D] Delete Profile)\x1b[0m' : ''}${c.clearToEndOfLine}\n`;
+                    }
+                    for (const dl of wrapPlainText(curSt?.desc || '', wrapCols)) {
                         out += `  ${c.textNormal}${dl}${c.reset}${c.clearToEndOfLine}\n`;
                     }
-                    out += `\n${c.textMuted}↑↓ Move | Enter Apply & Reload Daemon | ESC Cancel${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
+                    out += `\n  ${c.textMuted}[↑↓] Move · [Enter] Activate · [N] New Custom Profile · [E/D] Edit/Delete Custom · [ESC] Back${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
                     process.stdout.write(out);
                 }
 
                 await new Promise((resolve) => {
                     if (process.stdin.isTTY) process.stdin.setRawMode(true);
                     readline.emitKeypressEvents(process.stdin);
+
+                    async function launchBuilder(existing = null) {
+                        process.stdin.removeListener('keypress', onKey);
+                        const saved = await runCustomModeBuilderInline(existing);
+                        reloadConfig();
+                        rows = buildRows();
+                        if (saved) {
+                            const newId = `custom:${saved.id}`;
+                            const found = rows.find((r) => r.id === newId);
+                            if (found) {
+                                chosen = found;
+                                resolve();
+                                return;
+                            }
+                        }
+                        activeSubScreenRender = renderScreen;
+                        process.stdin.on('keypress', onKey);
+                        process.stdout.write(c.clearScreen + c.cursorHome);
+                        renderScreen();
+                    }
 
                     function onKey(str, key) {
                         if (!key) return;
@@ -1427,22 +1987,56 @@ export async function runInteractiveDashboard(options = {}) {
                             return;
                         }
                         if (key.name === 'up' || key.name === 'k') {
-                            selIdx = (selIdx - 1 + stratCycle.length) % stratCycle.length;
+                            lbNotice = '';
+                            selIdx = (selIdx - 1 + rows.length) % rows.length;
                             renderScreen();
                             return;
                         }
                         if (key.name === 'down' || key.name === 'j') {
-                            selIdx = (selIdx + 1) % stratCycle.length;
+                            lbNotice = '';
+                            selIdx = (selIdx + 1) % rows.length;
+                            renderScreen();
+                            return;
+                        }
+                        if (!key.ctrl && !key.meta && key.name === 'n') {
+                            launchBuilder(null);
+                            return;
+                        }
+                        if (!key.ctrl && !key.meta && key.name === 'e' && rows[selIdx]?.isCustom) {
+                            launchBuilder(rows[selIdx].customProfile);
+                            return;
+                        }
+                        if (!key.ctrl && !key.meta && (key.name === 'd' || key.name === 'backspace') && rows[selIdx]?.isCustom) {
+                            const target = rows[selIdx];
+                            const remaining = (config?.customModes || []).filter(
+                                (p) => `custom:${slugifyProfileId(p?.id || p?.name)}` !== target.id
+                            );
+                            const updates = { customModes: remaining };
+                            if (currentStrategy === target.id) {
+                                currentStrategy = 'day-split';
+                                updates.accountSelection = { ...(config.accountSelection || {}), strategy: 'day-split' };
+                            }
+                            saveConfig(updates);
+                            reloadConfig();
+                            rows = buildRows();
+                            selIdx = Math.max(0, Math.min(selIdx, rows.length - 1));
+                            lbNotice = `Deleted custom profile "${target.label}"`;
                             renderScreen();
                             return;
                         }
                         if (key.name === 'return' || key.name === 'enter') {
-                            chosen = stratCycle[selIdx];
+                            const cur = rows[selIdx];
+                            if (cur?.isBuilderAction) {
+                                launchBuilder(null);
+                                return;
+                            }
+                            chosen = cur;
                             process.stdin.removeListener('keypress', onKey);
                             resolve();
                         }
                     }
 
+                    activeSubScreenRender = renderScreen;
                     process.stdin.on('keypress', onKey);
                     renderScreen();
                 });
@@ -1461,13 +2055,13 @@ export async function runInteractiveDashboard(options = {}) {
 
                 function renderScreen() {
                     const tip = SAFETY_TIPS[tipIdx];
-                    const wrapCols = Math.max(54, Math.min((process.stdout.columns || 88) - 6, 84));
-                    let out = c.clearScreen + c.cursorHome;
-                    out += `${c.brandGreen}╭─────────────────────────────────────────────────────────────────╮${c.reset}\n`;
-                    out += `${c.brandGreen}│  atc Safety & Operational Guide (Tip ${String(tipIdx + 1).padStart(2, ' ')} of ${String(SAFETY_TIPS.length).padEnd(2, ' ')})                  │${c.reset}\n`;
-                    out += `${c.brandGreen}╰─────────────────────────────────────────────────────────────────╯${c.reset}\n\n`;
+                    const wrapCols = Math.max(54, Math.min((process.stdout.columns || 88) - 6, 76));
+                    let out = c.cursorHome;
+                    out += drawHeaderBox(`atc Safety & Operational Guide — Tip ${tipIdx + 1} of ${SAFETY_TIPS.length}`, 76);
+                    out += `${c.clearToEndOfLine}\n`;
 
-                    out += `  \x1b[1;38;5;220m[${tip.badge}]\x1b[0m \x1b[1;38;5;255m${tip.title}${c.reset}${c.clearToEndOfLine}\n\n`;
+                    const pillStyle = getTipBadgeStyle(tip.badge);
+                    out += `  ${pillStyle} ★ ${tip.badge} \x1b[0m \x1b[1;38;5;255m${tip.title}${c.reset}${c.clearToEndOfLine}\n\n`;
 
                     for (const line of wrapPlainText(tip.summary, wrapCols)) {
                         out += `  \x1b[38;5;153m${line}${c.reset}${c.clearToEndOfLine}\n`;
@@ -1493,7 +2087,8 @@ export async function runInteractiveDashboard(options = {}) {
                     if (bannerNotice) {
                         out += `  ${c.statusWarn}ℹ ${bannerNotice}${c.reset}${c.clearToEndOfLine}\n`;
                     } else {
-                        out += `  ${c.textMuted}Dashboard Banner: ${tipsVisible ? '\x1b[38;5;120mVISIBLE\x1b[0m' : '\x1b[38;5;242mHIDDEN\x1b[0m'}${c.textMuted} (edit src/cli/tips.js to add custom tips)${c.reset}${c.clearToEndOfLine}\n`;
+                        const startupTxt = config?.showTips !== false ? 'Enabled on Startup' : 'Disabled on Startup';
+                        out += `  ${c.textMuted}Banner: ${tipsVisible ? '\x1b[38;5;120mVISIBLE\x1b[0m' : '\x1b[38;5;242mHIDDEN\x1b[0m'}${c.textMuted} (${startupTxt} — configure in Settings → Tab 3)${c.reset}${c.clearToEndOfLine}\n`;
                     }
                     out += `  ${c.textMuted}←/→ Prev/Next Tip | X Toggle Banner | Enter / Ctrl+D / ESC Return${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
                     process.stdout.write(out);
@@ -1530,14 +2125,20 @@ export async function runInteractiveDashboard(options = {}) {
                         }
                         if (!key.ctrl && !key.meta && key.name === 'x') {
                             tipsVisible = !tipsVisible;
-                            saveConfig({ showTips: tipsVisible });
+                            tipsSessionOverride = tipsVisible;
+                            if (config?.tipsDismissScope === 'permanent' || (tipsVisible && config?.showTips === false)) {
+                                saveConfig({ showTips: tipsVisible });
+                            }
                             bannerNotice = tipsVisible
-                                ? 'Dashboard scrolling banner re-enabled.'
-                                : 'Dashboard scrolling banner hidden.';
+                                ? 'Dashboard safety ribbon shown.'
+                                : (config?.tipsDismissScope === 'permanent'
+                                    ? 'Safety ribbon hidden permanently (re-enable in Settings → Tab 3).'
+                                    : 'Safety ribbon hidden for this session.');
                             renderScreen();
                         }
                     }
 
+                    activeSubScreenRender = renderScreen;
                     process.stdin.on('keypress', onKey);
                     renderScreen();
                 });
@@ -1573,17 +2174,26 @@ export async function runInteractiveDashboard(options = {}) {
                 return;
             }
 
-            // X: dismiss scrolling tip banner
+            // X: toggle safety tip ribbon (respects Settings -> Dismiss Key [X] Behavior)
             if (!key.ctrl && !key.meta && key.name === 'x') {
                 if (tipsVisible) {
                     tipsVisible = false;
-                    saveConfig({ showTips: false });
-                    setStatus('Tip banner hidden. Press Ctrl+D anytime for details, or re-enable in Settings.', 2500);
+                    tipsSessionOverride = false;
+                    if (config?.tipsDismissScope === 'permanent') {
+                        saveConfig({ showTips: false });
+                        setStatus('Tip ribbon disabled on startup (change anytime in Settings → Tab 3).', 2500);
+                    } else {
+                        setStatus('Tip ribbon hidden for this session (startup default in Settings → Tab 3).', 2500);
+                    }
                 } else {
                     tipsVisible = true;
-                    saveConfig({ showTips: true });
-                    setStatus('Safety tips banner re-enabled.', 2000);
+                    tipsSessionOverride = true;
+                    if (config?.showTips === false) {
+                        saveConfig({ showTips: true });
+                    }
+                    setStatus('Safety tips ribbon shown.', 2000);
                 }
+                render();
                 return;
             }
 
@@ -1676,60 +2286,105 @@ export async function runInteractiveDashboard(options = {}) {
                             reloadConfig();
                             let customProj = config?.customProjectId || '';
                             let selectedIdx = 0;
+                            let isEditingProj = false;
+                            let projBuf = '';
                             let notice = '';
 
-                            const items = [
-                                { id: 'val', label: 'Custom GCP Project ID', getVal: () => customProj || 'Default (auto)', desc: 'Route Gemini API requests with your own Google Cloud project' },
-                                { id: 'edit', label: 'Set Custom Project ID', getVal: () => '', desc: 'Enter custom project ID string (e.g. my-project-513208)' },
-                                { id: 'reset', label: 'Reset to Default (auto)', getVal: () => '', desc: 'Revert to automatic default project routing' },
-                                { id: 'save', label: 'Save & Return to Dashboard', getVal: () => '', desc: 'Write changes to ~/.config/atc/config.json' }
+                            const projItems = [
+                                { id: 'val', label: 'Active GCP Project ID', desc: 'Press Enter to edit custom Google Cloud project ID inline (leave empty to use auto)' },
+                                { id: 'reset', label: 'Reset to Automatic Default Project', desc: 'Clear custom project override and let Cloud Code resolve default project automatically' },
+                                { id: 'save', label: 'Save & Return to Dashboard', desc: 'Persist project routing configuration and reload proxy daemon' }
                             ];
 
                             function renderScreen() {
-                                let out = c.clearScreen + c.cursorHome;
-                                out += `${c.brandGreen}╭─────────────────────────────────────────────────────────────────╮${c.reset}\n`;
-                                out += `${c.brandGreen}│  Custom GCP Project Configuration                               │${c.reset}\n`;
-                                out += `${c.brandGreen}╰─────────────────────────────────────────────────────────────────╯${c.reset}\n\n`;
+                                let out = c.cursorHome;
+                                out += drawHeaderBox('Custom GCP Project Configuration', 76);
+                                out += `    \x1b[38;5;242m${'Option'.padEnd(34, ' ')}  Current Routing Value\x1b[0m${c.clearToEndOfLine}\n`;
+                                out += `  \x1b[38;5;238m${'─'.repeat(76)}\x1b[0m${c.clearToEndOfLine}\n`;
 
-                                for (let i = 0; i < items.length; i++) {
-                                    const it = items[i];
+                                for (let i = 0; i < projItems.length; i++) {
+                                    const it = projItems[i];
                                     const isSel = i === selectedIdx;
                                     const pointer = isSel ? `  \x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
-                                    const val = it.getVal();
 
-                                    let line = '';
-                                    if (val) {
-                                        line = isSel
-                                            ? `\x1b[1;38;5;255m${it.label}:\x1b[0m \x1b[1;38;5;120m[${val}]\x1b[0m`
-                                            : `\x1b[38;5;250m${it.label}:\x1b[0m \x1b[38;5;147m[${val}]\x1b[0m`;
-                                    } else {
-                                        line = isSel
-                                            ? `\x1b[1;38;5;255m${it.label}${c.reset}`
-                                            : `\x1b[38;5;248m${it.label}${c.reset}`;
+                                    if (it.id === 'save') {
+                                        out += `  \x1b[38;5;238m${'─'.repeat(76)}\x1b[0m${c.clearToEndOfLine}\n`;
                                     }
-                                    out += `${pointer}${line}${c.clearToEndOfLine}\n`;
+
+                                    if (it.id === 'val') {
+                                        const lbl = isSel
+                                            ? `\x1b[1;38;5;255m${it.label.padEnd(34, ' ')}\x1b[0m`
+                                            : `\x1b[38;5;250m${it.label.padEnd(34, ' ')}\x1b[0m`;
+                                        const valStr = isEditingProj
+                                            ? `\x1b[1;38;5;226;48;5;236m[ ${projBuf}_ ]\x1b[0m`
+                                            : (isSel
+                                                ? `\x1b[1;38;5;120m[${customProj || 'Default (auto)'}]\x1b[0m`
+                                                : `\x1b[38;5;147m[${customProj || 'Default (auto)'}]\x1b[0m`);
+                                        out += `${pointer}${lbl}  ${valStr}${c.clearToEndOfLine}\n`;
+                                    } else {
+                                        const col = it.id === 'save'
+                                            ? (isSel ? '\x1b[1;38;5;120m' : '\x1b[38;5;42m')
+                                            : (isSel ? '\x1b[1;38;5;255m' : '\x1b[38;5;248m');
+                                        out += `${pointer}${col}${it.label}${c.reset}${c.clearToEndOfLine}\n`;
+                                    }
                                 }
 
                                 out += `\n`;
-                                const curIt = items[selectedIdx];
+                                const curIt = projItems[selectedIdx];
                                 if (notice) {
-                                    out += `${c.statusWarn}ℹ ${notice}${c.reset}${c.clearToEndOfLine}\n`;
+                                    out += `  \x1b[38;5;120m✓ ${notice}\x1b[0m${c.clearToEndOfLine}\n`;
                                 } else {
-                                    out += `${c.textMuted}Details:${c.reset} ${c.textNormal}${curIt.desc}${c.reset}${c.clearToEndOfLine}\n`;
+                                    out += `  ${c.textMuted}Info:${c.reset} ${c.textNormal}${curIt.desc}${c.reset}${c.clearToEndOfLine}\n`;
                                 }
 
-                                out += `${c.textMuted}↑↓ Move | Enter Select/Edit | ESC Return${c.reset}${c.clearToEndOfLine}`;
+                                if (isEditingProj) {
+                                    out += `  ${c.textMuted}Type GCP Project ID  ·  [Backspace] Delete  ·  [Enter] Save  ·  [ESC] Cancel${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
+                                } else {
+                                    out += `  ${c.textMuted}[↑↓] Move  ·  [Enter] Edit / Apply  ·  [ESC] Return${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
+                                }
                                 process.stdout.write(out);
                             }
 
                             await new Promise((resolve) => {
-                                if (process.stdin.isTTY) process.stdin.setRawMode(true);
-                                readline.emitKeypressEvents(process.stdin);
-
-                                async function onKey(str, key) {
+                                function onKey(str, key) {
                                     if (!key) return;
 
-                                    if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
+                                    if (isEditingProj) {
+                                        if (key.name === 'escape') {
+                                            isEditingProj = false;
+                                            projBuf = '';
+                                            renderScreen();
+                                            return;
+                                        }
+                                        if (key.name === 'return' || key.name === 'enter') {
+                                            const trimmed = projBuf.trim();
+                                            isEditingProj = false;
+                                            projBuf = '';
+                                            if (trimmed && trimmed.toLowerCase() !== 'auto' && trimmed.toLowerCase() !== 'default') {
+                                                customProj = trimmed;
+                                                saveConfig({ customProjectId: trimmed });
+                                                notice = `Saved Custom GCP Project ID: ${trimmed}`;
+                                            } else {
+                                                customProj = '';
+                                                saveConfig({ customProjectId: undefined });
+                                                notice = 'Reset to automatic default project routing';
+                                            }
+                                            renderScreen();
+                                            return;
+                                        }
+                                        if (key.name === 'backspace') {
+                                            projBuf = projBuf.slice(0, -1);
+                                            renderScreen();
+                                            return;
+                                        }
+                                        if (str && str.length === 1 && !key.ctrl && !key.meta && projBuf.length < 48) {
+                                            projBuf += str;
+                                            renderScreen();
+                                        }
+                                        return;
+                                    }
+
+                                    if (key.name === 'escape' || key.name === 'q' || (key.ctrl && key.name === 'c')) {
                                         process.stdin.removeListener('keypress', onKey);
                                         resolve();
                                         return;
@@ -1737,65 +2392,52 @@ export async function runInteractiveDashboard(options = {}) {
 
                                     if (key.name === 'up' || key.name === 'k') {
                                         notice = '';
-                                        selectedIdx = (selectedIdx - 1 + items.length) % items.length;
+                                        selectedIdx = (selectedIdx - 1 + projItems.length) % projItems.length;
                                         renderScreen();
                                         return;
                                     }
 
                                     if (key.name === 'down' || key.name === 'j') {
                                         notice = '';
-                                        selectedIdx = (selectedIdx + 1) % items.length;
+                                        selectedIdx = (selectedIdx + 1) % projItems.length;
                                         renderScreen();
                                         return;
                                     }
 
                                     if (key.name === 'return' || key.name === 'enter') {
-                                        if (selectedIdx === 0 || selectedIdx === 1) {
-                                            process.stdin.removeListener('keypress', onKey);
-                                            if (process.stdin.isTTY) process.stdin.setRawMode(false);
-                                            process.stdout.write(c.showCursor);
-                                            console.log(`\n\nEnter new GCP Project ID (leave empty to reset):`);
-                                            const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-                                            const ans = await new Promise(r => rl.question('> ', r));
-                                            rl.close();
-                                            const trimmed = ans.trim();
-                                            if (trimmed && trimmed.toLowerCase() !== 'clear' && trimmed.toLowerCase() !== 'reset') {
-                                                customProj = trimmed;
-                                                saveConfig({ customProjectId: trimmed });
-                                                notice = `Saved Custom GCP Project ID: ${trimmed}`;
-                                            } else {
-                                                customProj = '';
-                                                saveConfig({ customProjectId: undefined });
-                                                notice = 'Reset to default automatic project routing';
-                                            }
-                                            if (process.stdin.isTTY) process.stdin.setRawMode(true);
-                                            process.stdout.write(c.hideCursor);
-                                            process.stdin.on('keypress', onKey);
+                                        if (selectedIdx === 0) {
+                                            isEditingProj = true;
+                                            projBuf = customProj;
+                                            notice = '';
                                             renderScreen();
                                             return;
                                         }
-
-                                        if (selectedIdx === 2) {
+                                        if (selectedIdx === 1) {
                                             customProj = '';
                                             saveConfig({ customProjectId: undefined });
-                                            notice = 'Reset to default automatic project routing';
+                                            notice = 'Reset to automatic default project routing';
                                             renderScreen();
                                             return;
                                         }
-
-                                        if (selectedIdx === 3) {
+                                        if (selectedIdx === 2) {
                                             process.stdin.removeListener('keypress', onKey);
                                             resolve();
-                                            return;
                                         }
                                     }
                                 }
 
+                                activeSubScreenRender = renderScreen;
                                 process.stdin.on('keypress', onKey);
                                 renderScreen();
                             });
 
-                            setStatus(`Custom GCP Project set to: ${customProj || 'Default'}.`, 2000);
+                            try {
+                                await fetch(`http://127.0.0.1:${port}/reload`, {
+                                    method: 'POST',
+                                    signal: AbortSignal.timeout(1500)
+                                });
+                            } catch {}
+                            setStatus(`Custom GCP Project set to: ${customProj || 'Default (auto)'}.`, 2000);
                         });
                         return;
                     }
@@ -1805,343 +2447,583 @@ export async function runInteractiveDashboard(options = {}) {
                             reloadConfig();
                             let claudeSettings = readClaudeSettings();
                             claudeSettings.env = claudeSettings.env || {};
-                            let selectedIdx = 0;
-                            let notice = '';
 
-                            function getItemsList() {
-                                const env = claudeSettings.env || {};
-                                const mm = config.modelMapping || {};
-                                const list = [];
+                            const MM_TABS = [
+                                { id: 'slots', num: 1, title: 'Claude Code Slots' },
+                                { id: 'aliases', num: 2, title: 'Custom Aliases' },
+                                { id: 'presets', num: 3, title: 'Quick Presets' }
+                            ];
 
-                                // Section 1: Claude Code Essential Model Slots
-                                list.push({
-                                    type: 'header',
-                                    label: 'Claude Code Model Slots (Fake ID → Google Backend Model)',
-                                    id: 'hdr_env'
-                                });
-
-                                const envDefs = [
-                                    { key: 'ANTHROPIC_MODEL', label: 'Main Model (ANTHROPIC_MODEL)', def: 'claude-sonnet-5-5', defTgt: 'gemini-3.8-flash-high' },
-                                    { key: 'CLAUDE_CODE_SUBAGENT_MODEL', label: 'Subagent Model (CLAUDE_CODE_SUBAGENT)', def: 'claude-haiku-5-5', defTgt: 'gemini-3.1-flash-lite' },
-                                    { key: 'ANTHROPIC_DEFAULT_OPUS_MODEL', label: 'Opus Override (ANTHROPIC_DEFAULT_OPUS)', def: 'claude-opus-5-5', defTgt: 'gemini-3.8-pro' },
-                                    { key: 'ANTHROPIC_DEFAULT_SONNET_MODEL', label: 'Sonnet Override (ANTHROPIC_DEFAULT_SONNET)', def: 'claude-sonnet-5-5', defTgt: 'gemini-3.8-flash-high' },
-                                    { key: 'ANTHROPIC_DEFAULT_HAIKU_MODEL', label: 'Haiku Override (ANTHROPIC_DEFAULT_HAIKU)', def: 'claude-haiku-5-5', defTgt: 'gemini-3.1-flash-lite' }
-                                ];
-
-                                for (const ed of envDefs) {
-                                    const curVal = env[ed.key] || ed.def;
-                                    const tgt = getMappingTarget(mm, curVal) || ed.defTgt;
-                                    list.push({
-                                        type: 'env_var',
-                                        id: ed.key,
-                                        envKey: ed.key,
-                                        label: ed.label,
-                                        val: curVal,
-                                        target: tgt,
-                                        desc: `Press Enter to set Fake Model ID & Google Backend Target for ${ed.key}`
-                                    });
+                            const SLOT_DEFS = [
+                                {
+                                    envKey: 'ANTHROPIC_MODEL',
+                                    shortLabel: 'Main Model',
+                                    defClient: 'claude-sonnet-5-5',
+                                    defBackend: 'gemini-3.8-flash-high',
+                                    desc: 'Primary interactive model slot (ANTHROPIC_MODEL in ~/.claude/settings.json)'
+                                },
+                                {
+                                    envKey: 'CLAUDE_CODE_SUBAGENT_MODEL',
+                                    shortLabel: 'Subagent Model',
+                                    defClient: 'claude-haiku-5-5',
+                                    defBackend: 'gemini-3.1-flash-lite',
+                                    desc: 'Background subagent & search worker slot (CLAUDE_CODE_SUBAGENT_MODEL)'
+                                },
+                                {
+                                    envKey: 'ANTHROPIC_DEFAULT_OPUS_MODEL',
+                                    shortLabel: 'Opus Tier Slot',
+                                    defClient: 'claude-opus-5-5',
+                                    defBackend: 'gemini-3.8-pro',
+                                    desc: 'Deep reasoning / architecture tier override (ANTHROPIC_DEFAULT_OPUS_MODEL)'
+                                },
+                                {
+                                    envKey: 'ANTHROPIC_DEFAULT_SONNET_MODEL',
+                                    shortLabel: 'Sonnet Tier Slot',
+                                    defClient: 'claude-sonnet-5-5',
+                                    defBackend: 'gemini-3.8-flash-high',
+                                    desc: 'Balanced coding tier override (ANTHROPIC_DEFAULT_SONNET_MODEL)'
+                                },
+                                {
+                                    envKey: 'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+                                    shortLabel: 'Haiku Tier Slot',
+                                    defClient: 'claude-haiku-5-5',
+                                    defBackend: 'gemini-3.1-flash-lite',
+                                    desc: 'Fast lightweight helper tier override (ANTHROPIC_DEFAULT_HAIKU_MODEL)'
                                 }
+                            ];
 
-                                // Section 2: Custom Fake IDs (Only non-default custom mappings)
-                                list.push({
-                                    type: 'header',
-                                    label: 'Custom Fake Model Mappings',
-                                    id: 'hdr_custom'
-                                });
+                            const STANDARD_SLOT_IDS = new Set([
+                                'claude-opus-5-5',
+                                'claude-sonnet-5-5',
+                                'claude-haiku-5-5'
+                            ]);
 
-                                list.push({
-                                    type: 'action',
-                                    id: 'add_fake',
-                                    label: '+ Register Custom Fake Model (e.g. gpt-6-sol → gemini-2.5-flash)',
-                                    desc: 'Map any arbitrary Fake ID client requests to a target Google Gemini model'
-                                });
-
-                                const registeredKeys = Object.keys(mm);
-                                const standardKeys = new Set(['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5']);
-                                for (const rk of registeredKeys) {
-                                    if (!standardKeys.has(rk)) {
-                                        const tgt = typeof mm[rk] === 'object' ? (mm[rk].mapping || 'gemini-3.8-flash-high') : mm[rk];
-                                        list.push({
-                                            type: 'custom_item',
-                                            id: `custom_${rk}`,
-                                            fakeId: rk,
-                                            target: tgt,
-                                            label: `Custom: [${rk}]`,
-                                            desc: `Maps "${rk}" → Google "${tgt}". Press Enter to change target or remove.`
-                                        });
+                            function getBackendCatalog() {
+                                const core = [
+                                    'gemini-3.8-flash-high',
+                                    'gemini-3.8-pro',
+                                    'gemini-2.5-flash',
+                                    'gemini-2.5-pro',
+                                    'gemini-3.1-flash-lite'
+                                ];
+                                const discovered = new Set(core);
+                                for (const acc of accountsData.accounts || []) {
+                                    for (const mId of Object.keys(acc.quota?.models || {})) {
+                                        if (mId && !mId.startsWith('chat_')) discovered.add(mId);
                                     }
                                 }
+                                return Array.from(discovered);
+                            }
 
-                                // Section 3: Presets & Actions
-                                list.push({
-                                    type: 'header',
-                                    label: 'Quick Presets & Maintenance',
-                                    id: 'hdr_actions'
-                                });
+                            let tabIdx = 0;
+                            let rowIdx = 0;
+                            let notice = '';
+                            /*
+                             * Inline 2-step editor state:
+                             * mode: null | 'edit_slot' | 'edit_alias' | 'new_alias'
+                             * step: 'client' | 'backend'
+                             */
+                            let editState = null;
 
-                                list.push({
-                                    type: 'action',
-                                    id: 'preset_flex',
-                                    label: '✨ Flex Mode (Claude 3.7 Sonnet & Claude 3 Opus signatures)',
-                                    desc: 'Fakes flagship Anthropic models (Claude 3.7 Sonnet) backed by Gemini Pro & Flash'
-                                });
-                                list.push({
-                                    type: 'action',
-                                    id: 'preset_default',
-                                    label: 'Apply Default Balanced Setup (Sonnet 5.5 & Haiku 5.5)',
-                                    desc: 'Default fast setup: Flash-High for main/sonnet/opus, Flash-Lite for subagents'
-                                });
-                                list.push({
-                                    type: 'action',
-                                    id: 'clean',
-                                    label: 'Clean All Custom Model Overrides',
-                                    desc: 'Remove all custom model environment variables from ~/.claude/settings.json'
-                                });
-                                list.push({
-                                    type: 'action',
-                                    id: 'save',
-                                    label: 'Save & Return to Dashboard',
-                                    desc: 'Return to main dashboard'
-                                });
-
+                            function getCustomAliasEntries() {
+                                const mm = config.modelMapping || {};
+                                const slotVals = new Set(
+                                    SLOT_DEFS.map((sd) => (claudeSettings.env || {})[sd.envKey] || sd.defClient)
+                                );
+                                const list = [];
+                                for (const [alias, raw] of Object.entries(mm)) {
+                                    if (STANDARD_SLOT_IDS.has(alias) && slotVals.has(alias)) continue;
+                                    const target = typeof raw === 'object' ? (raw.mapping || 'gemini-3.8-flash-high') : String(raw);
+                                    list.push({ alias, target });
+                                }
                                 return list;
                             }
 
+                            function buildTabRows() {
+                                const curTab = MM_TABS[tabIdx].id;
+                                const env = claudeSettings.env || {};
+                                const mm = config.modelMapping || {};
+
+                                if (curTab === 'slots') {
+                                    const rows = SLOT_DEFS.map((sd) => {
+                                        const clientVal = env[sd.envKey] || sd.defClient;
+                                        const backendVal = getMappingTarget(mm, clientVal) || sd.defBackend;
+                                        return {
+                                            type: 'slot',
+                                            envKey: sd.envKey,
+                                            label: sd.shortLabel,
+                                            clientModel: clientVal,
+                                            backendModel: backendVal,
+                                            desc: `${sd.desc} — [←/→] cycle backend, [Enter] edit client ID & backend inline`
+                                        };
+                                    });
+                                    rows.push({
+                                        type: 'action',
+                                        id: 'save_exit',
+                                        label: 'Save & Return to Dashboard',
+                                        desc: 'Sync model mappings with proxy daemon and return to main dashboard'
+                                    });
+                                    return rows;
+                                }
+
+                                if (curTab === 'aliases') {
+                                    const aliases = getCustomAliasEntries();
+                                    const rows = aliases.map((entry) => ({
+                                        type: 'alias',
+                                        alias: entry.alias,
+                                        backendModel: entry.target,
+                                        desc: `Routes client requests for "${entry.alias}" to Google "${entry.target}" — [←/→] change backend, [Enter] edit, [D] delete`
+                                    }));
+                                    if (editState?.mode === 'new_alias') {
+                                        rows.push({
+                                            type: 'new_alias_draft',
+                                            alias: editState.clientBuf,
+                                            backendModel: editState.backendBuf,
+                                            desc: 'Type custom client alias ID, press Enter to choose Google backend, Enter again to save'
+                                        });
+                                    }
+                                    rows.push({
+                                        type: 'action',
+                                        id: 'add_alias',
+                                        label: '+ Register New Custom Model Alias... [N]',
+                                        desc: 'Map any custom client model name (e.g. gpt-5-codex, claude-sonnet-4-5) to a Google backend model'
+                                    });
+                                    rows.push({
+                                        type: 'action',
+                                        id: 'save_exit',
+                                        label: 'Save & Return to Dashboard',
+                                        desc: 'Sync model mappings with proxy daemon and return to main dashboard'
+                                    });
+                                    return rows;
+                                }
+
+                                return [
+                                    {
+                                        type: 'preset',
+                                        id: 'preset_default',
+                                        label: 'Balanced Default Setup',
+                                        summary: 'Sonnet 5.5 -> 3.8-Flash-High | Opus 5.5 -> 3.8-Pro',
+                                        desc: 'Recommended everyday coding setup: Flash-High for main/sonnet, 3.8-Pro for Opus, Flash-Lite for subagents'
+                                    },
+                                    {
+                                        type: 'preset',
+                                        id: 'preset_flex',
+                                        label: 'Flagship Flex Signatures',
+                                        summary: 'Claude 3.7 Sonnet & 3 Opus -> 3.8-Pro / Flash-High',
+                                        desc: 'Configures official Claude 3.7 Sonnet, 3.5 Haiku & 3 Opus model IDs backed by Gemini 3.8 Pro and Flash-High'
+                                    },
+                                    {
+                                        type: 'preset',
+                                        id: 'preset_pro',
+                                        label: 'Deep Reasoning Pro Setup',
+                                        summary: 'Main / Opus / Sonnet -> 3.8-Pro | Subagent -> Flash-High',
+                                        desc: 'Routes primary, Opus, and Sonnet tiers to Gemini 3.8 Pro for heavy architecture & debugging tasks'
+                                    },
+                                    {
+                                        type: 'preset',
+                                        id: 'clean_env',
+                                        label: 'Clear Claude Code Model Overrides',
+                                        summary: 'Remove model env vars from ~/.claude/settings.json',
+                                        desc: 'Deletes ANTHROPIC_MODEL and tier override keys from ~/.claude/settings.json while keeping proxy endpoint active'
+                                    },
+                                    {
+                                        type: 'action',
+                                        id: 'save_exit',
+                                        label: 'Save & Return to Dashboard',
+                                        desc: 'Sync model mappings with proxy daemon and return to main dashboard'
+                                    }
+                                ];
+                            }
+
+                            function saveSlotMapping(envKey, clientModel, backendModel) {
+                                claudeSettings.env = claudeSettings.env || {};
+                                claudeSettings.env[envKey] = clientModel;
+                                writeClaudeSettings(claudeSettings);
+
+                                const newMm = { ...(config.modelMapping || {}) };
+                                newMm[clientModel] = { mapping: backendModel };
+                                config.modelMapping = newMm;
+                                saveConfig({ modelMapping: newMm });
+                            }
+
+                            function saveCustomAlias(oldAlias, newAlias, backendModel) {
+                                const newMm = { ...(config.modelMapping || {}) };
+                                if (oldAlias && oldAlias !== newAlias) {
+                                    delete newMm[oldAlias];
+                                }
+                                newMm[newAlias] = { mapping: backendModel };
+                                config.modelMapping = newMm;
+                                saveConfig({ modelMapping: newMm });
+                            }
+
                             function renderScreen() {
-                                const list = getItemsList();
-                                let out = c.hideCursor + c.disableWrap + c.clearScreen + c.cursorHome;
-                                out += `${c.brandGreen}╭─────────────────────────────────────────────────────────────────╮${c.reset}\n`;
-                                out += `${c.brandGreen}│  Model Mappings & Fake ID Routing                               │${c.reset}\n`;
-                                out += `${c.brandGreen}╰─────────────────────────────────────────────────────────────────╯${c.reset}\n\n`;
+                                const rows = buildTabRows();
+                                if (rowIdx >= rows.length) rowIdx = Math.max(0, rows.length - 1);
+                                const curTabId = MM_TABS[tabIdx].id;
+                                const aliasCount = getCustomAliasEntries().length;
 
-                                for (let i = 0; i < list.length; i++) {
-                                    const it = list[i];
-                                    const isSel = i === selectedIdx;
+                                let out = c.cursorHome;
+                                out += drawHeaderBox('Model Mappings, Claude Code Slots & Alias Routing', 76);
 
-                                    if (it.type === 'header') {
-                                        out += `\x1b[1;38;5;110m${it.label}${c.reset}${c.clearToEndOfLine}\n`;
-                                        continue;
-                                    }
+                                let tabBar = '  ';
+                                MM_TABS.forEach((t, idx) => {
+                                    const badgeCount = t.id === 'slots' ? SLOT_DEFS.length : (t.id === 'aliases' ? aliasCount : 4);
+                                    const isAct = idx === tabIdx;
+                                    const pill = isAct
+                                        ? `\x1b[1;38;5;16;48;5;48m ${t.num}. ${t.title} (${badgeCount}) \x1b[0m`
+                                        : `\x1b[38;5;249;48;5;236m ${t.num}. ${t.title} (${badgeCount}) \x1b[0m`;
+                                    tabBar += pill + ' ';
+                                });
+                                out += `${tabBar}${c.clearToEndOfLine}\n`;
+                                out += `  \x1b[38;5;238m${'─'.repeat(76)}\x1b[0m${c.clearToEndOfLine}\n`;
 
-                                    const pointer = isSel ? `  \x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
-                                    let line = '';
-
-                                    if (it.type === 'env_var') {
-                                        const tgtTag = it.target ? ` \x1b[38;5;245m→\x1b[0m \x1b[1;38;5;51m[${it.target}]\x1b[0m` : '';
-                                        line = isSel
-                                            ? `\x1b[1;38;5;255m${it.label}:\x1b[0m \x1b[1;38;5;120m[${it.val}]\x1b[0m${tgtTag}`
-                                            : `\x1b[38;5;250m${it.label}:\x1b[0m \x1b[38;5;147m[${it.val}]\x1b[0m${tgtTag}`;
-                                    } else if (it.type === 'custom_item') {
-                                        const tgtTag = ` \x1b[38;5;245m→\x1b[0m \x1b[1;38;5;51m[${it.target}]\x1b[0m`;
-                                        line = isSel
-                                            ? `\x1b[1;38;5;255m${it.label}\x1b[0m${tgtTag}`
-                                            : `\x1b[38;5;250m${it.label}\x1b[0m${tgtTag}`;
-                                    } else {
-                                        line = isSel
-                                            ? `\x1b[1;38;5;255m${it.label}${c.reset}`
-                                            : `\x1b[38;5;248m${it.label}${c.reset}`;
-                                    }
-
-                                    out += `${pointer}${line}${c.clearToEndOfLine}\n`;
-                                }
-
-                                out += `\n`;
-                                const curIt = list[selectedIdx] || {};
-                                if (notice) {
-                                    out += `${c.statusWarn}ℹ ${notice}${c.reset}${c.clearToEndOfLine}\n`;
+                                if (curTabId === 'slots') {
+                                    out += `    \x1b[38;5;242m${'Slot'.padEnd(20, ' ')}  ${'Client Model ID'.padEnd(28, ' ')}  Google Backend Engine\x1b[0m${c.clearToEndOfLine}\n`;
+                                } else if (curTabId === 'aliases') {
+                                    out += `    \x1b[38;5;242m${'Client Alias ID'.padEnd(32, ' ')}     Google Backend Engine\x1b[0m${c.clearToEndOfLine}\n`;
                                 } else {
-                                    out += `${c.textMuted}Details:${c.reset} ${c.textNormal}${curIt.desc || ''}${c.reset}${c.clearToEndOfLine}\n`;
+                                    out += `    \x1b[38;5;242m${'Preset Action'.padEnd(34, ' ')}  Target Routing Profile\x1b[0m${c.clearToEndOfLine}\n`;
                                 }
 
-                                out += `${c.textMuted}↑↓ Move | Enter Select/Edit | Ctrl+R Reload | ESC Return${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
+                                /* Keep table height bounded inside small terminals */
+                                const maxDataRows = 8;
+                                const actionStartIdx = rows.findIndex((r) => r.type === 'action');
+                                const dataRows = actionStartIdx === -1 ? rows : rows.slice(0, actionStartIdx);
+                                const actionRows = actionStartIdx === -1 ? [] : rows.slice(actionStartIdx);
+
+                                let winStart = 0;
+                                if (dataRows.length > maxDataRows && rowIdx < actionStartIdx) {
+                                    winStart = Math.max(0, Math.min(rowIdx - Math.floor(maxDataRows / 2), dataRows.length - maxDataRows));
+                                }
+                                const visibleData = dataRows.slice(winStart, winStart + maxDataRows);
+
+                                if (curTabId === 'aliases' && dataRows.length === 0) {
+                                    out += `    \x1b[38;5;243mNo custom model aliases configured yet. Press [N] to register one.\x1b[0m${c.clearToEndOfLine}\n`;
+                                }
+
+                                for (let v = 0; v < visibleData.length; v++) {
+                                    const realIdx = winStart + v;
+                                    const r = visibleData[v];
+                                    const isSel = realIdx === rowIdx;
+                                    const pointer = isSel ? `  \x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
+
+                                    if (r.type === 'slot') {
+                                        const isEditingThis = isSel && editState?.mode === 'edit_slot';
+                                        const col1Plain = padEndVisible(r.label, 20);
+                                        const col1 = isSel ? `\x1b[1;38;5;255m${col1Plain}\x1b[0m` : `\x1b[38;5;250m${col1Plain}\x1b[0m`;
+
+                                        let col2Raw = `[${truncateVisible(r.clientModel, 24)}]`;
+                                        let col2Styled = isSel ? `\x1b[1;38;5;120m${col2Raw}\x1b[0m` : `\x1b[38;5;147m${col2Raw}\x1b[0m`;
+                                        if (isEditingThis && editState.step === 'client') {
+                                            col2Raw = `[ ${truncateVisible(editState.clientBuf, 22)}_ ]`;
+                                            col2Styled = `\x1b[1;38;5;226;48;5;236m${col2Raw}\x1b[0m`;
+                                        }
+                                        const col2Pad = ' '.repeat(Math.max(1, 28 - col2Raw.length));
+
+                                        let col3Styled = `\x1b[38;5;242m→\x1b[0m \x1b[1;38;5;51m[${r.backendModel}]\x1b[0m`;
+                                        if (isEditingThis && editState.step === 'backend') {
+                                            col3Styled = `\x1b[38;5;242m→\x1b[0m \x1b[1;38;5;226;48;5;236m[ ${editState.backendBuf}_ ]\x1b[0m`;
+                                        }
+
+                                        out += `${pointer}${col1}  ${col2Styled}${col2Pad}${col3Styled}${c.clearToEndOfLine}\n`;
+                                    } else if (r.type === 'alias' || r.type === 'new_alias_draft') {
+                                        const isEditingThis = isSel && (editState?.mode === 'edit_alias' || editState?.mode === 'new_alias');
+                                        let col1Raw = `[${truncateVisible(r.alias || 'new-alias', 28)}]`;
+                                        let col1Styled = isSel ? `\x1b[1;38;5;255m${col1Raw}\x1b[0m` : `\x1b[38;5;147m${col1Raw}\x1b[0m`;
+                                        if (isEditingThis && editState.step === 'client') {
+                                            col1Raw = `[ ${truncateVisible(editState.clientBuf, 26)}_ ]`;
+                                            col1Styled = `\x1b[1;38;5;226;48;5;236m${col1Raw}\x1b[0m`;
+                                        }
+                                        const col1Pad = ' '.repeat(Math.max(2, 33 - col1Raw.length));
+
+                                        let col2Styled = `\x1b[38;5;242m→\x1b[0m  \x1b[1;38;5;51m[${r.backendModel}]\x1b[0m`;
+                                        if (isEditingThis && editState.step === 'backend') {
+                                            col2Styled = `\x1b[38;5;242m→\x1b[0m  \x1b[1;38;5;226;48;5;236m[ ${editState.backendBuf}_ ]\x1b[0m`;
+                                        }
+
+                                        out += `${pointer}${col1Styled}${col1Pad}${col2Styled}${c.clearToEndOfLine}\n`;
+                                    } else if (r.type === 'preset') {
+                                        const col1Plain = padEndVisible(r.label, 34);
+                                        const col1 = isSel ? `\x1b[1;38;5;255m${col1Plain}\x1b[0m` : `\x1b[38;5;250m${col1Plain}\x1b[0m`;
+                                        out += `${pointer}${col1}  \x1b[38;5;244m${r.summary}\x1b[0m${c.clearToEndOfLine}\n`;
+                                    }
+                                }
+
+                                if (dataRows.length > maxDataRows) {
+                                    out += `    \x1b[38;5;241mShowing ${winStart + 1}–${Math.min(dataRows.length, winStart + maxDataRows)} of ${dataRows.length} entries\x1b[0m${c.clearToEndOfLine}\n`;
+                                }
+
+                                out += `  \x1b[38;5;238m${'─'.repeat(76)}\x1b[0m${c.clearToEndOfLine}\n`;
+                                for (let a = 0; a < actionRows.length; a++) {
+                                    const realIdx = actionStartIdx + a;
+                                    const act = actionRows[a];
+                                    const isSel = realIdx === rowIdx;
+                                    const pointer = isSel ? `  \x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
+                                    const col = act.id === 'save_exit'
+                                        ? (isSel ? '\x1b[1;38;5;120m' : '\x1b[38;5;42m')
+                                        : (isSel ? '\x1b[1;38;5;255m' : '\x1b[38;5;248m');
+                                    out += `${pointer}${col}${act.label}${c.reset}${c.clearToEndOfLine}\n`;
+                                }
+
+                                const curRow = rows[rowIdx];
+                                const wrapCols = Math.max(58, Math.min((process.stdout.columns || 88) - 6, 76));
+                                out += `\n`;
+                                if (editState) {
+                                    const stepMsg = editState.step === 'client'
+                                        ? 'Step 1/2: Type Client / Alias Model ID and press [Enter] (or [ESC] to cancel)'
+                                        : 'Step 2/2: Use [←/→] to pick a Google Backend or type custom model ID, then press [Enter]';
+                                    out += `  \x1b[1;38;5;220m✎ ${stepMsg}\x1b[0m${c.clearToEndOfLine}\n`;
+                                } else if (notice) {
+                                    out += `  \x1b[38;5;120m✓ ${notice}\x1b[0m${c.clearToEndOfLine}\n`;
+                                } else if (curRow?.desc) {
+                                    for (const dl of wrapPlainText(curRow.desc, wrapCols)) {
+                                        out += `  ${c.textMuted}Info:${c.reset} ${c.textNormal}${dl}${c.reset}${c.clearToEndOfLine}\n`;
+                                    }
+                                }
+
+                                if (editState) {
+                                    out += `  ${c.textMuted}Type Model ID  ·  [←/→] Cycle Backend (Step 2)  ·  [Enter] Confirm  ·  [ESC] Cancel${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
+                                } else if (curTabId === 'aliases') {
+                                    out += `  ${c.textMuted}[Tab / 1-3] Tab  ·  [↑↓] Move  ·  [←/→] Change Backend  ·  [N] New  ·  [D] Delete  ·  [ESC] Exit${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
+                                } else {
+                                    out += `  ${c.textMuted}[Tab / 1-3] Switch Tab  ·  [↑↓] Move  ·  [←/→ / Space] Change Backend  ·  [Enter] Edit  ·  [ESC] Exit${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
+                                }
+
                                 process.stdout.write(out);
                             }
 
                             await new Promise((resolve) => {
-                                if (process.stdin.isTTY) process.stdin.setRawMode(true);
-                                readline.emitKeypressEvents(process.stdin);
+                                function cycleBackendValue(currentBackend, dir) {
+                                    const catalog = getBackendCatalog();
+                                    const curPos = catalog.indexOf(currentBackend);
+                                    if (curPos === -1) return catalog[0];
+                                    return catalog[(curPos + dir + catalog.length) % catalog.length];
+                                }
 
-                                async function onKey(str, key) {
+                                function onKey(str, key) {
                                     if (!key) return;
+
+                                    if (editState) {
+                                        if (key.name === 'escape') {
+                                            editState = null;
+                                            notice = 'Cancelled inline edit.';
+                                            renderScreen();
+                                            return;
+                                        }
+                                        if (editState.step === 'backend' && (key.name === 'left' || key.name === 'right')) {
+                                            const dir = key.name === 'right' ? 1 : -1;
+                                            editState.backendBuf = cycleBackendValue(editState.backendBuf.trim(), dir);
+                                            renderScreen();
+                                            return;
+                                        }
+                                        if (key.name === 'backspace') {
+                                            if (editState.step === 'client') {
+                                                editState.clientBuf = editState.clientBuf.slice(0, -1);
+                                            } else {
+                                                editState.backendBuf = editState.backendBuf.slice(0, -1);
+                                            }
+                                            renderScreen();
+                                            return;
+                                        }
+                                        if (key.name === 'return' || key.name === 'enter') {
+                                            if (editState.step === 'client') {
+                                                const cleanedClient = editState.clientBuf.trim();
+                                                if (!cleanedClient) {
+                                                    notice = 'Client Model ID cannot be empty.';
+                                                    editState = null;
+                                                    renderScreen();
+                                                    return;
+                                                }
+                                                editState.clientBuf = cleanedClient;
+                                                editState.step = 'backend';
+                                                renderScreen();
+                                                return;
+                                            }
+
+                                            const finalClient = editState.clientBuf.trim();
+                                            const finalBackend = editState.backendBuf.trim() || 'gemini-3.8-flash-high';
+                                            if (editState.mode === 'edit_slot') {
+                                                saveSlotMapping(editState.envKey, finalClient, finalBackend);
+                                                notice = `Updated ${editState.envKey}: [${finalClient}] -> [${finalBackend}]`;
+                                            } else {
+                                                saveCustomAlias(editState.origAlias || null, finalClient, finalBackend);
+                                                notice = `Saved custom alias: [${finalClient}] -> [${finalBackend}]`;
+                                            }
+                                            editState = null;
+                                            renderScreen();
+                                            return;
+                                        }
+                                        if (str && str.length === 1 && !key.ctrl && !key.meta) {
+                                            if (editState.step === 'client' && editState.clientBuf.length < 44) {
+                                                editState.clientBuf += str;
+                                                renderScreen();
+                                            } else if (editState.step === 'backend' && editState.backendBuf.length < 44) {
+                                                editState.backendBuf += str;
+                                                renderScreen();
+                                            }
+                                        }
+                                        return;
+                                    }
 
                                     if (key.ctrl && key.name === 'r') {
                                         reloadConfig();
                                         claudeSettings = readClaudeSettings();
                                         claudeSettings.env = claudeSettings.env || {};
-                                        process.stdout.write(c.clearScreen + c.cursorHome);
-                                        notice = 'Model Mappings reloaded from disk.';
+                                        notice = 'Reloaded model mappings from disk.';
                                         renderScreen();
                                         return;
                                     }
 
-                                    if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
+                                    if (key.name === 'escape' || key.name === 'q' || (key.ctrl && key.name === 'c')) {
                                         process.stdin.removeListener('keypress', onKey);
                                         resolve();
                                         return;
                                     }
 
-                                    const list = getItemsList();
+                                    if (key.name === 'tab') {
+                                        notice = '';
+                                        tabIdx = (tabIdx + (key.shift ? -1 : 1) + MM_TABS.length) % MM_TABS.length;
+                                        rowIdx = 0;
+                                        process.stdout.write(c.clearScreen + c.cursorHome);
+                                        renderScreen();
+                                        return;
+                                    }
+
+                                    if (!key.ctrl && !key.meta && ['1', '2', '3'].includes(str)) {
+                                        notice = '';
+                                        tabIdx = parseInt(str, 10) - 1;
+                                        rowIdx = 0;
+                                        process.stdout.write(c.clearScreen + c.cursorHome);
+                                        renderScreen();
+                                        return;
+                                    }
+
+                                    const rows = buildTabRows();
 
                                     if (key.name === 'up' || key.name === 'k') {
                                         notice = '';
-                                        let next = selectedIdx - 1;
-                                        while (next >= 0 && list[next]?.type === 'header') next--;
-                                        if (next < 0) next = list.length - 1;
-                                        while (next >= 0 && list[next]?.type === 'header') next--;
-                                        selectedIdx = next;
+                                        rowIdx = (rowIdx - 1 + rows.length) % rows.length;
                                         renderScreen();
                                         return;
                                     }
 
                                     if (key.name === 'down' || key.name === 'j') {
                                         notice = '';
-                                        let next = selectedIdx + 1;
-                                        while (next < list.length && list[next]?.type === 'header') next++;
-                                        if (next >= list.length) next = 0;
-                                        while (next < list.length && list[next]?.type === 'header') next++;
-                                        selectedIdx = next;
+                                        rowIdx = (rowIdx + 1) % rows.length;
+                                        renderScreen();
+                                        return;
+                                    }
+
+                                    const curRow = rows[rowIdx];
+
+                                    if (key.name === 'left' || key.name === 'right' || key.name === 'space') {
+                                        const dir = key.name === 'left' ? -1 : 1;
+                                        if (curRow?.type === 'slot') {
+                                            const nextBackend = cycleBackendValue(curRow.backendModel, dir);
+                                            saveSlotMapping(curRow.envKey, curRow.clientModel, nextBackend);
+                                            notice = `${curRow.label}: [${curRow.clientModel}] -> [${nextBackend}]`;
+                                            renderScreen();
+                                            return;
+                                        }
+                                        if (curRow?.type === 'alias') {
+                                            const nextBackend = cycleBackendValue(curRow.backendModel, dir);
+                                            saveCustomAlias(curRow.alias, curRow.alias, nextBackend);
+                                            notice = `Alias [${curRow.alias}] -> [${nextBackend}]`;
+                                            renderScreen();
+                                            return;
+                                        }
+                                    }
+
+                                    if (!key.ctrl && !key.meta && key.name === 'n') {
+                                        tabIdx = 1;
+                                        editState = {
+                                            mode: 'new_alias',
+                                            step: 'client',
+                                            clientBuf: '',
+                                            backendBuf: 'gemini-3.8-flash-high'
+                                        };
+                                        const aliasRows = buildTabRows();
+                                        rowIdx = Math.max(0, aliasRows.findIndex((r) => r.type === 'new_alias_draft'));
+                                        process.stdout.write(c.clearScreen + c.cursorHome);
+                                        renderScreen();
+                                        return;
+                                    }
+
+                                    if (!key.ctrl && !key.meta && (key.name === 'd' || key.name === 'delete') && curRow?.type === 'alias') {
+                                        const newMm = { ...(config.modelMapping || {}) };
+                                        delete newMm[curRow.alias];
+                                        config.modelMapping = newMm;
+                                        saveConfig({ modelMapping: newMm });
+                                        notice = `Removed custom alias [${curRow.alias}]`;
+                                        rowIdx = Math.max(0, rowIdx - 1);
+                                        process.stdout.write(c.clearScreen + c.cursorHome);
                                         renderScreen();
                                         return;
                                     }
 
                                     if (key.name === 'return' || key.name === 'enter') {
-                                        const curIt = list[selectedIdx];
-                                        if (!curIt || curIt.type === 'header') return;
+                                        if (!curRow) return;
 
-                                        // Click on an Env Var Slot (e.g. ANTHROPIC_MODEL)
-                                        if (curIt.type === 'env_var') {
-                                            process.stdin.removeListener('keypress', onKey);
-                                            if (process.stdin.isTTY) process.stdin.setRawMode(false);
-                                            process.stdout.write(c.clearScreen + c.cursorHome + c.enableWrap + c.showCursor);
+                                        if (curRow.type === 'slot') {
+                                            editState = {
+                                                mode: 'edit_slot',
+                                                step: 'client',
+                                                envKey: curRow.envKey,
+                                                clientBuf: curRow.clientModel,
+                                                backendBuf: curRow.backendModel
+                                            };
+                                            renderScreen();
+                                            return;
+                                        }
 
-                                            console.log(`Configure ${curIt.label}:`);
-                                            console.log(`Current: Fake ID = [${curIt.val}] → Google Backend = [${curIt.target}]\n`);
+                                        if (curRow.type === 'alias') {
+                                            editState = {
+                                                mode: 'edit_alias',
+                                                step: 'client',
+                                                origAlias: curRow.alias,
+                                                clientBuf: curRow.alias,
+                                                backendBuf: curRow.backendModel
+                                            };
+                                            renderScreen();
+                                            return;
+                                        }
 
-                                            const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-                                            console.log(`Step 1: Enter Fake Model ID (what Claude Code sends, e.g. claude-sonnet-5-5, gpt-6-sol):`);
-                                            const fakeAns = await new Promise(r => rl.question(`[default: ${curIt.val}] > `, r));
-                                            const finalFake = fakeAns.trim() || curIt.val;
+                                        if (curRow.id === 'add_alias') {
+                                            editState = {
+                                                mode: 'new_alias',
+                                                step: 'client',
+                                                clientBuf: '',
+                                                backendBuf: 'gemini-3.8-flash-high'
+                                            };
+                                            const updated = buildTabRows();
+                                            rowIdx = Math.max(0, updated.findIndex((r) => r.type === 'new_alias_draft'));
+                                            renderScreen();
+                                            return;
+                                        }
 
-                                            console.log(`\nStep 2: Choose Google Backend Model to execute:`);
-                                            console.log(`  1. gemini-3.8-flash-high (Fast & smart daily driver)`);
-                                            console.log(`  2. gemini-3.8-pro (Deep reasoning & coding)`);
-                                            console.log(`  3. gemini-2.5-flash (Standard high speed)`);
-                                            console.log(`  4. gemini-3.1-flash-lite (Ultra-fast, ideal for subagents)`);
-                                            console.log(`  Or type custom backend model name:`);
-                                            const backendAns = await new Promise(r => rl.question(`[default: ${curIt.target}] > `, r));
-                                            rl.close();
-
-                                            const bRaw = backendAns.trim();
-                                            let finalBackend = curIt.target;
-                                            if (bRaw === '1') finalBackend = 'gemini-3.8-flash-high';
-                                            else if (bRaw === '2') finalBackend = 'gemini-3.8-pro';
-                                            else if (bRaw === '3') finalBackend = 'gemini-2.5-flash';
-                                            else if (bRaw === '4') finalBackend = 'gemini-3.1-flash-lite';
-                                            else if (bRaw) finalBackend = bRaw;
-
-                                            // Save to Claude Code settings
+                                        if (curRow.id === 'preset_default') {
                                             claudeSettings.env = claudeSettings.env || {};
-                                            claudeSettings.env[curIt.envKey] = finalFake;
+                                            claudeSettings.env.ANTHROPIC_MODEL = 'claude-sonnet-5-5';
+                                            claudeSettings.env.ANTHROPIC_DEFAULT_OPUS_MODEL = 'claude-opus-5-5';
+                                            claudeSettings.env.ANTHROPIC_DEFAULT_SONNET_MODEL = 'claude-sonnet-5-5';
+                                            claudeSettings.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = 'claude-haiku-5-5';
+                                            claudeSettings.env.CLAUDE_CODE_SUBAGENT_MODEL = 'claude-haiku-5-5';
                                             writeClaudeSettings(claudeSettings);
 
-                                            // Register in atc modelMapping
-                                            const newMm = { ...(config.modelMapping || {}) };
-                                            newMm[finalFake] = { mapping: finalBackend };
+                                            const newMm = {
+                                                ...(config.modelMapping || {}),
+                                                'claude-opus-5-5': { mapping: 'gemini-3.8-pro' },
+                                                'claude-sonnet-5-5': { mapping: 'gemini-3.8-flash-high' },
+                                                'claude-haiku-5-5': { mapping: 'gemini-3.1-flash-lite' }
+                                            };
                                             config.modelMapping = newMm;
                                             saveConfig({ modelMapping: newMm });
-
-                                            notice = `Set ${curIt.envKey} = [${finalFake}] → [${finalBackend}]`;
-
-                                            process.stdout.write(c.clearScreen + c.cursorHome + c.disableWrap + c.hideCursor);
-                                            if (process.stdin.isTTY) process.stdin.setRawMode(true);
-                                            process.stdin.on('keypress', onKey);
+                                            notice = 'Applied Balanced Default Setup (Sonnet 5.5 -> Flash-High, Opus 5.5 -> 3.8-Pro)';
                                             renderScreen();
                                             return;
                                         }
 
-                                        // Click on "+ Register Custom Fake Model"
-                                        if (curIt.id === 'add_fake') {
-                                            process.stdin.removeListener('keypress', onKey);
-                                            if (process.stdin.isTTY) process.stdin.setRawMode(false);
-                                            process.stdout.write(c.clearScreen + c.cursorHome + c.enableWrap + c.showCursor);
-
-                                            console.log(`Register Custom Fake Model ID:`);
-                                            const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-                                            console.log(`Enter Fake Model ID (e.g. gpt-6-sol, my-custom-model, claude-opus-5.5):`);
-                                            const fAns = await new Promise(r => rl.question(`> `, r));
-
-                                            console.log(`\nChoose Google Backend Model to execute:`);
-                                            console.log(`  1. gemini-3.8-flash-high (Fast & smart)`);
-                                            console.log(`  2. gemini-3.8-pro (Deep reasoning)`);
-                                            console.log(`  3. gemini-2.5-flash (Standard flash)`);
-                                            console.log(`  4. gemini-3.1-flash-lite (Ultra-fast)`);
-                                            const bAns = await new Promise(r => rl.question(`[default: 1] > `, r));
-                                            rl.close();
-
-                                            const fakeId = fAns.trim();
-                                            let backend = 'gemini-3.8-flash-high';
-                                            const b = bAns.trim();
-                                            if (b === '2') backend = 'gemini-3.8-pro';
-                                            else if (b === '3') backend = 'gemini-2.5-flash';
-                                            else if (b === '4') backend = 'gemini-3.1-flash-lite';
-                                            else if (b && b !== '1') backend = b;
-
-                                            if (fakeId) {
-                                                const newMm = { ...(config.modelMapping || {}) };
-                                                newMm[fakeId] = { mapping: backend };
-                                                config.modelMapping = newMm;
-                                                saveConfig({ modelMapping: newMm });
-                                                notice = `Registered Fake Model [${fakeId}] → [${backend}]`;
-                                            }
-
-                                            process.stdout.write(c.clearScreen + c.cursorHome + c.disableWrap + c.hideCursor);
-                                            if (process.stdin.isTTY) process.stdin.setRawMode(true);
-                                            process.stdin.on('keypress', onKey);
-                                            renderScreen();
-                                            return;
-                                        }
-
-                                        // Click on a custom item
-                                        if (curIt.type === 'custom_item') {
-                                            process.stdin.removeListener('keypress', onKey);
-                                            if (process.stdin.isTTY) process.stdin.setRawMode(false);
-                                            process.stdout.write(c.clearScreen + c.cursorHome + c.enableWrap + c.showCursor);
-
-                                            console.log(`Manage Custom Fake Model: [${curIt.fakeId}] → [${curIt.target}]`);
-                                            console.log(`  1. Change Google Backend Target`);
-                                            console.log(`  2. Delete this Fake Model`);
-                                            console.log(`  3. Cancel`);
-
-                                            const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-                                            const ch = await new Promise(r => rl.question(`Choose [1-3]: `, r));
-
-                                            if (ch.trim() === '1') {
-                                                console.log(`\nEnter new Google Backend Model (e.g. gemini-3.8-flash-high, gemini-3.8-pro):`);
-                                                const nb = await new Promise(r => rl.question(`[default: ${curIt.target}] > `, r));
-                                                const finalB = nb.trim() || curIt.target;
-                                                const newMm = { ...(config.modelMapping || {}) };
-                                                newMm[curIt.fakeId] = { mapping: finalB };
-                                                config.modelMapping = newMm;
-                                                saveConfig({ modelMapping: newMm });
-                                                notice = `Updated [${curIt.fakeId}] → [${finalB}]`;
-                                            } else if (ch.trim() === '2') {
-                                                const newMm = { ...(config.modelMapping || {}) };
-                                                delete newMm[curIt.fakeId];
-                                                config.modelMapping = newMm;
-                                                saveConfig({ modelMapping: newMm });
-                                                notice = `Deleted Fake Model [${curIt.fakeId}]`;
-                                            }
-                                            rl.close();
-
-                                            process.stdout.write(c.clearScreen + c.cursorHome + c.disableWrap + c.hideCursor);
-                                            if (process.stdin.isTTY) process.stdin.setRawMode(true);
-                                            process.stdin.on('keypress', onKey);
-                                            renderScreen();
-                                            return;
-                                        }
-
-                                        // Preset: Flex Mode
-                                        if (curIt.id === 'preset_flex') {
+                                        if (curRow.id === 'preset_flex') {
                                             claudeSettings.env = claudeSettings.env || {};
                                             claudeSettings.env.ANTHROPIC_MODEL = 'claude-3-7-sonnet-20250219';
                                             claudeSettings.env.CLAUDE_CODE_SUBAGENT_MODEL = 'claude-3-5-haiku-20241022';
@@ -2151,6 +3033,7 @@ export async function runInteractiveDashboard(options = {}) {
                                             writeClaudeSettings(claudeSettings);
 
                                             const newMm = {
+                                                ...(config.modelMapping || {}),
                                                 'claude-3-7-sonnet-20250219': { mapping: 'gemini-3.8-flash-high' },
                                                 'claude-3-5-sonnet-20241022': { mapping: 'gemini-3.8-flash-high' },
                                                 'claude-3-opus-20240229': { mapping: 'gemini-3.8-pro' },
@@ -2161,15 +3044,14 @@ export async function runInteractiveDashboard(options = {}) {
                                             };
                                             config.modelMapping = newMm;
                                             saveConfig({ modelMapping: newMm });
-                                            notice = 'Applied Flex Mode: Claude 3.7 Sonnet & Claude 3 Opus!';
+                                            notice = 'Applied Flagship Flex Signatures (Claude 3.7 Sonnet & Claude 3 Opus)';
                                             renderScreen();
                                             return;
                                         }
 
-                                        // Preset: Default
-                                        if (curIt.id === 'preset_default') {
+                                        if (curRow.id === 'preset_pro') {
                                             claudeSettings.env = claudeSettings.env || {};
-                                            claudeSettings.env.ANTHROPIC_MODEL = 'claude-sonnet-5-5';
+                                            claudeSettings.env.ANTHROPIC_MODEL = 'claude-opus-5-5';
                                             claudeSettings.env.ANTHROPIC_DEFAULT_OPUS_MODEL = 'claude-opus-5-5';
                                             claudeSettings.env.ANTHROPIC_DEFAULT_SONNET_MODEL = 'claude-sonnet-5-5';
                                             claudeSettings.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = 'claude-haiku-5-5';
@@ -2177,47 +3059,55 @@ export async function runInteractiveDashboard(options = {}) {
                                             writeClaudeSettings(claudeSettings);
 
                                             const newMm = {
+                                                ...(config.modelMapping || {}),
                                                 'claude-opus-5-5': { mapping: 'gemini-3.8-pro' },
-                                                'claude-sonnet-5-5': { mapping: 'gemini-3.8-flash-high' },
-                                                'claude-haiku-5-5': { mapping: 'gemini-3.1-flash-lite' }
+                                                'claude-sonnet-5-5': { mapping: 'gemini-3.8-pro' },
+                                                'claude-haiku-5-5': { mapping: 'gemini-3.8-flash-high' }
                                             };
                                             config.modelMapping = newMm;
                                             saveConfig({ modelMapping: newMm });
-                                            notice = 'Applied default Fake Models setup (Sonnet 5.5, Haiku 5.5)';
+                                            notice = 'Applied Deep Reasoning Pro Setup (Main/Opus/Sonnet -> Gemini 3.8 Pro)';
                                             renderScreen();
                                             return;
                                         }
 
-                                        // Clean
-                                        if (curIt.id === 'clean') {
+                                        if (curRow.id === 'clean_env') {
                                             const keys = [
-                                                'ANTHROPIC_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL',
-                                                'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL',
-                                                'CLAUDE_CODE_SUBAGENT_MODEL', 'ANTHROPIC_CLAUDE_OPUS_MODEL',
+                                                'ANTHROPIC_MODEL',
+                                                'ANTHROPIC_DEFAULT_OPUS_MODEL',
+                                                'ANTHROPIC_DEFAULT_SONNET_MODEL',
+                                                'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+                                                'CLAUDE_CODE_SUBAGENT_MODEL',
+                                                'ANTHROPIC_CLAUDE_OPUS_MODEL',
                                                 'ANTHROPIC_CLAUDE_SONNET_MODEL'
                                             ];
                                             claudeSettings.env = claudeSettings.env || {};
-                                            keys.forEach(k => delete claudeSettings.env[k]);
+                                            keys.forEach((k) => delete claudeSettings.env[k]);
                                             writeClaudeSettings(claudeSettings);
-                                            notice = 'Cleaned all custom model variables from settings.json';
+                                            notice = 'Cleared model override environment variables from ~/.claude/settings.json';
                                             renderScreen();
                                             return;
                                         }
 
-                                        // Save
-                                        if (curIt.id === 'save') {
+                                        if (curRow.id === 'save_exit') {
                                             process.stdin.removeListener('keypress', onKey);
                                             resolve();
-                                            return;
                                         }
                                     }
                                 }
 
+                                activeSubScreenRender = renderScreen;
                                 process.stdin.on('keypress', onKey);
                                 renderScreen();
                             });
 
-                            setStatus('Model Mappings configuration updated.', 2000);
+                            try {
+                                await fetch(`http://127.0.0.1:${port}/reload`, {
+                                    method: 'POST',
+                                    signal: AbortSignal.timeout(1500)
+                                });
+                            } catch {}
+                            setStatus('Model Mappings synced with Claude Code & live proxy daemon.', 2200);
                         });
                         return;
                     }
@@ -2295,17 +3185,16 @@ export async function runInteractiveDashboard(options = {}) {
                             let selectedProblemIdx = 0;
 
                             function renderScreen() {
-                                let out = c.clearScreen + c.cursorHome;
-                                out += `${c.brandGreen}╭─────────────────────────────────────────────────────────────────╮${c.reset}\n`;
-                                out += `${c.brandGreen}│  Problem Accounts Diagnostics & Resolution                      │${c.reset}\n`;
-                                out += `${c.brandGreen}╰─────────────────────────────────────────────────────────────────╯${c.reset}\n\n`;
+                                let out = c.cursorHome;
+                                out += drawHeaderBox('Problem Accounts Diagnostics & Resolution', 76);
+                                out += `${c.clearToEndOfLine}\n`;
 
                                 if (problems.length === 0) {
-                                    out += `  \x1b[1;38;5;48m✓ All accounts are active and ready in pool.${c.reset}\n`;
-                                    out += `  ${c.textMuted}• ${accountsData.accounts.length} accounts configured for request routing.${c.reset}\n\n`;
-                                    out += `${c.textMuted}───────────────────────────────────────────────────────────────────${c.reset}\n`;
-                                    out += `${c.textMuted}Details:${c.reset} ${c.textNormal}All accounts are ready. Press Enter or ESC to return.${c.reset}\n`;
-                                    out += `${c.textMuted}Enter / ESC Return to Dashboard${c.reset}`;
+                                    out += `  \x1b[1;38;5;48m✓ All accounts are active and ready in pool.${c.reset}${c.clearToEndOfLine}\n`;
+                                    out += `  ${c.textMuted}• ${accountsData.accounts.length} accounts configured for request routing.${c.reset}${c.clearToEndOfLine}\n\n`;
+                                    out += `  \x1b[38;5;238m${'─'.repeat(76)}\x1b[0m${c.clearToEndOfLine}\n`;
+                                    out += `  ${c.textMuted}Details:${c.reset} ${c.textNormal}All accounts are ready. Press Enter or ESC to return.${c.reset}${c.clearToEndOfLine}\n`;
+                                    out += `  ${c.textMuted}[Enter / ESC] Return to Dashboard${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
                                     process.stdout.write(out);
                                     return;
                                 }
@@ -2337,16 +3226,13 @@ export async function runInteractiveDashboard(options = {}) {
                                 else if (curP.isLimited) fixAction = 'Account cooling down · Auto-recovers when quota resets';
                                 else if (curP.isDisabled) fixAction = 'Press T on Dashboard to re-enable account in pool';
 
-                                out += `\n${c.textMuted}───────────────────────────────────────────────────────────────────${c.reset}\n`;
-                                out += `${c.textMuted}Details:${c.reset} ${c.textNormal}${fixAction}${c.reset}${c.clearToEndOfLine}\n`;
-                                out += `${c.textMuted}↑↓ Move | Enter / ESC Return to Dashboard${c.reset}`;
+                                out += `\n  \x1b[38;5;238m${'─'.repeat(76)}\x1b[0m${c.clearToEndOfLine}\n`;
+                                out += `  ${c.textMuted}Details:${c.reset} ${c.textNormal}${fixAction}${c.reset}${c.clearToEndOfLine}\n`;
+                                out += `  ${c.textMuted}[↑↓] Move  ·  [Enter / ESC] Return to Dashboard${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
                                 process.stdout.write(out);
                             }
 
                             await new Promise((resolve) => {
-                                if (process.stdin.isTTY) process.stdin.setRawMode(true);
-                                readline.emitKeypressEvents(process.stdin);
-
                                 function onKey(str, key) {
                                     if (!key) return;
 
@@ -2371,6 +3257,7 @@ export async function runInteractiveDashboard(options = {}) {
                                     }
                                 }
 
+                                activeSubScreenRender = renderScreen;
                                 process.stdin.on('keypress', onKey);
                                 renderScreen();
                             });
@@ -2397,7 +3284,7 @@ export async function runInteractiveDashboard(options = {}) {
                             console.log(`\n${c.actionGreen}✓ Automatically returning to dashboard in 1.5s...${c.reset}`);
                             await new Promise(r => setTimeout(r, 1500));
                             setStatus('Account login completed.', 2000);
-                        });
+                        }, { lineMode: true });
                         return;
                     }
                 }
@@ -2436,7 +3323,7 @@ export async function runInteractiveDashboard(options = {}) {
                     console.log(`\n${c.actionGreen}✓ Re-authentication finished. Returning in 1.5s...${c.reset}`);
                     await new Promise(r => setTimeout(r, 1500));
                     setStatus(`Account ${accNum} re-authentication completed.`, 2000);
-                });
+                }, { lineMode: true });
             };
 
             const doToggleAccount = async (cur) => {
@@ -2463,7 +3350,7 @@ export async function runInteractiveDashboard(options = {}) {
                     } else {
                         setStatus('Account deletion cancelled.', 2000);
                     }
-                });
+                }, { lineMode: true });
             };
 
             const openAccountActionsMenu = async (cur) => {
@@ -2521,11 +3408,9 @@ export async function runInteractiveDashboard(options = {}) {
                     let selIdx = 0;
 
                     function renderMenu() {
-                        let out = c.clearScreen + c.cursorHome;
-                        out += `${c.brandGreen}╭─────────────────────────────────────────────────────────────────╮${c.reset}\n`;
-                        out += `${c.brandGreen}│  Manage Account ${String(accNum).padEnd(2, ' ')}                                              │${c.reset}\n`;
-                        out += `${c.brandGreen}╰─────────────────────────────────────────────────────────────────╯${c.reset}\n`;
-                        out += `  ${c.textMuted}Email:${c.reset} \x1b[1;38;5;255m${acc.email}${c.reset}${cur.isCurrent ? ` ${c.statusCurrent}[current]${c.reset}` : ''}\n\n`;
+                        let out = c.cursorHome;
+                        out += drawHeaderBox(`Manage Account #${accNum}`, 76);
+                        out += `  ${c.textMuted}Email:${c.reset} \x1b[1;38;5;255m${acc.email}${c.reset}${cur.isCurrent ? ` ${c.statusCurrent}[current]${c.reset}` : ''}${c.clearToEndOfLine}\n\n`;
 
                         for (let i = 0; i < menuItems.length; i++) {
                             const mi = menuItems[i];
@@ -2546,16 +3431,13 @@ export async function runInteractiveDashboard(options = {}) {
                         }
 
                         const curMi = menuItems[selIdx];
-                        out += `\n${c.textMuted}───────────────────────────────────────────────────────────────────${c.reset}\n`;
-                        out += `${c.textMuted}Details:${c.reset} ${c.textNormal}${curMi.desc}${c.reset}${c.clearToEndOfLine}\n`;
-                        out += `${c.textMuted}[↑↓] Move  ·  [Enter] Run Action  ·  [R/T/V/D] Direct Shortcut  ·  [ESC] Back${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
+                        out += `\n  \x1b[38;5;238m${'─'.repeat(76)}\x1b[0m${c.clearToEndOfLine}\n`;
+                        out += `  ${c.textMuted}Details:${c.reset} ${c.textNormal}${curMi.desc}${c.reset}${c.clearToEndOfLine}\n`;
+                        out += `  ${c.textMuted}[↑↓] Move  ·  [Enter] Run Action  ·  [R/T/V/D] Direct Shortcut  ·  [ESC] Back${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
                         process.stdout.write(out);
                     }
 
                     await new Promise((resolve) => {
-                        if (process.stdin.isTTY) process.stdin.setRawMode(true);
-                        readline.emitKeypressEvents(process.stdin);
-
                         function onKey(str, key) {
                             if (!key) return;
                             if (key.name === 'escape' || key.name === 'q' || key.name === 'space' || (key.ctrl && key.name === 'c')) {
@@ -2587,6 +3469,7 @@ export async function runInteractiveDashboard(options = {}) {
                             }
                         }
 
+                        activeSubScreenRender = renderMenu;
                         process.stdin.on('keypress', onKey);
                         renderMenu();
                     });

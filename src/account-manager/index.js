@@ -88,7 +88,10 @@ export class AccountManager {
         this.#strategyName = strategyOverride || envStrategy || configStrategy || this.#strategyName;
 
         // Create the strategy instance
-        const strategyConfig = config?.accountSelection || {};
+        const strategyConfig = {
+            ...(config?.accountSelection || {}),
+            customModes: Array.isArray(config?.customModes) ? config.customModes : []
+        };
         this.#strategy = createStrategy(this.#strategyName, strategyConfig);
         logger.info(`[AccountManager] Using ${getStrategyLabel(this.#strategyName)} selection strategy`);
 
@@ -171,12 +174,39 @@ export class AccountManager {
         return typeof q?.remainingFraction === 'number' ? q.remainingFraction : null;
     }
 
+    #getWeeklyQuotaFraction(account) {
+        const models = account?.quota?.models;
+        if (!models || typeof models !== 'object') return null;
+        const now = Date.now();
+        let lowest = null;
+        for (const [mId, info] of Object.entries(models)) {
+            if (!info || typeof info.remainingFraction !== 'number') continue;
+            const resetMs = info.resetTime ? Math.max(0, new Date(info.resetTime).getTime() - now) : 0;
+            const isWeekly = resetMs > 24 * 3600 * 1000 || mId.toLowerCase().includes('argon') || mId.toLowerCase().includes('weekly');
+            if (isWeekly && (lowest === null || info.remainingFraction < lowest)) {
+                lowest = info.remainingFraction;
+            }
+        }
+        return lowest;
+    }
+
     #computeRuntimeBlockedEmails(modelId = null) {
         const blocked = new Set();
         const hourlyCap = Number(config?.hourlyAccountCap) || 0;
         const quotaFloor = Math.max(0, Math.min(0.95, Number(config?.globalQuotaThreshold) || 0));
+        const weeklyFloor = Math.max(0, Math.min(0.95, Number(config?.weeklyQuotaThreshold) || 0));
+        const pauseOnVerify = config?.pauseOnVerifyReq !== false;
 
         const rawAvail = getAvailable(this.#accounts, modelId);
+
+        if (pauseOnVerify) {
+            const hasUnflagged = rawAvail.some(a => !a.verifyUrl);
+            if (hasUnflagged) {
+                for (const acc of rawAvail) {
+                    if (acc.verifyUrl) blocked.add(acc.email);
+                }
+            }
+        }
 
         if (hourlyCap > 0) {
             for (const acc of rawAvail) {
@@ -196,6 +226,22 @@ export class AccountManager {
                 for (const acc of unblockedAvail) {
                     const frac = this.#getQuotaFractionForModel(acc, modelId);
                     if (frac !== null && frac <= quotaFloor) {
+                        blocked.add(acc.email);
+                    }
+                }
+            }
+        }
+
+        if (weeklyFloor > 0) {
+            const unblockedAvail = rawAvail.filter(a => !blocked.has(a.email));
+            const hasAboveWeekly = unblockedAvail.some(a => {
+                const wFrac = this.#getWeeklyQuotaFraction(a);
+                return wFrac === null || wFrac > weeklyFloor;
+            });
+            if (hasAboveWeekly) {
+                for (const acc of unblockedAvail) {
+                    const wFrac = this.#getWeeklyQuotaFraction(acc);
+                    if (wFrac !== null && wFrac <= weeklyFloor) {
                         blocked.add(acc.email);
                     }
                 }

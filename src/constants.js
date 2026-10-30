@@ -186,8 +186,11 @@ export const MIN_SIGNATURE_LENGTH = 50; // Minimum valid thinking signature leng
 export const SELECTION_STRATEGIES = [
     'locked',
     'day-split',
+    'shift-split',
     'session',
+    'weekly-guard',
     'sticky',
+    'warmup',
     'pipelined',
     'hybrid',
     'round-robin'
@@ -198,8 +201,11 @@ export const DEFAULT_SELECTION_STRATEGY = 'pipelined';
 export const STRATEGY_LABELS = {
     'locked': 'Single-Account Lock (Zero Auto-Rotation)',
     'day-split': 'Daily Primary + Standby (Max 2 Accounts/Day)',
+    'shift-split': 'Workday 2x12h Shift (AM / PM Slot Split)',
     'session': 'Idle-Aware Session Shift (45m + Idle Break)',
+    'weekly-guard': 'Weekly-Cap Preserver (Argon / Opus Guard)',
     'sticky': 'Sticky Drain-to-Floor (Cache Continuity)',
+    'warmup': 'Gradual Clone Warm-Up (48h New-Account Shield)',
     'pipelined': 'Pipelined (5% Staggered Quota Rotation)',
     'hybrid': 'Hybrid (Multi-factor Smart Scoring)',
     'round-robin': 'Round Robin (Per-Request Cycling)'

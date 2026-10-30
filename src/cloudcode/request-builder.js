@@ -6,6 +6,7 @@
 
 import crypto from 'crypto';
 import { ANTIGRAVITY_HEADERS } from '../constants.js';
+import { config } from '../config.js';
 import { convertAnthropicToGoogle } from '../format/index.js';
 import { deriveSessionId } from './session-manager.js';
 
@@ -44,6 +45,7 @@ const IDENTITY_SCRUB_RULES = [
 
 function scrubClientIdentity(text) {
     if (typeof text !== 'string') return text;
+    if (config?.sanitizeClientPrompts === false) return text;
     let out = text;
     for (const [term, replacement] of IDENTITY_SCRUB_RULES) {
         out = out.split(term).join(replacement);

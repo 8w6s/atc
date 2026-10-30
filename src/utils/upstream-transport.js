@@ -34,7 +34,10 @@ function waitForPacerSlot(poolKey, gapMs, signal) {
     const now = Date.now();
     const prevNext = accountPacerNextAt.get(poolKey) || 0;
     const scheduledAt = Math.max(now, prevNext);
-    const jitteredGap = Math.round(gapMs * (0.85 + Math.random() * 0.35));
+    const jitterPct = Math.max(0, Math.min(80, Number(config?.pacerJitterPct ?? 30))) / 100;
+    const minFactor = 1 - Math.min(0.15, jitterPct * 0.5);
+    const spanFactor = (1 + jitterPct) - minFactor;
+    const jitteredGap = Math.round(gapMs * (minFactor + Math.random() * spanFactor));
     accountPacerNextAt.set(poolKey, scheduledAt + jitteredGap);
 
     if (accountPacerNextAt.size > MAX_POOLS * 2) {
@@ -147,7 +150,8 @@ function getIsolatedAgent(poolKey, testTlsOptions = null) {
             socket.destroy();
         };
         socket[IDLE_HANDLER_SYM] = onIdle;
-        socket.setTimeout(IDLE_SOCKET_TIMEOUT_MS, onIdle);
+        const idleSec = Math.max(5, Math.min(180, Number(config?.keepAliveIdleSec) || 30));
+        socket.setTimeout(idleSec * 1000, onIdle);
     });
 
     agentPools.set(effectiveKey, { agent, lastUsed: now });

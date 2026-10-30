@@ -27,6 +27,7 @@ import {
   showLiveLogs,
   toggleSingleAccountLock
 } from '../src/cli/diagnostics.js';
+import { getDisplayWidth, renderRoundedBox } from '../src/utils/terminal-box.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -58,53 +59,15 @@ const c = {
 };
 
 /**
- * Calculate display width of string in terminal, handling emojis (width=2)
- * and stripping ANSI codes (width=0).
- */
-function getDisplayWidth(str) {
-  const stripped = str.replace(/\x1b\[[0-9;]*m/g, '');
-  let width = 0;
-  for (const ch of stripped) {
-    const cp = ch.codePointAt(0);
-    if (!cp) continue;
-    if ((cp >= 0xFE00 && cp <= 0xFE0F) || cp === 0x200D) {
-      continue;
-    }
-    if (
-      (cp >= 0x1F300 && cp <= 0x1F9FF) || // Emojis & Pictographs
-      (cp >= 0x2600 && cp <= 0x27BF) ||   // Misc symbols & Dingbats
-      (cp >= 0x2300 && cp <= 0x23FF) ||   // Misc Technical
-      (cp >= 0x2B50 && cp <= 0x2B55) ||   // Stars
-      (cp >= 0x1100 && cp <= 0x115F) ||   // Hangul Jamo
-      (cp >= 0x2E80 && cp <= 0xA4CF && cp !== 0x303F) || // CJK
-      (cp >= 0xAC00 && cp <= 0xD7A3) ||   // Hangul Syllables
-      (cp >= 0xF900 && cp <= 0xFAFF) ||   // CJK Compatibility
-      (cp >= 0xFF01 && cp <= 0xFF60) ||   // Fullwidth Forms
-      (cp >= 0xFFE0 && cp <= 0xFFE6)
-    ) {
-      width += 2;
-    } else {
-      width += 1;
-    }
-  }
-  return width;
-}
-
-/**
  * Render a perfectly aligned rounded box with unified 67-column width
  */
 function printBox(contentLines, width = 67) {
-  const innerWidth = width - 2;
-  const top = `${c.cyan}╭${'─'.repeat(innerWidth)}╮${c.reset}`;
-  const bottom = `${c.cyan}╰${'─'.repeat(innerWidth)}╯${c.reset}`;
-
-  console.log(top);
-  for (const rawLine of contentLines) {
-    const dispWidth = getDisplayWidth(rawLine);
-    const pad = Math.max(0, innerWidth - dispWidth);
-    console.log(`${c.cyan}│${c.reset}${rawLine}${' '.repeat(pad)}${c.cyan}│${c.reset}`);
-  }
-  console.log(bottom);
+  const rendered = renderRoundedBox(contentLines, {
+    innerWidth: width - 2,
+    borderColor: c.cyan,
+    reset: c.reset
+  });
+  process.stdout.write(rendered);
 }
 
 // PID & config file locations for background process management
@@ -313,7 +276,7 @@ async function startServer({ forceFresh = false } = {}) {
     if (healthJson && isModern && !forceFresh) {
       if (!logMode) {
         console.log('');
-        printBox([`  🛸 ${c.bold + c.bCyan}atc proxy is already in orbit${c.reset}`], 67);
+        printBox([`  ◆ ${c.bold + c.bCyan}atc proxy is already in orbit${c.reset}`], 67);
         console.log('');
         const pid = healthJson.pid || getServicePid();
         if (pid) console.log(`   ${c.cyan}├─${c.reset} PID:       ${c.bYellow}${pid}${c.reset}`);
@@ -348,7 +311,7 @@ async function startServer({ forceFresh = false } = {}) {
     const healthy = await checkProxyHealth(port, 2000);
     if (healthy) {
       console.log('');
-      printBox([`  🛸 ${c.bold + c.bCyan}atc proxy is already in orbit${c.reset}`], 67);
+      printBox([`  ◆ ${c.bold + c.bCyan}atc proxy is already in orbit${c.reset}`], 67);
       console.log('');
       const pid = getServicePid();
       console.log(`   ${c.cyan}├─${c.reset} PID:       ${c.bYellow}${pid}${c.reset}`);
@@ -416,7 +379,7 @@ async function startServer({ forceFresh = false } = {}) {
   const isHealthy = await checkProxyHealth(port, 12000);
   if (isHealthy) {
     console.log('');
-    printBox([`  ⚡ ${c.bold + c.bGreen}atc proxy is now in orbit!${c.reset}`], 67);
+    printBox([`  ▸ ${c.bold + c.bGreen}atc proxy is now in orbit!${c.reset}`], 67);
     console.log('');
     console.log(`   ${c.cyan}├─${c.reset} Process ID: ${c.bYellow}${serverProcess.pid}${c.reset}`);
     console.log(`   ${c.cyan}├─${c.reset} Endpoint:   ${c.underline}http://localhost:${port}${c.reset}`);
@@ -526,7 +489,7 @@ function setConfigInitialized(val = true) {
  */
 function showStatus() {
   console.log('');
-  printBox([`  🛸 ${c.bold + c.bCyan}atc (Antigravity to Claude)${c.reset} ${c.bMagenta}v${packageJson.version}${c.reset}`], 67);
+  printBox([`  ◆ ${c.bold + c.bCyan}atc (Antigravity to Claude)${c.reset} ${c.bMagenta}v${packageJson.version}${c.reset}`], 67);
   console.log('');
 
   if (isServiceRunning()) {
@@ -616,7 +579,7 @@ async function updateCommand() {
 function showHelp() {
   console.log('');
   printBox([
-    `  🛸 ${c.bold + c.bCyan}atc (Antigravity to Claude)${c.reset} ${c.bMagenta}v${packageJson.version}${c.reset}`
+    `  ◆ ${c.bold + c.bCyan}atc (Antigravity to Claude)${c.reset} ${c.bMagenta}v${packageJson.version}${c.reset}`
   ], 67);
 
   console.log(`
@@ -663,8 +626,9 @@ ${c.bold + c.bCyan}━━━ OPTIONS ━━━━━━━━━━━━━━�
   ${c.yellow}-h, -H, --help${c.reset}      Show this help
   ${c.yellow}-v, --version${c.reset}       Show version
   ${c.yellow}--log${c.reset}               Run in foreground with live stream logs
-  ${c.yellow}--strategy=NAME${c.reset}     Load balancer strategy: locked, day-split, session,
-                      sticky, pipelined (5%), hybrid, round-robin
+  ${c.yellow}--strategy=NAME${c.reset}     Load balancer strategy: locked, day-split, shift-split,
+                      session, weekly-guard, sticky, warmup, pipelined,
+                      hybrid, round-robin, or custom:<profile-id>
 `);
 }
 
@@ -747,7 +711,7 @@ function isWindowsStartupInstalled() {
 
 async function initCommand() {
   console.log('');
-  printBox([`  ⚡ ${c.bold + c.bCyan}Initializing atc (Antigravity to Claude)${c.reset}`], 67);
+  printBox([`  ▸ ${c.bold + c.bCyan}Initializing atc (Antigravity to Claude)${c.reset}`], 67);
   console.log('');
 
   const port = getPort();
@@ -800,7 +764,7 @@ async function initCommand() {
 
 async function reinitCommand() {
   console.log('');
-  printBox([`  ♻️   ${c.bold + c.bCyan}Reinitializing atc Configuration${c.reset}`], 67);
+  printBox([`  ◆ ${c.bold + c.bCyan}Reinitializing atc Configuration${c.reset}`], 67);
   console.log('');
 
   // Controlled cleanup of previous instance: ensure only 1 instance
@@ -831,7 +795,7 @@ async function reinitCommand() {
 
 async function defuseCommand() {
   console.log('');
-  printBox([`  🛡️   ${c.bold + c.bMagenta}Defuse atc from Windows Startup / System${c.reset}`], 67);
+  printBox([`  ◆ ${c.bold + c.bMagenta}Defuse atc from Windows Startup / System${c.reset}`], 67);
   console.log('');
 
   let startupRemoved = false;
@@ -892,7 +856,7 @@ async function defuseCommand() {
 
 async function flexCommand() {
   console.log('');
-  printBox([`  ⚡ ${c.bold + c.bCyan}Claude Code Flagship Model Mapping${c.reset}`], 67);
+  printBox([`  ▸ ${c.bold + c.bCyan}Claude Code Flagship Model Mapping${c.reset}`], 67);
   console.log('');
 
   // 1. Update ~/.config/atc/config.json with premier model mappings
@@ -940,7 +904,7 @@ async function flexCommand() {
 
 async function daemonCheckCommand() {
   console.log('');
-  printBox([`  🛰️   ${c.bold + c.bCyan}atc Proxy Daemon Diagnostic${c.reset}`], 67);
+  printBox([`  ◆ ${c.bold + c.bCyan}atc Proxy Daemon Diagnostic${c.reset}`], 67);
   console.log('');
 
   const port = getPort();
@@ -948,24 +912,19 @@ async function daemonCheckCommand() {
 
   const startPing = Date.now();
   let health = null;
-  let limits = null;
   let latency = null;
 
   try {
-    const [hRes, lRes] = await Promise.all([
-      fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(3000) }),
-      fetch(`http://127.0.0.1:${port}/account-limits`, { signal: AbortSignal.timeout(3000) })
-    ]);
-    if (hRes.ok) health = await hRes.json();
-    if (lRes.ok) limits = await lRes.json();
+    const hRes = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(3000) });
     latency = Date.now() - startPing;
+    if (hRes.ok) health = await hRes.json();
   } catch {}
 
   if (health) {
     console.log(`  ${c.bold}DAEMON HEALTH${c.reset}`);
     console.log(`  ${c.green}● ACTIVE & RESPONSIVE${c.reset}\n`);
     console.log(`  ${c.bold}METRICS${c.reset}`);
-    console.log(`  ${c.cyan}├─${c.reset} Process PID:  ${c.bYellow}${pid || 'managed'}${c.reset}`);
+    console.log(`  ${c.cyan}├─${c.reset} Process PID:  ${c.bYellow}${health.pid || pid || 'managed'}${c.reset}`);
     console.log(`  ${c.cyan}├─${c.reset} Listen Port:  ${c.bYellow}${port}${c.reset} (${c.underline}http://127.0.0.1:${port}${c.reset})`);
     console.log(`  ${c.cyan}├─${c.reset} Ping Latency: ${c.bGreen}${latency}ms${c.reset}`);
     if (health.activeEmail) {
@@ -991,7 +950,7 @@ async function daemonCheckCommand() {
 
 async function uninstallCommand() {
   console.log('');
-  printBox([`  ⚠️   ${c.bold + c.bRed}Uninstall atc Completely from System${c.reset}`], 67);
+  printBox([`  ▲ ${c.bold + c.bRed}Uninstall atc Completely from System${c.reset}`], 67);
   console.log('');
 
   const readline = await import('readline');

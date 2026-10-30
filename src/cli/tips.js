@@ -70,14 +70,28 @@ export const SAFETY_TIPS = [
  * wall-clock timestamp so the existing 75ms dashboard render loop drives a
  * smooth, deterministic marquee with zero extra timers.
  */
-export function getTipTickerFrame(tips, nowMs, viewportCols, cycleOffset = 0) {
+export function getTipTickerFrame(tips, nowMs, viewportCols, options = 0) {
     if (!Array.isArray(tips) || tips.length === 0 || viewportCols <= 10) {
         return { index: 0, tip: null, visibleText: '' };
     }
 
-    const stepMs = 150;
-    const holdStartSteps = 12; // ~1.8s pause before scrolling
-    const holdEndSteps = 10;   // ~1.5s pause at end before advancing
+    const cycleOffset = typeof options === 'number' ? options : (options?.cycleOffset || 0);
+    const speedMode = typeof options === 'object' ? (options?.speed || 'normal') : 'normal';
+
+    if (speedMode === 'static') {
+        const slideMs = 7000;
+        const idx = (Math.floor(nowMs / slideMs) + cycleOffset) % tips.length;
+        const tip = tips[idx];
+        const raw = tip.ticker || tip.summary || tip.title || '';
+        const truncated = raw.length > viewportCols
+            ? `${raw.slice(0, Math.max(0, viewportCols - 1))}…`
+            : raw.padEnd(viewportCols, ' ');
+        return { index: idx, tip, visibleText: truncated };
+    }
+
+    const stepMs = speedMode === 'slow' ? 240 : (speedMode === 'fast' ? 85 : 150);
+    const holdStartSteps = 12; // pause before scrolling
+    const holdEndSteps = 10;   // pause at end before advancing
 
     const schedules = tips.map((tip) => {
         const text = tip.ticker || tip.summary || tip.title || '';

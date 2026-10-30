@@ -10,8 +10,9 @@ import app, { accountManager } from './server.js';
 import { DEFAULT_PORT } from './constants.js';
 import { logger } from './utils/logger.js';
 import { config } from './config.js';
-import { getStrategyLabel, STRATEGY_NAMES, DEFAULT_STRATEGY } from './account-manager/strategies/index.js';
+import { getStrategyLabel, STRATEGY_NAMES, DEFAULT_STRATEGY, isValidStrategy } from './account-manager/strategies/index.js';
 import { getPackageVersion } from './utils/helpers.js';
+import { renderDoubleBox } from './utils/terminal-box.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -33,8 +34,8 @@ for (let i = 0; i < args.length; i++) {
     }
 }
 // Validate strategy
-if (strategyOverride && !STRATEGY_NAMES.includes(strategyOverride.toLowerCase())) {
-    logger.warn(`[Startup] Invalid strategy "${strategyOverride}". Valid options: ${STRATEGY_NAMES.join(', ')}. Using default.`);
+if (strategyOverride && !isValidStrategy(strategyOverride, config.customModes || [])) {
+    logger.warn(`[Startup] Invalid strategy "${strategyOverride}". Valid options: ${STRATEGY_NAMES.join(', ')} (or custom:<id>). Using default.`);
     strategyOverride = null;
 }
 
@@ -107,84 +108,68 @@ const server = app.listen(PORT, HOST, () => {
         console.clear();
     }
 
-    const border = '║';
-    // align for 2-space indent (60 chars), align4 for 4-space indent (58 chars)
-    const align = (text) => text + ' '.repeat(Math.max(0, 60 - text.length));
-    const align4 = (text) => text + ' '.repeat(Math.max(0, 58 - text.length));
-
-    // Build Control section dynamically
-    const strategyOptions = `(${STRATEGY_NAMES.join('/')})`;
-    const strategyLine2 = '                       ' + strategyOptions;
-    let controlSection = '║  Control:                                                    ║\n';
-    controlSection += '║    --strategy=<s>     Set account selection strategy         ║\n';
-    controlSection += `${border}  ${align(strategyLine2)}${border}\n`;
-    if (!isDebug) {
-        controlSection += '║    --dev-mode         Enable developer mode                  ║\n';
-    }
-    if (!isFallbackEnabled) {
-        controlSection += '║    --fallback         Enable model fallback on quota exhaust ║\n';
-    }
-    controlSection += '║    Ctrl+C             Stop server                            ║';
-
-    // Get the strategy label (accountManager will be initialized by now)
     const strategyLabel = accountManager.getStrategyLabel();
+    const strategyLineA = `(${STRATEGY_NAMES.slice(0, 4).join('/')}`;
+    const strategyLineB = `/${STRATEGY_NAMES.slice(4, 8).join('/')}`;
+    const strategyLineC = `/${STRATEGY_NAMES.slice(8).join('/')}/custom:<id>)`;
 
-    // Build status section - always show strategy, plus any active modes
-    let statusSection = '║                                                              ║\n';
-    statusSection += '║  Active Modes:                                               ║\n';
-    statusSection += `${border}    ${align4(`✓ Strategy: ${strategyLabel}`)}${border}\n`;
-    if (isDebug) {
-        statusSection += '║    ✓ Developer mode enabled                                   ║\n';
-    }
-    if (isFallbackEnabled) {
-        statusSection += '║    ✓ Model fallback enabled                                  ║\n';
-    }
-    if (process.env.CLAUDE_CONFIG_PATH) {
-        statusSection += `${border}    ${align4(`✓ Claude config: ${process.env.CLAUDE_CONFIG_PATH}`)}${border}\n`;
-    }
+    const bodyRows = [
+        '',
+        `  atc proxy daemon running at: http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`,
+        `  Bound to: ${boundHost}:${boundPort}`,
+        '',
+        '  Active Modes:',
+        `    * Strategy: ${strategyLabel}`
+    ];
+    if (isDebug) bodyRows.push('    * Developer mode enabled');
+    if (isFallbackEnabled) bodyRows.push('    * Model fallback enabled');
+    if (process.env.CLAUDE_CONFIG_PATH) bodyRows.push(`    * Claude config: ${process.env.CLAUDE_CONFIG_PATH}`);
 
-    const environmentSection = `║  Environment Variables:                                      ║
-║    ATC_PORT            Server port (default: 43128)          ║
-║    ATC_HOST            Bind address (default: 127.0.0.1)     ║
-║    HTTP_PROXY          Route requests through a proxy        ║
-║    CLAUDE_CONFIG_PATH  Path to .claude dir (for systemd)     ║
-║    See README.md for detailed configuration examples         ║`
+    bodyRows.push(
+        '',
+        '  Control:',
+        '    --strategy=<s>     Set account selection strategy',
+        `                       ${strategyLineA}`,
+        `                       ${strategyLineB}`,
+        `                       ${strategyLineC}`
+    );
+    if (!isDebug) bodyRows.push('    --dev-mode         Enable developer mode');
+    if (!isFallbackEnabled) bodyRows.push('    --fallback         Enable model fallback on quota exhaust');
+    bodyRows.push(
+        '    Ctrl+C             Stop server',
+        '',
+        '  Endpoints:',
+        '    POST /v1/messages         - Anthropic Messages API',
+        '    POST /v1/messages/count_tokens - Token count estimator',
+        '    GET  /v1/models           - List available models',
+        '    GET  /health              - Cached health & pool status',
+        '    GET  /account-limits      - Account status & quotas',
+        '    POST /refresh-token       - Force token refresh',
+        '',
+        '  Configuration:',
+        `    Storage: ${CONFIG_DIR}`,
+        '',
+        '  Usage with Claude Code:',
+        `    export ANTHROPIC_BASE_URL=http://localhost:${PORT}`,
+        `    export ANTHROPIC_API_KEY=${config.apiKey || 'atc-local-key'}`,
+        '    claude',
+        '',
+        '  Environment Variables:',
+        '    ATC_PORT            Server port (default: 43128)',
+        '    ATC_HOST            Bind address (default: 127.0.0.1)',
+        '    HTTP_PROXY          Route requests through a proxy',
+        '    CLAUDE_CONFIG_PATH  Path to .claude dir (for systemd)'
+    );
 
-    logger.log(`
-╔══════════════════════════════════════════════════════════════╗
-║            atc (Antigravity to Claude) v${packageVersion}            ║
-╠══════════════════════════════════════════════════════════════╣
-║                                                              ║
-${border}  ${align(`atc proxy daemon running at: http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`)}${border}
-${border}  ${align(`Bound to: ${boundHost}:${boundPort}`)}${border}
-${statusSection}║                                                              ║
-${controlSection}
-║                                                              ║
-║  Endpoints:                                                  ║
-║    POST /v1/messages         - Anthropic Messages API        ║
-║    GET  /v1/models           - List available models         ║
-║    GET  /health              - Health check                  ║
-║    GET  /account-limits      - Account status & quotas       ║
-║    POST /refresh-token       - Force token refresh           ║
-║                                                              ║
-${border}  ${align(`Configuration:`)}${border}
-${border}    ${align4(`Storage: ${CONFIG_DIR}`)}${border}
-║                                                              ║
-║  Usage with Claude Code:                                     ║
-${border}    ${align4(`export ANTHROPIC_BASE_URL=http://localhost:${PORT}`)}${border}
-${border}    ${align4(`export ANTHROPIC_API_KEY=${config.apiKey || 'dummy'}`)}${border}
-║    claude                                                    ║
-║                                                              ║
-║  Add Google accounts:                                        ║
-║    npm run accounts                                          ║
-║                                                              ║
-║  Prerequisites (if no accounts configured):                  ║
-║    - Antigravity must be running                             ║
-║    - Have a chat panel open in Antigravity                   ║
-║                                                              ║
-${environmentSection}
-╚══════════════════════════════════════════════════════════════╝
-  `);
+    const banner = renderDoubleBox(
+        [
+            [{ center: true, text: `atc (Antigravity to Claude) v${packageVersion}` }],
+            bodyRows
+        ],
+        66
+    );
+
+    logger.log(`\n${banner}\n`);
 
     logger.success(`Server started successfully on port ${PORT}`);
     if (isDebug) {

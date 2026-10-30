@@ -1,25 +1,37 @@
-[v1.0.0]
-[NEW] Cong bo phien ban chinh thuc v1.0.0, phan phoi qua package @8w6s/atc tren npm registry.
-[NEW] Lenh atc models (--refresh): Probe danh muc model Antigravity truc tiep tu tai khoan co plan cao nhat.
-[NEW] Lenh atc flex: Tu dong cau hinh cac model flagship Claude 3.7 Sonnet & Opus ve backend Gemini.
-[NEW] Lenh atc daemon: Kiem tra chuyen sau suc khoe tien trinh proxy, port, PID va do ping latency ms.
-[NEW] Lenh atc accounts: Liet ke danh sach tai khoan kem so thu tu ID, Plan badge, 5h-Cap va Weekly quota.
-[NEW] Lenh atc changelog: Giao dien xem lich su phat trien dang sach (Book viewer) ho tro lat trang va search.
-[NEW] Lenh atc update: Kiem tra va cap nhat phien ban tu dong tu npm registry kem restart proxy.
-[NEW] Lenh atc defuse: Go bo Windows Startup va proxy settings khoi Claude Code ma van giu nguyen data pool.
-[NEW] Lenh atc uninstall: Quy trinh go bo hoan toan ATC khoi he thong voi tuy chon giu hoac xoa config.
-[NEW] Lenh atc settings / atc config: Mo truc tiep man hinh Engine Settings ma khong can qua menu chinh.
-[NEW] Tich hop Secret API Key trong Engine Settings voi co che tu dong dong bo sang ~/.claude/settings.json.
-[SECURITY] Tach toan bo Google OAuth Client credentials ra khoi ma nguon, luu tru an toan tai ~/.config/atc/config.json.
-[CHANGED] Tinh gon model mapping TUI, loai bo 28 model alias rac sinh tu dong truoc day.
-[CHANGED] Chuyen lenh xem model alias mapping cu thanh atc mapid (alias atc map).
-[CHANGED] Chuan hoa toan bo box layout terminal theo luoi 67 ky tu, chong lech border tren Windows Terminal.
-[FIX] Sua triet de loi hien thi quota 5h-Cap -- va Weekly n/a tren ca TUI lan terminal manager.
-[REMOVED] Loai bo hoan toan 15.000 dong ma nguon WebUI cu (public/, src/webui/) va cac build scripts CSS.
-
 [v0.9.5]
-[NEW] Co che Pipelined Quota Shift: Tu dong xoay tua tai khoan khi quota sut giam qua nguong (mac dinh 5%).
-[NEW] Ho tro song song hai moc quota: 5-hour rolling limits va weekly argon caps.
-[NEW] Tu dong nhan dien subscription tiers: [ultra], [pro], [plus], [free].
-[NEW] Dashboard TUI ho tro Alternate Screen Buffer (zero-flicker double buffering).
-[FIX] Co che refresh OAuth access token ngam tu dong khi phien lam viec het han.
+[NEW] Introduced Pipelined Quota Shift load balancing to rotate accounts proactively after configurable quota steps.
+[NEW] Added dual-horizon quota tracking for both 5-hour rolling limits and 7-day weekly Argon caps.
+[NEW] Added automatic subscription tier detection for [ultra], [pro], [plus], and [free] Google AI plans.
+[NEW] Built an interactive TUI dashboard running inside an isolated Alternate Screen Buffer.
+[FIX] Added automatic background OAuth access-token refresh before session expiry.
+
+[v1.0.0]
+[NEW] Published official scoped release @8w6s/atc on the public npm registry.
+[NEW] Added "atc models [--refresh]" to probe live Antigravity backend model catalogs from the highest-tier account.
+[NEW] Added "atc flex" for one-step mapping of Claude 3.7 Sonnet and Claude 3 Opus aliases to Gemini backends.
+[NEW] Added "atc daemon" for deep process health, port binding, PID, and HTTP round-trip latency diagnostics.
+[NEW] Added "atc accounts" table listing account IDs, plan badges, 5h-Cap percentages, and Weekly quota status.
+[NEW] Added "atc changelog" interactive book viewer with version search and automatic ~/.config/atc/CHANGELOG.md sync.
+[NEW] Added "atc update" to check npm registry versions, install updates, and restart the background proxy daemon.
+[NEW] Added "atc defuse" and "atc uninstall" lifecycle commands for clean Windows Startup and Claude Code removal.
+[NEW] Added "atc settings" / "atc config" shortcut to jump straight into Engine Settings, including Secret API Key sync.
+[SECURITY] Removed embedded Google OAuth client secrets from source code and moved custom OAuth storage to ~/.config/atc/config.json.
+[CHANGED] Streamlined Model Mappings by removing 28 auto-generated legacy model aliases and adding "atc mapid" ("atc map").
+[FIX] Resolved "--" 5h-Cap and "n/a" Weekly quota display regressions across the TUI dashboard and terminal status view.
+[REMOVED] Removed 15,000+ lines of deprecated WebUI assets (public/, src/webui/) and unused CSS build dependencies.
+
+[v1.0.1]
+[NEW] Isolated per-account HTTP/1.1 TLS connection pools (src/utils/upstream-transport.js) with jittered burst pacing and hourly request circuit breakers.
+[NEW] Aligned upstream User-Agent, Go-style transport headers, and OAuth metadata with native Antigravity 2.28.2 client behavior while scrubbing third-party client prompt markers.
+[NEW] Expanded Load Balancer to 10 built-in modes with live risk badges ([safest] to [high-risk]): Single-Account Lock, Daily Primary + Standby, Workday 2x12h Shift, Idle-Aware Session Shift, Weekly-Cap Preserver, Sticky Drain-to-Floor, Gradual Clone Warm-Up, Pipelined Quota Shift, Hybrid Smart Score, and Round-Robin.
+[NEW] Added interactive Custom Load Balancer Profile Builder ([N] New, [E] Edit, [D] Delete) with a live risk meter persisted in config.customModes.
+[NEW] Redesigned Engine Settings into a balanced 4-tab, 3-column table covering 27 real Anti-Ban, Pool & Failover, UI & Tips Banner, and Network & Daemon parameters.
+[NEW] Added a high-contrast, zero-flicker Safety & Operational Tips Ribbon (Ctrl+D for full guide, X to hide/show, startup toggle in Settings) including clone/family-slot risk guidance.
+[NEW] Added CLI hygiene and observability commands: "atc doctor [--fix]", "atc stats", "atc logs [-f]", and "atc lock [on|off]", plus local /v1/messages/count_tokens estimation.
+[CHANGED] Redesigned Model Mappings into a 3-tab aligned table (Claude Code Slots, Custom Aliases, Quick Presets) with instant inline editing and arrow-key backend cycling.
+[CHANGED] Ordered "atc changelog" chronologically from oldest release to newest release with 100% English release notes, vertical scrolling, and [L] Latest / [F] Oldest shortcuts.
+[CHANGED] Eliminated the 18-request TUI polling storm via cached /health responses, 300s quota TTLs, single-flight deduplication, and sequential jittered account probes.
+[CHANGED] Separated HTTP 403 classification into [verify-req] (browser challenge), [banned] (ToS lock stopping token refresh loops), and invalid_grant, plus readable 2-line account action shortcuts.
+[FIX] Fixed ConPTY sub-screen layer overlap in Model Mappings caused by shadowed sub-screen state and scrollback-clear escape sequences.
+[FIX] Fixed right-hand box border (│ / ║) misalignments across Changelog Book, TUI sub-screens, CLI banners, and daemon startup output using ANSI-aware display-width measurement.
+[FIX] Hardened Windows atomic accounts.json writes with per-PID temp files and EPERM retry/fallback logic during concurrent TUI and daemon saves.

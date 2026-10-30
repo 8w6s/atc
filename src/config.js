@@ -50,11 +50,20 @@ const DEFAULT_CONFIG = {
     defaultCooldownMs: 10000,  // 10 seconds
     maxWaitBeforeErrorMs: 90000, // 90 seconds
     maxAccounts: 10, // Maximum number of accounts allowed
-    globalQuotaThreshold: 0.10, // 0 = disabled, 0.01-0.50 = safety quota floor before rotating away
+    globalQuotaThreshold: 0.10, // 0 = disabled, 0.01-0.50 = 5h safety quota floor before rotating away
+    weeklyQuotaThreshold: 0.05, // 0 = disabled, 0.01-0.50 = weekly safety quota floor before rotating away
     singleAccountLock: false, // Hard-lock traffic to active account (never auto-rotate)
-    showTips: true, // Show scrolling safety/operational tips banner on dashboard
+    showTips: true, // Show scrolling safety/operational tips banner on dashboard startup
+    tipsDismissScope: 'session', // 'session' | 'permanent' when pressing X on dashboard
+    tipsScrollSpeed: 'normal', // 'slow' | 'normal' | 'fast' | 'static'
+    maskEmails: false, // Redact middle characters of account emails on TUI for safe screenshots
+    shimmerTitle: true, // Animate metallic sheen on dashboard header title
     hourlyAccountCap: 120, // Soft hourly request cap per account (0 = unlimited)
     pacerDelayMs: 250, // Per-account burst stagger gap in ms (0ms latency when idle, spaces parallel bursts)
+    pacerJitterPct: 30, // Random jitter percentage (0-80%) applied around pacerDelayMs
+    keepAliveIdleSec: 30, // Per-account HTTP/1.1 keep-alive idle socket timeout in seconds
+    sanitizeClientPrompts: true, // Strip third-party SDK billing/identity markers from system prompts
+    pauseOnVerifyReq: true, // Hold routing to accounts with pending 403 VALIDATION_REQUIRED link
     upstreamTimeoutSec: 300, // Active upstream stream socket timeout in seconds
     requestThrottlingEnabled: false, // Legacy global pre-request sleep
     requestDelayMs: 200, // Delay in ms when legacy global throttling is enabled
@@ -77,12 +86,14 @@ const DEFAULT_CONFIG = {
     },
     loginTimeoutSec: 120, // OAuth login callback timeout in seconds (default 120s / 2m)
     quotaRefreshTtlSec: 300, // Cache lifetime for live quota probes (seconds)
+    customModes: [], // User-defined custom load balancer strategy profiles
     // Account selection strategy configuration
     accountSelection: {
-        strategy: 'pipelined',        // 'pipelined' | 'sticky' | 'round-robin' | 'hybrid'
+        strategy: 'pipelined',        // Built-in mode name or 'custom:<id>'
         stepThreshold: 0.05,          // 5% quota step before proactive rotation
         requestThreshold: 20,         // Fallback request cap if quota telemetry lags
         minStaySec: 180,              // Minimum stay time (seconds) before proactive rotation
+        idleBreakSec: 180,            // Quiet gap (seconds) between prompts for session/custom handover
         // Hybrid strategy tuning (optional - sensible defaults)
         healthScore: {
             initial: 70,              // Starting score for new accounts

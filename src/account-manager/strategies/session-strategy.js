@@ -71,9 +71,10 @@ export class SessionStrategy extends BaseStrategy {
         const idleGapMs = this.#lastRequestAt > 0 ? (now - this.#lastRequestAt) : 0;
         const sessionElapsedMs = now - this.#sessionStartAt;
 
+        const idleBreakMs = Math.max(0, Number(this.config?.idleBreakSec ?? 180)) * 1000 || DEFAULT_IDLE_HANDOVER_MS;
         const naturalBreakReady =
             sessionElapsedMs >= this.#targetDurationMs &&
-            idleGapMs >= DEFAULT_IDLE_HANDOVER_MS;
+            idleGapMs >= idleBreakMs;
 
         if (!usable || isEmergencyLow || naturalBreakReady) {
             const candidate = this.#pickHealthiestOther(accounts, idx, modelId);

@@ -4,7 +4,7 @@
  * Handles loading and saving account configuration to disk.
  */
 
-import { readFile, writeFile, mkdir, access, rename } from 'fs/promises';
+import { readFile, writeFile, mkdir, access, rename, unlink } from 'fs/promises';
 import { constants as fsConstants } from 'fs';
 import { dirname } from 'path';
 import { ACCOUNT_CONFIG_PATH } from '../constants.js';
@@ -12,6 +12,7 @@ import { getAuthStatus } from '../auth/database.js';
 import { logger } from '../utils/logger.js';
 
 let writeLock = null;
+let tmpCounter = 0;
 
 /**
  * Load accounts from the config file
@@ -153,10 +154,40 @@ export async function saveAccounts(configPath, accounts, settings, activeIndex) 
         // Validate JSON before writing (prevent saving corrupt data)
         JSON.parse(json);
 
-        // Atomic write: write to temp file then rename
-        const tmpPath = configPath + '.tmp';
-        await writeFile(tmpPath, json);
-        await rename(tmpPath, configPath);
+        /*
+         * Per-process unique temp path avoids collisions when the TUI and background
+         * daemon persist accounts.json concurrently. On Windows, transient reader
+         * handles (TUI refresh or Defender scan) can reject atomic rename with EPERM;
+         * retry briefly before falling back to an in-place write.
+         */
+        const tmpPath = `${configPath}.${process.pid}.${++tmpCounter}.tmp`;
+        await writeFile(tmpPath, json, 'utf-8');
+        let renamed = false;
+        let lastRenameErr = null;
+        for (let attempt = 1; attempt <= 4; attempt++) {
+            try {
+                await rename(tmpPath, configPath);
+                renamed = true;
+                break;
+            } catch (err) {
+                lastRenameErr = err;
+                if (err.code === 'EPERM' || err.code === 'EACCES' || err.code === 'EBUSY') {
+                    await new Promise((r) => setTimeout(r, 35 * attempt));
+                    continue;
+                }
+                throw err;
+            }
+        }
+        if (!renamed) {
+            try {
+                await writeFile(configPath, json, 'utf-8');
+            } finally {
+                await unlink(tmpPath).catch(() => {});
+            }
+            if (lastRenameErr && process.env.DEBUG) {
+                logger.warn(`[AccountManager] Atomic rename fallback used (${lastRenameErr.code})`);
+            }
+        }
     } catch (error) {
         logger.error('[AccountManager] Failed to save config:', error.message);
     } finally {
