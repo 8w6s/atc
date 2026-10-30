@@ -10,6 +10,7 @@ if (!process.argv.includes('--log')) {
   logger.warn = () => {};
 }
 import { runInteractiveDashboard } from '../src/cli/interactive-dashboard.js';
+import { showInteractiveChangelog, syncUserChangelog } from '../src/cli/changelog-viewer.js';
 import {
   showAccountStatus,
   switchAccount,
@@ -475,6 +476,57 @@ function showStatus() {
   console.log('');
 }
 
+async function updateCommand() {
+  console.log(`\n${c.bold}Checking for updates for @8w6s/atc...${c.reset}`);
+  const currentVersion = packageJson.version || '1.0.0';
+
+  try {
+    const res = await fetch('https://registry.npmjs.org/@8w6s/atc/latest', {
+      headers: { 'Accept': 'application/json' },
+      signal: AbortSignal.timeout(5000)
+    });
+
+    if (res.status === 404) {
+      console.log(`\n${c.yellow}ℹ️  Package @8w6s/atc is in local development (not yet published to npm).${c.reset}`);
+      console.log(`   Current local version: ${c.bold + c.cyan}v${currentVersion}${c.reset}\n`);
+      return;
+    }
+
+    if (!res.ok) {
+      throw new Error(`Registry returned HTTP ${res.status}`);
+    }
+
+    const data = await res.json();
+    const latestVersion = data.version;
+
+    if (!latestVersion || latestVersion === currentVersion) {
+      console.log(`\n${c.green}✓ atc is already on the latest version (v${currentVersion}).${c.reset}\n`);
+      return;
+    }
+
+    console.log(`\n${c.yellow}★ Update available:${c.reset} ${c.gray}v${currentVersion}${c.reset} → ${c.bGreen}v${latestVersion}${c.reset}`);
+    console.log(`Updating via npm: ${c.cyan}npm i -g @8w6s/atc@latest${c.reset} ...\n`);
+
+    const { execSync } = await import('child_process');
+    execSync('npm i -g @8w6s/atc@latest', { stdio: 'inherit' });
+
+    syncUserChangelog();
+
+    if (isServiceRunning()) {
+      console.log(`\n${c.cyan}Restarting proxy daemon to apply updates...${c.reset}`);
+      await restartServer();
+      console.log(`${c.green}✓ Proxy daemon restarted with v${latestVersion}.${c.reset}`);
+    }
+
+    console.log(`\n${c.green + c.bold}✓ Successfully updated to v${latestVersion}!${c.reset}`);
+    console.log(`Run ${c.cyan}atc changelog${c.reset} to see what's new.\n`);
+
+  } catch (err) {
+    console.log(`\n${c.red}Failed to check for updates:${c.reset} ${err.message}`);
+    console.log(`You can run manually: ${c.cyan}npm i -g @8w6s/atc@latest${c.reset}\n`);
+  }
+}
+
 function showHelp() {
   console.log('');
   printBox([
@@ -512,6 +564,10 @@ ${c.bold + c.bCyan}━━━ MODELS & SETTINGS ━━━━━━━━━━━
   ${c.cyan}mapid, map${c.reset}          List Claude Code fake model ID mappings
   ${c.cyan}flex${c.reset}                Auto-bind Claude 3.7 Sonnet & Opus to Google backend
   ${c.cyan}settings, config${c.reset}    Directly open proxy engine & secret key settings
+
+${c.bold + c.bCyan}━━━ UPDATES & CHANGELOG ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}
+  ${c.cyan}changelog, cl${c.reset}       Browse version changelogs interactively (Book viewer)
+  ${c.cyan}update, upgrade${c.reset}     Check and update atc to latest version from npm
 
 ${c.bold + c.bCyan}━━━ OPTIONS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}
   ${c.yellow}-h, -H, --help${c.reset}      Show this help
@@ -1003,6 +1059,17 @@ async function main() {
     case 'mapid':
     case 'map':
       showModelMappings();
+      break;
+
+    case 'changelog':
+    case 'changelogs':
+    case 'cl':
+      await showInteractiveChangelog();
+      break;
+
+    case 'update':
+    case 'upgrade':
+      await updateCommand();
       break;
 
     case 'ui':
