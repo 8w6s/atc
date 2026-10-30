@@ -20,6 +20,7 @@ import { dirname } from 'path';
 import { spawn } from 'child_process';
 import net from 'net';
 import { ACCOUNT_CONFIG_PATH, DEFAULT_PORT, MAX_ACCOUNTS } from '../constants.js';
+import { config } from '../config.js';
 import {
     getAuthorizationUrl,
     startCallbackServer,
@@ -196,12 +197,17 @@ async function addAccount(existingAccounts) {
     // Open browser
     openBrowser(url);
 
+    const loginTimeoutSec = config?.loginTimeoutSec || 120;
+    const timeoutDesc = loginTimeoutSec >= 60 && loginTimeoutSec % 60 === 0
+        ? `${loginTimeoutSec / 60}m`
+        : `${loginTimeoutSec}s`;
+
     // Start callback server and wait for code
-    console.log('Waiting for authentication (timeout: 2 minutes)...\n');
+    console.log(`Waiting for authentication (timeout: ${timeoutDesc})...\n`);
 
     try {
         // startCallbackServer now returns { promise, abort }
-        const { promise } = startCallbackServer(state);
+        const { promise } = startCallbackServer(state, loginTimeoutSec * 1000);
         const code = await promise;
 
         console.log('Received authorization code. Exchanging for tokens...');

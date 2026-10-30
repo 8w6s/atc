@@ -608,6 +608,7 @@ export async function runInteractiveDashboard(options = {}) {
                 let thresholdPct = Math.round((config?.accountSelection?.stepThreshold || 0.05) * 100);
                 let reqCap = config?.accountSelection?.requestThreshold || 20;
                 let cooldown = config?.switchAccountDelayMs || 5000;
+                let loginTimeout = config?.loginTimeoutSec || 120;
                 let proxyPort = config?.port || 43128;
                 let secretKey = config?.apiKey || 'atc-local-key';
                 let activeSettingIdx = 0;
@@ -647,6 +648,16 @@ export async function runInteractiveDashboard(options = {}) {
                         warnHigh: 'Above 10000ms: sluggish error recovery time for user requests'
                     },
                     {
+                        id: 'loginTimeout',
+                        label: 'OAuth Login Timeout',
+                        unit: 's',
+                        desc: 'Maximum duration to wait for Google sign-in browser callback before aborting',
+                        min: 30, max: 600, step: 15,
+                        safeMin: 60, safeMax: 300,
+                        warnLow: 'Below 60s: risk of premature timeout while completing sign-in or MFA',
+                        warnHigh: 'Above 300s: local auth listener remains open longer if abandoned'
+                    },
+                    {
                         id: 'port',
                         label: 'Proxy Listen Port',
                         unit: '',
@@ -667,7 +678,7 @@ export async function runInteractiveDashboard(options = {}) {
                         id: 'reset',
                         label: 'Reset All to Defaults',
                         unit: '',
-                        desc: 'Restore recommended safe defaults (5% quota, 20 requests, 5000ms cooldown, atc-local-key)'
+                        desc: 'Restore recommended safe defaults (5% quota, 20 requests, 5000ms cooldown, 120s timeout, atc-local-key)'
                     },
                     {
                         id: 'save',
@@ -681,7 +692,8 @@ export async function runInteractiveDashboard(options = {}) {
                     if (idx === 0) return thresholdPct;
                     if (idx === 1) return reqCap;
                     if (idx === 2) return cooldown;
-                    if (idx === 3) return proxyPort;
+                    if (idx === 3) return loginTimeout;
+                    if (idx === 4) return proxyPort;
                     return 0;
                 }
 
@@ -691,11 +703,12 @@ export async function runInteractiveDashboard(options = {}) {
                     if (idx === 0) thresholdPct = clamped;
                     else if (idx === 1) reqCap = clamped;
                     else if (idx === 2) cooldown = clamped;
-                    else if (idx === 3) proxyPort = clamped;
+                    else if (idx === 3) loginTimeout = clamped;
+                    else if (idx === 4) proxyPort = clamped;
                 }
 
                 function getWarning(idx) {
-                    if (idx >= 4) return null;
+                    if (idx >= 5) return null;
                     const meta = settingsMeta[idx];
                     const val = getValNum(idx);
                     if (val < meta.safeMin) return meta.warnLow;
@@ -707,8 +720,9 @@ export async function runInteractiveDashboard(options = {}) {
                     if (idx === 0) return thresholdPct + '%';
                     if (idx === 1) return reqCap + ' reqs';
                     if (idx === 2) return cooldown + 'ms';
-                    if (idx === 3) return proxyPort.toString();
-                    if (idx === 4) return secretKey || '(none)';
+                    if (idx === 3) return loginTimeout + 's';
+                    if (idx === 4) return proxyPort.toString();
+                    if (idx === 5) return secretKey || '(none)';
                     return '';
                 }
 
@@ -776,7 +790,7 @@ export async function runInteractiveDashboard(options = {}) {
 
                 function saveAllSettings() {
                     const accSel = { ...(config.accountSelection || {}), stepThreshold: thresholdPct / 100, requestThreshold: reqCap };
-                    saveConfig({ accountSelection: accSel, switchAccountDelayMs: cooldown, port: proxyPort, apiKey: secretKey });
+                    saveConfig({ accountSelection: accSel, switchAccountDelayMs: cooldown, loginTimeoutSec: loginTimeout, port: proxyPort, apiKey: secretKey });
                     const cs = readClaudeSettings();
                     cs.env = cs.env || {};
                     cs.env.ANTHROPIC_API_KEY = secretKey;
@@ -792,7 +806,7 @@ export async function runInteractiveDashboard(options = {}) {
 
                         if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
                             if (isFocusEditing) {
-                                if (activeSettingIdx === 4) {
+                                if (activeSettingIdx === 5) {
                                     if (editBuffer) secretKey = editBuffer;
                                 } else if (editBuffer) {
                                     const parsed = parseInt(editBuffer, 10);
@@ -812,7 +826,7 @@ export async function runInteractiveDashboard(options = {}) {
 
                         if (isFocusEditing) {
                             if (key.name === 'return' || key.name === 'enter') {
-                                if (activeSettingIdx === 4) {
+                                if (activeSettingIdx === 5) {
                                     secretKey = editBuffer.trim() || 'atc-local-key';
                                 } else if (editBuffer) {
                                     const parsed = parseInt(editBuffer, 10);
@@ -831,7 +845,7 @@ export async function runInteractiveDashboard(options = {}) {
                                 return;
                             }
 
-                            if (activeSettingIdx === 4) {
+                            if (activeSettingIdx === 5) {
                                 if (str && /^[a-zA-Z0-9_\-\.]$/.test(str) && editBuffer.length < 64) {
                                     editBuffer += str;
                                     renderScreen();
@@ -883,7 +897,7 @@ export async function runInteractiveDashboard(options = {}) {
                             return;
                         }
 
-                        if (key.name === 'left' && activeSettingIdx < 4) {
+                        if (key.name === 'left' && activeSettingIdx < 5) {
                             notice = '';
                             const meta = settingsMeta[activeSettingIdx];
                             const cur = getValNum(activeSettingIdx);
@@ -893,7 +907,7 @@ export async function runInteractiveDashboard(options = {}) {
                             return;
                         }
 
-                        if (key.name === 'right' && activeSettingIdx < 4) {
+                        if (key.name === 'right' && activeSettingIdx < 5) {
                             notice = '';
                             const meta = settingsMeta[activeSettingIdx];
                             const cur = getValNum(activeSettingIdx);
@@ -905,24 +919,26 @@ export async function runInteractiveDashboard(options = {}) {
 
                         if (key.name === 'return' || key.name === 'enter') {
                             notice = '';
-                            if (activeSettingIdx <= 4) {
+                            if (activeSettingIdx <= 5) {
                                 isFocusEditing = true;
-                                editBuffer = activeSettingIdx === 4 ? secretKey : getValNum(activeSettingIdx).toString();
+                                editBuffer = activeSettingIdx === 5 ? secretKey : getValNum(activeSettingIdx).toString();
                                 renderScreen();
                                 return;
                             }
 
-                            if (activeSettingIdx === 5) {
+                            if (activeSettingIdx === 6) {
                                 thresholdPct = 5;
                                 reqCap = 20;
                                 cooldown = 5000;
+                                loginTimeout = 120;
+                                proxyPort = 43128;
                                 secretKey = 'atc-local-key';
                                 notice = 'Reset all settings to recommended safe defaults';
                                 renderScreen();
                                 return;
                             }
 
-                            if (activeSettingIdx === 6) {
+                            if (activeSettingIdx === 7) {
                                 saveAllSettings();
                                 cleanup();
                                 resolve();

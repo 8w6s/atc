@@ -16,6 +16,7 @@ import {
 import { loadAccounts, saveAccounts } from '../account-manager/storage.js';
 import { getTokenForAccount, getProjectForAccount } from '../account-manager/credentials.js';
 import { fetchAvailableModels } from '../cloudcode/model-api.js';
+import { config } from '../config.js';
 
 const CONFIG_DIR = dirname(ACCOUNT_CONFIG_PATH);
 const PID_FILE = join(CONFIG_DIR, 'server.pid');
@@ -440,10 +441,16 @@ export async function loginAccount(options = {}) {
     console.log(`(Manual link if browser does not open: ${c.cyan}${url}${c.reset})\n`);
     openBrowser(url);
 
-    console.log('Listening for OAuth callback on localhost (timeout 2m)...');
+    const loginTimeoutSec = config?.loginTimeoutSec || 120;
+    const timeoutMs = loginTimeoutSec * 1000;
+    const timeoutDesc = loginTimeoutSec >= 60 && loginTimeoutSec % 60 === 0
+        ? `${loginTimeoutSec / 60}m`
+        : `${loginTimeoutSec}s`;
+
+    console.log(`Listening for OAuth callback on localhost (timeout ${timeoutDesc})...`);
     console.log(`${c.dim}Press ESC or Q to cancel and return to Dashboard immediately...${c.reset}\n`);
 
-    const { promise, abort } = startCallbackServer(state);
+    const { promise, abort } = startCallbackServer(state, timeoutMs);
 
     let keyListener = null;
     let isCancelled = false;

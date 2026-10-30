@@ -61,6 +61,7 @@ const DEFAULT_CONFIG = {
         clientId: process.env.GOOGLE_OAUTH_CLIENT_ID || '',
         clientSecret: process.env.GOOGLE_OAUTH_CLIENT_SECRET || ''
     },
+    loginTimeoutSec: 120, // OAuth login callback timeout in seconds (default 120s / 2m)
     // Account selection strategy configuration
     accountSelection: {
         strategy: 'hybrid',           // 'sticky' | 'round-robin' | 'hybrid'
