@@ -275,14 +275,16 @@ export async function runInteractiveDashboard(options = {}) {
     }
     let currentStrategy = config?.accountSelection?.strategy || 'pipelined';
 
-    async function refreshData(showStatus = false) {
+    async function refreshData(arg = false) {
+        const forceLive = typeof arg === 'boolean' ? arg : !!arg?.forceLive;
+        const showStatus = typeof arg === 'boolean' ? arg : !!arg?.showStatus;
+
         if (showStatus) {
-            setStatus('Reloading accounts, proxy status & live quotas...', 0);
+            setStatus(forceLive ? 'Probing live quotas sequentially (anti-burst mode)...' : 'Reloading accounts & cached proxy state...', 0);
         }
         reloadConfig();
         currentStrategy = config?.accountSelection?.strategy || 'pipelined';
 
-        // Notify proxy daemon to reload its in-memory accounts & config from disk
         try {
             await fetch(`http://127.0.0.1:${port}/reload`, {
                 method: 'POST',
@@ -293,25 +295,33 @@ export async function runInteractiveDashboard(options = {}) {
         }
 
         accountsData = await loadAccounts(ACCOUNT_CONFIG_PATH);
+        const needsInitialSeed = accountsData.accounts.some(
+            (acc) => acc.enabled !== false && !acc.isInvalid && (!acc.quota?.models || Object.keys(acc.quota.models).length === 0)
+        );
 
         try {
-            const [healthRes, limitsRes] = await Promise.allSettled([
-                fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(4000) }),
-                fetch(`http://127.0.0.1:${port}/account-limits`, { signal: AbortSignal.timeout(6000) })
-            ]);
-
-            if (healthRes.status === 'fulfilled' && healthRes.value.ok) {
-                proxyHealth = await healthRes.value.json();
+            if (forceLive || needsInitialSeed) {
+                const probeTimeoutMs = Math.max(12000, (accountsData.accounts.length + 1) * 3500);
+                const limitsUrl = forceLive
+                    ? `http://127.0.0.1:${port}/account-limits?refresh=true`
+                    : `http://127.0.0.1:${port}/account-limits`;
+                const limitsRes = await fetch(limitsUrl, { signal: AbortSignal.timeout(probeTimeoutMs) });
+                if (limitsRes.ok) {
+                    proxyLimits = await limitsRes.json();
+                }
             }
-            if (limitsRes.status === 'fulfilled' && limitsRes.value.ok) {
-                proxyLimits = await limitsRes.value.json();
+
+            const healthRes = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(4000) });
+            if (healthRes.ok) {
+                proxyHealth = await healthRes.json();
+            } else {
+                proxyHealth = null;
             }
         } catch {
             proxyHealth = null;
-            proxyLimits = null;
+            if (forceLive) proxyLimits = null;
         }
 
-        // Re-read accounts after limits call in case quotas were saved to disk by server
         accountsData = await loadAccounts(ACCOUNT_CONFIG_PATH);
 
         if (showStatus) {
@@ -429,8 +439,16 @@ export async function runInteractiveDashboard(options = {}) {
                 const live = liveMap.get(acc.email) || {};
                 const lim = limitsMap.get(acc.email) || {};
 
-                const isInvalid = acc.isInvalid || live.status === 'invalid';
-                const hasVerifyUrl = !!acc.verifyUrl;
+                const isInvalid = acc.isInvalid || live.status === 'invalid' || live.status === 'banned' || live.status === 'verify-required';
+                const hasVerifyUrl = !!(acc.verifyUrl || live.verifyUrl);
+                const invalidReasonLower = (acc.invalidReason || live.error || '').toLowerCase();
+                const isBanned = !hasVerifyUrl && (
+                    live.status === 'banned' ||
+                    invalidReasonLower.includes('tos') ||
+                    invalidReasonLower.includes('banned') ||
+                    invalidReasonLower.includes('suspended') ||
+                    invalidReasonLower.includes('terms of service')
+                );
                 const isLimited = Object.values(acc.modelRateLimits || {}).some(
                     l => l.isRateLimited && l.resetTime > Date.now()
                 ) || (live.rateLimitCooldownRemaining > 0);
@@ -489,6 +507,9 @@ export async function runInteractiveDashboard(options = {}) {
                 } else if (hasVerifyUrl) {
                     statusLabel = '[verify-req]';
                     statusColor = c.statusDanger;
+                } else if (isBanned) {
+                    statusLabel = '[banned]';
+                    statusColor = c.statusDanger;
                 } else if (isInvalid) {
                     statusLabel = '[invalid]';
                     statusColor = c.statusDanger;
@@ -522,6 +543,8 @@ export async function runInteractiveDashboard(options = {}) {
 
                     if (hasVerifyUrl) {
                         detailsLine = `${c.textMuted}Details:${c.reset} ${timeAgo} ${c.textDark}|${c.reset} ${c.statusDanger}Google check needed - press V to verify in browser, or R to re-login${c.reset}`;
+                    } else if (isBanned) {
+                        detailsLine = `${c.textMuted}Details:${c.reset} ${timeAgo} ${c.textDark}|${c.reset} ${c.statusDanger}ToS / service restricted by Google - auto-refresh locked${c.reset}`;
                     } else if (isInvalid) {
                         detailsLine = `${c.textMuted}Details:${c.reset} ${timeAgo} ${c.textDark}|${c.reset} ${c.statusDanger}invalid - press R to re-login${c.reset}`;
                     } else {
@@ -607,7 +630,9 @@ export async function runInteractiveDashboard(options = {}) {
             await runSubScreen(async () => {
                 let thresholdPct = Math.round((config?.accountSelection?.stepThreshold || 0.05) * 100);
                 let reqCap = config?.accountSelection?.requestThreshold || 20;
+                let minStaySec = config?.accountSelection?.minStaySec ?? 180;
                 let cooldown = config?.switchAccountDelayMs || 5000;
+                let quotaTtlSec = config?.quotaRefreshTtlSec ?? 300;
                 let loginTimeout = config?.loginTimeoutSec || 120;
                 let proxyPort = config?.port || 43128;
                 let secretKey = config?.apiKey || 'atc-local-key';
@@ -621,6 +646,7 @@ export async function runInteractiveDashboard(options = {}) {
                         id: 'threshold',
                         label: 'Quota Rotation Threshold',
                         unit: '%',
+                        isNumeric: true,
                         desc: 'Rotates account after using this quota % to stagger 5h recovery in parallel',
                         min: 1, max: 50, step: 1,
                         safeMin: 3, safeMax: 15,
@@ -631,6 +657,7 @@ export async function runInteractiveDashboard(options = {}) {
                         id: 'reqCap',
                         label: 'Fallback Request Cap',
                         unit: 'reqs',
+                        isNumeric: true,
                         desc: 'Rotates account after this many requests if quota telemetry delayed',
                         min: 5, max: 200, step: 5,
                         safeMin: 10, safeMax: 50,
@@ -638,9 +665,21 @@ export async function runInteractiveDashboard(options = {}) {
                         warnHigh: 'Above 50 reqs: risk of depleting account quota before switching'
                     },
                     {
+                        id: 'minStay',
+                        label: 'Min Account Stay Time',
+                        unit: 's',
+                        isNumeric: true,
+                        desc: 'Minimum seconds (+random jitter) on a healthy account before proactive rotation',
+                        min: 0, max: 1800, step: 30,
+                        safeMin: 60, safeMax: 600,
+                        warnLow: 'Below 60s: fast multi-account hopping under subagent bursts increases ban risk',
+                        warnHigh: 'Above 600s: single account absorbs longer bursts before pipelined rotation'
+                    },
+                    {
                         id: 'cooldown',
                         label: 'Switch Delay Cooldown',
                         unit: 'ms',
+                        isNumeric: true,
                         desc: 'Cooldown delay in milliseconds before switching account on error',
                         min: 500, max: 30000, step: 500,
                         safeMin: 2000, safeMax: 10000,
@@ -648,9 +687,21 @@ export async function runInteractiveDashboard(options = {}) {
                         warnHigh: 'Above 10000ms: sluggish error recovery time for user requests'
                     },
                     {
+                        id: 'quotaTtl',
+                        label: 'Quota Poll Cache TTL',
+                        unit: 's',
+                        isNumeric: true,
+                        desc: 'Cache lifetime for /account-limits telemetry to prevent multi-account polling storms',
+                        min: 30, max: 3600, step: 30,
+                        safeMin: 120, safeMax: 1800,
+                        warnLow: 'Below 120s: frequent multi-account quota probes from one IP may trigger scrutiny',
+                        warnHigh: 'Above 1800s: dashboard quota percentages may lag behind real usage'
+                    },
+                    {
                         id: 'loginTimeout',
                         label: 'OAuth Login Timeout',
                         unit: 's',
+                        isNumeric: true,
                         desc: 'Maximum duration to wait for Google sign-in browser callback before aborting',
                         min: 30, max: 600, step: 15,
                         safeMin: 60, safeMax: 300,
@@ -661,6 +712,7 @@ export async function runInteractiveDashboard(options = {}) {
                         id: 'port',
                         label: 'Proxy Listen Port',
                         unit: '',
+                        isNumeric: true,
                         desc: 'Local HTTP proxy listen port (requires proxy restart to take effect)',
                         min: 1024, max: 65535, step: 1,
                         safeMin: 1024, safeMax: 65535,
@@ -678,7 +730,7 @@ export async function runInteractiveDashboard(options = {}) {
                         id: 'reset',
                         label: 'Reset All to Defaults',
                         unit: '',
-                        desc: 'Restore recommended safe defaults (5% quota, 20 requests, 5000ms cooldown, 120s timeout, atc-local-key)'
+                        desc: 'Restore recommended safe defaults (5% quota, 20 reqs, 180s stay, 5000ms cooldown, 300s TTL, 120s login)'
                     },
                     {
                         id: 'save',
@@ -689,27 +741,33 @@ export async function runInteractiveDashboard(options = {}) {
                 ];
 
                 function getValNum(idx) {
-                    if (idx === 0) return thresholdPct;
-                    if (idx === 1) return reqCap;
-                    if (idx === 2) return cooldown;
-                    if (idx === 3) return loginTimeout;
-                    if (idx === 4) return proxyPort;
+                    const id = settingsMeta[idx]?.id;
+                    if (id === 'threshold') return thresholdPct;
+                    if (id === 'reqCap') return reqCap;
+                    if (id === 'minStay') return minStaySec;
+                    if (id === 'cooldown') return cooldown;
+                    if (id === 'quotaTtl') return quotaTtlSec;
+                    if (id === 'loginTimeout') return loginTimeout;
+                    if (id === 'port') return proxyPort;
                     return 0;
                 }
 
                 function setValNum(idx, num) {
                     const meta = settingsMeta[idx];
+                    if (!meta?.isNumeric) return;
                     const clamped = Math.max(meta.min, Math.min(meta.max, num));
-                    if (idx === 0) thresholdPct = clamped;
-                    else if (idx === 1) reqCap = clamped;
-                    else if (idx === 2) cooldown = clamped;
-                    else if (idx === 3) loginTimeout = clamped;
-                    else if (idx === 4) proxyPort = clamped;
+                    if (meta.id === 'threshold') thresholdPct = clamped;
+                    else if (meta.id === 'reqCap') reqCap = clamped;
+                    else if (meta.id === 'minStay') minStaySec = clamped;
+                    else if (meta.id === 'cooldown') cooldown = clamped;
+                    else if (meta.id === 'quotaTtl') quotaTtlSec = clamped;
+                    else if (meta.id === 'loginTimeout') loginTimeout = clamped;
+                    else if (meta.id === 'port') proxyPort = clamped;
                 }
 
                 function getWarning(idx) {
-                    if (idx >= 5) return null;
                     const meta = settingsMeta[idx];
+                    if (!meta?.isNumeric) return null;
                     const val = getValNum(idx);
                     if (val < meta.safeMin) return meta.warnLow;
                     if (val > meta.safeMax) return meta.warnHigh;
@@ -717,12 +775,15 @@ export async function runInteractiveDashboard(options = {}) {
                 }
 
                 function getDisplayVal(idx) {
-                    if (idx === 0) return thresholdPct + '%';
-                    if (idx === 1) return reqCap + ' reqs';
-                    if (idx === 2) return cooldown + 'ms';
-                    if (idx === 3) return loginTimeout + 's';
-                    if (idx === 4) return proxyPort.toString();
-                    if (idx === 5) return secretKey || '(none)';
+                    const id = settingsMeta[idx]?.id;
+                    if (id === 'threshold') return thresholdPct + '%';
+                    if (id === 'reqCap') return reqCap + ' reqs';
+                    if (id === 'minStay') return minStaySec + 's';
+                    if (id === 'cooldown') return cooldown + 'ms';
+                    if (id === 'quotaTtl') return quotaTtlSec + 's';
+                    if (id === 'loginTimeout') return loginTimeout + 's';
+                    if (id === 'port') return proxyPort.toString();
+                    if (id === 'secretKey') return secretKey || '(none)';
                     return '';
                 }
 
@@ -739,7 +800,7 @@ export async function runInteractiveDashboard(options = {}) {
                         const warn = getWarning(i);
 
                         let line = '';
-                        if (i <= 4) {
+                        if (meta.isNumeric || meta.isText) {
                             let valBox = '';
                             if (isSel && isFocusEditing) {
                                 valBox = `\x1b[1;38;5;226;48;5;236m[ ${editBuffer || ''}_ ]\x1b[0m \x1b[38;5;220m✎ editing\x1b[0m`;
@@ -789,8 +850,20 @@ export async function runInteractiveDashboard(options = {}) {
                 }
 
                 function saveAllSettings() {
-                    const accSel = { ...(config.accountSelection || {}), stepThreshold: thresholdPct / 100, requestThreshold: reqCap };
-                    saveConfig({ accountSelection: accSel, switchAccountDelayMs: cooldown, loginTimeoutSec: loginTimeout, port: proxyPort, apiKey: secretKey });
+                    const accSel = {
+                        ...(config.accountSelection || {}),
+                        stepThreshold: thresholdPct / 100,
+                        requestThreshold: reqCap,
+                        minStaySec
+                    };
+                    saveConfig({
+                        accountSelection: accSel,
+                        switchAccountDelayMs: cooldown,
+                        quotaRefreshTtlSec: quotaTtlSec,
+                        loginTimeoutSec: loginTimeout,
+                        port: proxyPort,
+                        apiKey: secretKey
+                    });
                     const cs = readClaudeSettings();
                     cs.env = cs.env || {};
                     cs.env.ANTHROPIC_API_KEY = secretKey;
@@ -803,10 +876,11 @@ export async function runInteractiveDashboard(options = {}) {
 
                     function onKey(str, key) {
                         if (!key) return;
+                        const activeMeta = settingsMeta[activeSettingIdx];
 
                         if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
                             if (isFocusEditing) {
-                                if (activeSettingIdx === 5) {
+                                if (activeMeta?.isText) {
                                     if (editBuffer) secretKey = editBuffer;
                                 } else if (editBuffer) {
                                     const parsed = parseInt(editBuffer, 10);
@@ -826,7 +900,7 @@ export async function runInteractiveDashboard(options = {}) {
 
                         if (isFocusEditing) {
                             if (key.name === 'return' || key.name === 'enter') {
-                                if (activeSettingIdx === 5) {
+                                if (activeMeta?.isText) {
                                     secretKey = editBuffer.trim() || 'atc-local-key';
                                 } else if (editBuffer) {
                                     const parsed = parseInt(editBuffer, 10);
@@ -834,7 +908,7 @@ export async function runInteractiveDashboard(options = {}) {
                                 }
                                 isFocusEditing = false;
                                 editBuffer = '';
-                                notice = `Updated ${settingsMeta[activeSettingIdx].label} to ${getDisplayVal(activeSettingIdx)}`;
+                                notice = `Updated ${activeMeta.label} to ${getDisplayVal(activeSettingIdx)}`;
                                 renderScreen();
                                 return;
                             }
@@ -845,7 +919,7 @@ export async function runInteractiveDashboard(options = {}) {
                                 return;
                             }
 
-                            if (activeSettingIdx === 5) {
+                            if (activeMeta?.isText) {
                                 if (str && /^[a-zA-Z0-9_\-\.]$/.test(str) && editBuffer.length < 64) {
                                     editBuffer += str;
                                     renderScreen();
@@ -864,8 +938,7 @@ export async function runInteractiveDashboard(options = {}) {
                             if (key.name === 'left') {
                                 let current = parseInt(editBuffer, 10);
                                 if (isNaN(current)) current = getValNum(activeSettingIdx);
-                                const step = settingsMeta[activeSettingIdx].step;
-                                const updated = Math.max(settingsMeta[activeSettingIdx].min, current - step);
+                                const updated = Math.max(activeMeta.min, current - activeMeta.step);
                                 editBuffer = updated.toString();
                                 renderScreen();
                                 return;
@@ -874,8 +947,7 @@ export async function runInteractiveDashboard(options = {}) {
                             if (key.name === 'right') {
                                 let current = parseInt(editBuffer, 10);
                                 if (isNaN(current)) current = getValNum(activeSettingIdx);
-                                const step = settingsMeta[activeSettingIdx].step;
-                                const updated = Math.min(settingsMeta[activeSettingIdx].max, current + step);
+                                const updated = Math.min(activeMeta.max, current + activeMeta.step);
                                 editBuffer = updated.toString();
                                 renderScreen();
                                 return;
@@ -897,39 +969,37 @@ export async function runInteractiveDashboard(options = {}) {
                             return;
                         }
 
-                        if (key.name === 'left' && activeSettingIdx < 5) {
+                        if (key.name === 'left' && activeMeta?.isNumeric) {
                             notice = '';
-                            const meta = settingsMeta[activeSettingIdx];
                             const cur = getValNum(activeSettingIdx);
-                            const next = Math.max(meta.min, cur - meta.step);
-                            setValNum(activeSettingIdx, next);
+                            setValNum(activeSettingIdx, Math.max(activeMeta.min, cur - activeMeta.step));
                             renderScreen();
                             return;
                         }
 
-                        if (key.name === 'right' && activeSettingIdx < 5) {
+                        if (key.name === 'right' && activeMeta?.isNumeric) {
                             notice = '';
-                            const meta = settingsMeta[activeSettingIdx];
                             const cur = getValNum(activeSettingIdx);
-                            const next = Math.min(meta.max, cur + meta.step);
-                            setValNum(activeSettingIdx, next);
+                            setValNum(activeSettingIdx, Math.min(activeMeta.max, cur + activeMeta.step));
                             renderScreen();
                             return;
                         }
 
                         if (key.name === 'return' || key.name === 'enter') {
                             notice = '';
-                            if (activeSettingIdx <= 5) {
+                            if (activeMeta?.isNumeric || activeMeta?.isText) {
                                 isFocusEditing = true;
-                                editBuffer = activeSettingIdx === 5 ? secretKey : getValNum(activeSettingIdx).toString();
+                                editBuffer = activeMeta.isText ? secretKey : getValNum(activeSettingIdx).toString();
                                 renderScreen();
                                 return;
                             }
 
-                            if (activeSettingIdx === 6) {
+                            if (activeMeta?.id === 'reset') {
                                 thresholdPct = 5;
                                 reqCap = 20;
+                                minStaySec = 180;
                                 cooldown = 5000;
+                                quotaTtlSec = 300;
                                 loginTimeout = 120;
                                 proxyPort = 43128;
                                 secretKey = 'atc-local-key';
@@ -938,7 +1008,7 @@ export async function runInteractiveDashboard(options = {}) {
                                 return;
                             }
 
-                            if (activeSettingIdx === 7) {
+                            if (activeMeta?.id === 'save') {
                                 saveAllSettings();
                                 cleanup();
                                 resolve();
@@ -1656,16 +1726,25 @@ export async function runInteractiveDashboard(options = {}) {
                             const problems = [];
                             accountsData.accounts.forEach((acc, i) => {
                                 const live = liveMap.get(acc.email) || {};
-                                const isInvalid = acc.isInvalid || live.status === 'invalid';
-                                const hasVerifyUrl = !!acc.verifyUrl;
-                                const isLimited = live.status === 'rate-limit' || (live.rateLimitReset && live.rateLimitReset > Date.now());
+                                const isInvalid = acc.isInvalid || live.status === 'invalid' || live.status === 'banned' || live.status === 'verify-required';
+                                const hasVerifyUrl = !!(acc.verifyUrl || live.verifyUrl);
+                                const reasonLower = (acc.invalidReason || live.error || '').toLowerCase();
+                                const isBanned = !hasVerifyUrl && (
+                                    live.status === 'banned' ||
+                                    reasonLower.includes('tos') ||
+                                    reasonLower.includes('banned') ||
+                                    reasonLower.includes('suspended') ||
+                                    reasonLower.includes('terms of service')
+                                );
+                                const isLimited = live.status === 'rate-limit' || live.status === 'rate-limited' || (live.rateLimitReset && live.rateLimitReset > Date.now());
                                 const isDisabled = !acc.enabled;
 
-                                if (isInvalid || hasVerifyUrl || isLimited || isDisabled) {
+                                if (isInvalid || hasVerifyUrl || isBanned || isLimited || isDisabled) {
                                     problems.push({
                                         index: i + 1,
                                         account: acc,
                                         isInvalid,
+                                        isBanned,
                                         hasVerifyUrl,
                                         isLimited,
                                         isDisabled
@@ -1698,6 +1777,7 @@ export async function runInteractiveDashboard(options = {}) {
 
                                     let badge = '';
                                     if (p.hasVerifyUrl) badge = `${c.statusDanger}[verify-req]${c.reset}`;
+                                    else if (p.isBanned) badge = `${c.statusDanger}[banned]${c.reset}`;
                                     else if (p.isInvalid) badge = `${c.statusDanger}[invalid]${c.reset}`;
                                     else if (p.isLimited) badge = `${c.statusWarn}[rate-limit]${c.reset}`;
                                     else if (p.isDisabled) badge = `${c.statusMuted}[disabled]${c.reset}`;
@@ -1712,6 +1792,7 @@ export async function runInteractiveDashboard(options = {}) {
                                 const curP = problems[selectedProblemIdx];
                                 let fixAction = '';
                                 if (curP.hasVerifyUrl) fixAction = 'Press V on Dashboard to open Google Verification link in browser';
+                                else if (curP.isBanned) fixAction = 'Service restricted by Google (ToS) · Auto-refresh locked; appeal via Google Support';
                                 else if (curP.isInvalid) fixAction = 'Press R on Dashboard to re-authenticate via OAuth';
                                 else if (curP.isLimited) fixAction = 'Account cooling down · Auto-recovers when quota resets';
                                 else if (curP.isDisabled) fixAction = 'Press T on Dashboard to re-enable account in pool';
@@ -1857,4 +1938,3 @@ export async function runInteractiveDashboard(options = {}) {
         process.stdin.on('keypress', onKeypress);
     });
 }
-

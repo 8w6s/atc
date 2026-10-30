@@ -39,7 +39,7 @@ async function fetchAndSaveSubscription(token, account, onSave) {
 
     try {
         // Call discoverProject just to get subscription info
-        const { subscription } = await discoverProject(token, account.projectId);
+        const { subscription } = await discoverProject(token, account.projectId, account.email);
         if (subscription && subscription.tier !== 'unknown') {
             account.subscription = subscription;
             if (onSave) {
@@ -65,11 +65,24 @@ async function fetchAndSaveSubscription(token, account, onSave) {
  * @throws {Error} If token refresh fails
  */
 export async function getTokenForAccount(account, tokenCache, onInvalid, onSave) {
-    // Safety Shield: Block token refresh for permanently restricted or ToS-suspended accounts
+    /*
+     * Block background token refresh on ToS-suspended accounts and permanently
+     * revoked refresh tokens (invalid_grant) so the proxy never hammers Google's
+     * OAuth endpoint in a silent retry loop before operator re-authentication.
+     */
     if (account.isInvalid) {
         const reason = (account.invalidReason || '').toLowerCase();
-        if (reason.includes('tos') || reason.includes('banned') || reason.includes('suspended') || reason.includes('terms of service')) {
-            throw new Error(`[ATC SAFETY SHIELD] Account ${account.email} is restricted (${account.invalidReason}). Token refresh blocked to protect Google Account integrity.`);
+        if (
+            reason.includes('tos') ||
+            reason.includes('banned') ||
+            reason.includes('suspended') ||
+            reason.includes('terms of service') ||
+            reason.includes('disabled in this account') ||
+            reason.includes('invalid_grant') ||
+            reason.includes('revoked') ||
+            reason.includes('invalid_client')
+        ) {
+            throw new Error(`[ATC SAFETY SHIELD] Account ${account.email} is restricted or revoked (${account.invalidReason}). Token refresh blocked until manual re-login.`);
         }
     }
 
@@ -167,7 +180,7 @@ export async function getProjectForAccount(account, token, projectCache, onSave 
 
     // Discover managed project, passing projectId for metadata.duetProject
     // Reference: opencode-antigravity-auth - discoverProject handles fallback internally
-    const { project, subscription } = await discoverProject(token, parts.projectId);
+    const { project, subscription } = await discoverProject(token, parts.projectId, account.email);
 
     // Store managedProjectId back in refresh token (if we got a real project)
     if (project && project !== DEFAULT_PROJECT_ID) {
@@ -224,7 +237,7 @@ export async function getProjectForAccount(account, token, projectCache, onSave 
  * @param {string} [projectId] - Optional project ID from refresh token (for metadata.duetProject)
  * @returns {Promise<{project: string, subscription: {tier: string, projectId: string|null, detectedAt: string}|null}>} Project and subscription info
  */
-export async function discoverProject(token, projectId = undefined) {
+export async function discoverProject(token, projectId = undefined, accountKey = null) {
     let lastError = null;
     let gotSuccessfulResponse = false;
     let loadCodeAssistData = null;
@@ -239,11 +252,11 @@ export async function discoverProject(token, projectId = undefined) {
             const response = await throttledFetch(`${endpoint}/v1internal:loadCodeAssist`, {
                 method: 'POST',
                 headers: {
-                    'Authorization': `Bearer ${token}`,
-                    'Content-Type': 'application/json',
-                    ...LOAD_CODE_ASSIST_HEADERS
+                    ...LOAD_CODE_ASSIST_HEADERS,
+                    'Authorization': `Bearer ${token}`
                 },
-                body: JSON.stringify({ metadata, mode: 1 })
+                body: JSON.stringify({ metadata, mode: 1 }),
+                accountKey
             });
 
             if (!response.ok) {

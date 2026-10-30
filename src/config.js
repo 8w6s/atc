@@ -62,9 +62,13 @@ const DEFAULT_CONFIG = {
         clientSecret: process.env.GOOGLE_OAUTH_CLIENT_SECRET || ''
     },
     loginTimeoutSec: 120, // OAuth login callback timeout in seconds (default 120s / 2m)
+    quotaRefreshTtlSec: 300, // Cache lifetime for live quota probes (seconds)
     // Account selection strategy configuration
     accountSelection: {
-        strategy: 'hybrid',           // 'sticky' | 'round-robin' | 'hybrid'
+        strategy: 'pipelined',        // 'pipelined' | 'sticky' | 'round-robin' | 'hybrid'
+        stepThreshold: 0.05,          // 5% quota step before proactive rotation
+        requestThreshold: 20,         // Fallback request cap if quota telemetry lags
+        minStaySec: 180,              // Minimum stay time (seconds) before proactive rotation
         // Hybrid strategy tuning (optional - sensible defaults)
         healthScore: {
             initial: 70,              // Starting score for new accounts

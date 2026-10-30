@@ -6,7 +6,7 @@
 import { homedir, platform, arch } from 'os';
 import { join } from 'path';
 import { config } from './config.js';
-import { generateSmartUserAgent, getClientVersion } from './utils/version-detector.js';
+import { generateSmartUserAgent } from './utils/version-detector.js';
 import { getRegisteredModel } from './cloudcode/model-registry.js';
 
 /**
@@ -98,22 +98,14 @@ export const ANTIGRAVITY_ENDPOINT_FALLBACKS = [
     ANTIGRAVITY_ENDPOINT_PROD
 ];
 
-// Required headers for Antigravity API requests
-// Headers for general Antigravity API requests
-// Strictly matches the generic 'u' method in main.js
 export const ANTIGRAVITY_HEADERS = {
-    'User-Agent': getPlatformUserAgent(),
-    'Content-Type': 'application/json',
-    'X-Client-Name': 'antigravity',
-    'X-Client-Version': getClientVersion()
+    get 'User-Agent'() {
+        return getPlatformUserAgent();
+    },
+    'Content-Type': 'application/json'
 };
 
-// Endpoint order for loadCodeAssist (prod first)
-// loadCodeAssist works better on prod for fresh/unprovisioned accounts
-export const LOAD_CODE_ASSIST_ENDPOINTS = [
-    ANTIGRAVITY_ENDPOINT_PROD,
-    ANTIGRAVITY_ENDPOINT_DAILY
-];
+export const LOAD_CODE_ASSIST_ENDPOINTS = ANTIGRAVITY_ENDPOINT_FALLBACKS;
 
 // Endpoint order for onboardUser (same as generateContent fallbacks)
 export const ONBOARD_USER_ENDPOINTS = ANTIGRAVITY_ENDPOINT_FALLBACKS;

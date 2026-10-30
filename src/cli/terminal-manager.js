@@ -16,6 +16,7 @@ import {
 import { loadAccounts, saveAccounts } from '../account-manager/storage.js';
 import { getTokenForAccount, getProjectForAccount } from '../account-manager/credentials.js';
 import { fetchAvailableModels } from '../cloudcode/model-api.js';
+import { sleep } from '../utils/helpers.js';
 import { config } from '../config.js';
 
 const CONFIG_DIR = dirname(ACCOUNT_CONFIG_PATH);
@@ -370,6 +371,8 @@ export async function checkAccounts() {
 
     console.log(`\n${c.bold}Probing ${accounts.length} account credential(s)...${c.reset}\n`);
 
+    let probedCount = 0;
+
     for (let i = 0; i < accounts.length; i++) {
         const acc = accounts[i];
         process.stdout.write(`  [${i + 1}/${accounts.length}] ${c.bold}${acc.email}${c.reset} ... `);
@@ -378,6 +381,22 @@ export async function checkAccounts() {
             console.log(`${c.gray}SKIPPED (no refresh token)${c.reset}`);
             continue;
         }
+
+        const reasonLower = (acc.invalidReason || '').toLowerCase();
+        if (acc.isInvalid && (
+            reasonLower.includes('tos') ||
+            reasonLower.includes('banned') ||
+            reasonLower.includes('suspended') ||
+            reasonLower.includes('terms of service')
+        )) {
+            console.log(`${c.red}SKIPPED (ToS restricted — refresh locked)${c.reset}`);
+            continue;
+        }
+
+        if (probedCount > 0) {
+            await sleep(350 + Math.floor(Math.random() * 350));
+        }
+        probedCount++;
 
         try {
             const tokens = await refreshAccessToken(acc.refreshToken);

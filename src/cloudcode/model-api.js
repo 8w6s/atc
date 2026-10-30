@@ -16,6 +16,7 @@ import {
 import { logger } from '../utils/logger.js';
 import { throttledFetch } from '../utils/helpers.js';
 import { recordModels } from './model-registry.js';
+import { isAccountBanned, extractVerificationUrl } from './rate-limit-state.js';
 
 // Model validation cache
 const modelCache = {
@@ -109,11 +110,10 @@ export async function listModels(token) {
  * @param {string} [projectId] - Optional project ID for accurate quota info
  * @returns {Promise<Object>} Raw response from fetchAvailableModels API
  */
-export async function fetchAvailableModels(token, projectId = null) {
+export async function fetchAvailableModels(token, projectId = null, accountKey = null) {
     const headers = {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-        ...ANTIGRAVITY_HEADERS
+        ...ANTIGRAVITY_HEADERS,
+        'Authorization': `Bearer ${token}`
     };
 
     // Include project ID in body for accurate quota info (per Quotio implementation)
@@ -125,24 +125,35 @@ export async function fetchAvailableModels(token, projectId = null) {
             const response = await throttledFetch(url, {
                 method: 'POST',
                 headers,
-                body: JSON.stringify(body)
+                body: JSON.stringify(body),
+                accountKey
             });
 
             if (!response.ok) {
                 const errorText = await response.text();
                 logger.warn(`[CloudCode] fetchAvailableModels error at ${endpoint}: ${response.status}`);
-                // Detect permanent ToS ban — no point trying other endpoints
                 if (response.status === 403) {
-                    const lower = (errorText || '').toLowerCase();
-                    if (lower.includes('has been disabled') && lower.includes('violation of terms of service')) {
+                    if (isAccountBanned(errorText)) {
                         throw new Error(`ACCOUNT_BANNED: ${errorText}`);
                     }
+                    const verifyUrl = extractVerificationUrl(errorText);
+                    if (verifyUrl) {
+                        const err = new Error(`VALIDATION_REQUIRED: ${errorText}`);
+                        err.verifyUrl = verifyUrl;
+                        throw err;
+                    }
+                    throw new Error(`ACCOUNT_FORBIDDEN: ${errorText}`);
                 }
                 continue;
             }
 
             return await response.json();
         } catch (error) {
+            if (error.message?.startsWith('ACCOUNT_BANNED:') ||
+                error.message?.startsWith('VALIDATION_REQUIRED:') ||
+                error.message?.startsWith('ACCOUNT_FORBIDDEN:')) {
+                throw error;
+            }
             logger.warn(`[CloudCode] fetchAvailableModels failed at ${endpoint}:`, error.message);
         }
     }
@@ -156,10 +167,11 @@ export async function fetchAvailableModels(token, projectId = null) {
  *
  * @param {string} token - OAuth access token
  * @param {string} [projectId] - Optional project ID for accurate quota info
+ * @param {string|null} [accountKey] - Optional account identifier for socket isolation
  * @returns {Promise<Object>} Map of modelId -> { remainingFraction, resetTime }
  */
-export async function getModelQuotas(token, projectId = null) {
-    const data = await fetchAvailableModels(token, projectId);
+export async function getModelQuotas(token, projectId = null, accountKey = null) {
+    const data = await fetchAvailableModels(token, projectId, accountKey);
     if (!data || !data.models) return {};
     recordModels(data);
 
@@ -212,11 +224,10 @@ export function parseTierId(tierId) {
  * @param {string} token - OAuth access token
  * @returns {Promise<{tier: string, projectId: string|null}>} Subscription tier (free/pro/ultra) and project ID
  */
-export async function getSubscriptionTier(token) {
+export async function getSubscriptionTier(token, accountKey = null) {
     const headers = {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-        ...LOAD_CODE_ASSIST_HEADERS
+        ...LOAD_CODE_ASSIST_HEADERS,
+        'Authorization': `Bearer ${token}`
     };
 
     for (const endpoint of LOAD_CODE_ASSIST_ENDPOINTS) {
@@ -228,18 +239,24 @@ export async function getSubscriptionTier(token) {
                 body: JSON.stringify({
                     metadata: CLIENT_METADATA,
                     mode: 1
-                })
+                }),
+                accountKey
             });
 
             if (!response.ok) {
                 const errorText = await response.text().catch(() => '');
                 logger.warn(`[CloudCode] loadCodeAssist error at ${endpoint}: ${response.status}`);
-                // Detect permanent ToS ban — no point trying other endpoints
                 if (response.status === 403) {
-                    const lower = (errorText || '').toLowerCase();
-                    if (lower.includes('has been disabled') && lower.includes('violation of terms of service')) {
+                    if (isAccountBanned(errorText)) {
                         throw new Error(`ACCOUNT_BANNED: ${errorText}`);
                     }
+                    const verifyUrl = extractVerificationUrl(errorText);
+                    if (verifyUrl) {
+                        const err = new Error(`VALIDATION_REQUIRED: ${errorText}`);
+                        err.verifyUrl = verifyUrl;
+                        throw err;
+                    }
+                    throw new Error(`ACCOUNT_FORBIDDEN: ${errorText}`);
                 }
                 continue;
             }
@@ -299,6 +316,11 @@ export async function getSubscriptionTier(token) {
 
             return { tier, projectId };
         } catch (error) {
+            if (error.message?.startsWith('ACCOUNT_BANNED:') ||
+                error.message?.startsWith('VALIDATION_REQUIRED:') ||
+                error.message?.startsWith('ACCOUNT_FORBIDDEN:')) {
+                throw error;
+            }
             logger.warn(`[CloudCode] loadCodeAssist failed at ${endpoint}:`, error.message);
         }
     }

@@ -9,11 +9,12 @@
 import crypto from 'crypto';
 import http from 'http';
 import {
-    ANTIGRAVITY_ENDPOINT_FALLBACKS,
+    LOAD_CODE_ASSIST_ENDPOINTS,
     LOAD_CODE_ASSIST_HEADERS,
     CLIENT_METADATA,
     OAUTH_CONFIG,
-    OAUTH_REDIRECT_URI
+    OAUTH_REDIRECT_URI,
+    getPlatformUserAgent
 } from '../constants.js';
 import { logger } from '../utils/logger.js';
 import { throttledFetch } from '../utils/helpers.js';
@@ -529,6 +530,7 @@ export async function exchangeCode(code, verifier) {
     const response = await throttledFetch(OAUTH_CONFIG.tokenUrl, {
         method: 'POST',
         headers: {
+            'User-Agent': getPlatformUserAgent(),
             'Content-Type': 'application/x-www-form-urlencoded'
         },
         body: new URLSearchParams({
@@ -580,6 +582,7 @@ export async function refreshAccessToken(compositeRefresh) {
     const response = await throttledFetch(OAUTH_CONFIG.tokenUrl, {
         method: 'POST',
         headers: {
+            'User-Agent': getPlatformUserAgent(),
             'Content-Type': 'application/x-www-form-urlencoded'
         },
         body: new URLSearchParams({
@@ -611,6 +614,7 @@ export async function refreshAccessToken(compositeRefresh) {
 export async function getUserEmail(accessToken) {
     const response = await throttledFetch(OAUTH_CONFIG.userInfoUrl, {
         headers: {
+            'User-Agent': getPlatformUserAgent(),
             'Authorization': `Bearer ${accessToken}`
         }
     });
@@ -634,17 +638,17 @@ export async function getUserEmail(accessToken) {
 export async function discoverProjectId(accessToken) {
     let loadCodeAssistData = null;
 
-    for (const endpoint of ANTIGRAVITY_ENDPOINT_FALLBACKS) {
+    for (const endpoint of LOAD_CODE_ASSIST_ENDPOINTS) {
         try {
             const response = await throttledFetch(`${endpoint}/v1internal:loadCodeAssist`, {
                 method: 'POST',
                 headers: {
-                    'Authorization': `Bearer ${accessToken}`,
-                    'Content-Type': 'application/json',
-                    ...LOAD_CODE_ASSIST_HEADERS
+                    ...LOAD_CODE_ASSIST_HEADERS,
+                    'Authorization': `Bearer ${accessToken}`
                 },
                 body: JSON.stringify({
-                    metadata: CLIENT_METADATA
+                    metadata: CLIENT_METADATA,
+                    mode: 1
                 })
             });
 
@@ -670,7 +674,7 @@ export async function discoverProjectId(accessToken) {
 
     // Try onboarding if we got a response but no project
     if (loadCodeAssistData) {
-        const tierId = getDefaultTierId(loadCodeAssistData.allowedTiers) || 'FREE';
+        const tierId = getDefaultTierId(loadCodeAssistData.allowedTiers) || 'free-tier';
         logger.info(`[OAuth] Onboarding user with tier: ${tierId}`);
 
         const onboardedProject = await onboardUser(accessToken, tierId);

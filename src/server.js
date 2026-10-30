@@ -9,8 +9,9 @@ import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { sendMessage, sendMessageStream, listModels, getModelQuotas, getSubscriptionTier, isValidModel } from './cloudcode/index.js';
-import { config } from './config.js';
-import { getPackageVersion } from './utils/helpers.js';
+import { config, reloadConfig } from './config.js';
+import { getPackageVersion, formatDuration, sleep } from './utils/helpers.js';
+import { resetVersionCache } from './utils/version-detector.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -18,7 +19,6 @@ import { forceRefresh } from './auth/token-extractor.js';
 import { REQUEST_BODY_LIMIT } from './constants.js';
 import { AccountManager } from './account-manager/index.js';
 import { clearThinkingSignatureCache } from './format/signature-cache.js';
-import { formatDuration } from './utils/helpers.js';
 import { logger } from './utils/logger.js';
 import usageStats from './modules/usage-stats.js';
 
@@ -244,8 +244,10 @@ app.post('/test/clear-signature-cache', (req, res) => {
  */
 app.all(['/api/accounts/reload', '/reload'], async (req, res) => {
     try {
+        reloadConfig();
+        resetVersionCache();
         await accountManager.reload();
-        res.json({ status: 'ok', message: 'Accounts reloaded from disk' });
+        res.json({ status: 'ok', message: 'Accounts and config reloaded from disk' });
     } catch (err) {
         res.status(500).json({ status: 'error', error: err.message });
     }
@@ -262,94 +264,140 @@ app.post('/api/shutdown', (req, res) => {
     }, 150);
 });
 
-/**
- * Health check endpoint - Detailed status
- * Returns status of all accounts including rate limits and model quotas
+function formatQuotaMap(quotas = {}) {
+    const formatted = {};
+    for (const [modelId, info] of Object.entries(quotas)) {
+        if (!info) continue;
+        formatted[modelId] = {
+            remaining: info.remaining ?? (info.remainingFraction !== null && info.remainingFraction !== undefined
+                ? `${Math.round(info.remainingFraction * 100)}%`
+                : 'N/A'),
+            remainingFraction: info.remainingFraction ?? null,
+            resetTime: info.resetTime || null
+        };
+    }
+    return formatted;
+}
+
+function classifyInvalidStatus(account) {
+    const reason = (account.invalidReason || '').toLowerCase();
+    if (account.verifyUrl) return 'verify-required';
+    if (reason.includes('tos') || reason.includes('banned') || reason.includes('suspended') || reason.includes('terms of service')) {
+        return 'banned';
+    }
+    return 'invalid';
+}
+
+let accountLimitsInFlight = null;
+
+/*
+ * Serve /health from in-memory quota state by default (zero upstream Google API
+ * calls) so dashboard renders, CLI status checks, and healthchecks never trigger
+ * simultaneous multi-account bursts. Pass ?refresh=true for sequential live probe.
  */
 app.get('/health', async (req, res) => {
     try {
         await ensureInitialized();
         const start = Date.now();
+        const liveProbe = req.query.refresh === 'true';
 
-        // Get high-level status first
         const status = accountManager.getStatus();
         const allAccounts = accountManager.getAllAccounts();
+        const detailedAccounts = [];
+        let didNetworkCall = false;
+        let dirty = false;
 
-        // Fetch quotas for each account in parallel to get detailed model info
-        const accountDetails = await Promise.allSettled(
-            allAccounts.map(async (account) => {
-                // Check model-specific rate limits
-                const activeModelLimits = Object.entries(account.modelRateLimits || {})
-                    .filter(([_, limit]) => limit.isRateLimited && limit.resetTime > Date.now());
-                const isRateLimited = activeModelLimits.length > 0;
-                const soonestReset = activeModelLimits.length > 0
-                    ? Math.min(...activeModelLimits.map(([_, l]) => l.resetTime))
-                    : null;
+        for (const account of allAccounts) {
+            const activeModelLimits = Object.entries(account.modelRateLimits || {})
+                .filter(([_, limit]) => limit.isRateLimited && limit.resetTime > Date.now());
+            const isRateLimited = activeModelLimits.length > 0;
+            const soonestReset = activeModelLimits.length > 0
+                ? Math.min(...activeModelLimits.map(([_, l]) => l.resetTime))
+                : null;
 
-                const baseInfo = {
-                    email: account.email,
-                    lastUsed: account.lastUsed ? new Date(account.lastUsed).toISOString() : null,
-                    modelRateLimits: account.modelRateLimits || {},
-                    rateLimitCooldownRemaining: soonestReset ? Math.max(0, soonestReset - Date.now()) : 0
+            const baseInfo = {
+                email: account.email,
+                lastUsed: account.lastUsed ? new Date(account.lastUsed).toISOString() : null,
+                verifyUrl: account.verifyUrl || null,
+                modelRateLimits: account.modelRateLimits || {},
+                rateLimitCooldownRemaining: soonestReset ? Math.max(0, soonestReset - Date.now()) : 0
+            };
+
+            if (account.isInvalid) {
+                detailedAccounts.push({
+                    ...baseInfo,
+                    status: classifyInvalidStatus(account),
+                    error: account.invalidReason,
+                    models: {}
+                });
+                continue;
+            }
+
+            if (!liveProbe || account.enabled === false) {
+                detailedAccounts.push({
+                    ...baseInfo,
+                    status: account.enabled === false ? 'disabled' : (isRateLimited ? 'rate-limited' : 'ok'),
+                    models: formatQuotaMap(account.quota?.models || {})
+                });
+                continue;
+            }
+
+            if (didNetworkCall) {
+                await sleep(300 + Math.floor(Math.random() * 350));
+            }
+
+            try {
+                didNetworkCall = true;
+                const token = await accountManager.getTokenForAccount(account);
+                const projectId = account.subscription?.projectId || account.projectId || null;
+                const quotas = await getModelQuotas(token, projectId, account.email);
+                account.quota = {
+                    models: quotas,
+                    lastChecked: Date.now()
                 };
+                dirty = true;
 
-                // Skip invalid accounts for quota check
-                if (account.isInvalid) {
-                    const isBanned = account.invalidReason?.toLowerCase().includes('banned') || 
-                                     account.invalidReason?.toLowerCase().includes('terms of service');
-                    return {
+                detailedAccounts.push({
+                    ...baseInfo,
+                    status: isRateLimited ? 'rate-limited' : 'ok',
+                    models: formatQuotaMap(quotas)
+                });
+            } catch (error) {
+                if (error.message?.startsWith('ACCOUNT_BANNED:')) {
+                    accountManager.markInvalid(account.email, 'Account suspended / ToS restriction by Google');
+                    dirty = true;
+                    detailedAccounts.push({
                         ...baseInfo,
-                        status: isBanned ? 'banned' : 'invalid',
-                        error: account.invalidReason,
+                        status: 'banned',
+                        error: 'Account suspended / ToS restriction by Google',
                         models: {}
-                    };
-                }
-
-                try {
-                    const token = await accountManager.getTokenForAccount(account);
-                    const projectId = account.subscription?.projectId || null;
-                    const quotas = await getModelQuotas(token, projectId);
-
-                    // Format quotas for readability
-                    const formattedQuotas = {};
-                    for (const [modelId, info] of Object.entries(quotas)) {
-                        formattedQuotas[modelId] = {
-                            remaining: info.remainingFraction !== null ? `${Math.round(info.remainingFraction * 100)}%` : 'N/A',
-                            remainingFraction: info.remainingFraction,
-                            resetTime: info.resetTime || null
-                        };
-                    }
-
-                    return {
+                    });
+                } else if (error.message?.startsWith('VALIDATION_REQUIRED:')) {
+                    accountManager.markInvalid(account.email, 'Account requires verification (403)', error.verifyUrl || null);
+                    dirty = true;
+                    detailedAccounts.push({
                         ...baseInfo,
-                        status: isRateLimited ? 'rate-limited' : 'ok',
-                        models: formattedQuotas
-                    };
-                } catch (error) {
-                    return {
+                        verifyUrl: error.verifyUrl || null,
+                        status: 'verify-required',
+                        error: 'Account requires verification (403)',
+                        models: {}
+                    });
+                } else {
+                    detailedAccounts.push({
                         ...baseInfo,
                         status: 'error',
                         error: error.message,
-                        models: {}
-                    };
+                        models: formatQuotaMap(account.quota?.models || {})
+                    });
                 }
-            })
-        );
-
-        // Process results
-        const detailedAccounts = accountDetails.map((result, index) => {
-            if (result.status === 'fulfilled') {
-                return result.value;
-            } else {
-                const acc = allAccounts[index];
-                return {
-                    email: acc.email,
-                    status: 'error',
-                    error: result.reason?.message || 'Unknown error',
-                    modelRateLimits: acc.modelRateLimits || {}
-                };
             }
-        });
+        }
+
+        if (dirty) {
+            accountManager.saveToDisk().catch((err) => {
+                logger.error('[Server] Failed to persist health quota snapshot:', err);
+            });
+        }
 
         const activeEmail = accountManager.getCurrentAccount()?.email || null;
         const activeIndex = accountManager.getCurrentIndex();
@@ -380,98 +428,151 @@ app.get('/health', async (req, res) => {
     }
 });
 
-/**
- * Account limits endpoint - fetch quota/limits for all accounts × all models
- * Returns a table showing remaining quota and reset time for each combination
- * Use ?format=table for ASCII table output, default is JSON
+/*
+ * Probe account limits sequentially with random jitter and a configurable TTL
+ * cache (default 300s) instead of firing 2*N parallel Cloud Code requests across
+ * all consumer accounts on every UI refresh.
  */
 app.get('/account-limits', async (req, res) => {
     try {
         await ensureInitialized();
-        const allAccounts = accountManager.getAllAccounts();
         const format = req.query.format || 'json';
         const includeHistory = req.query.includeHistory === 'true';
+        const forceLive = req.query.refresh === 'true';
+        const forceSub = req.query.refreshSubscription === 'true';
+        const ttlMs = Math.max(0, (config?.quotaRefreshTtlSec ?? 300) * 1000);
+        const subTtlMs = 60 * 60 * 1000;
 
-        // Fetch quotas for each account in parallel
-        const results = await Promise.allSettled(
-            allAccounts.map(async (account) => {
-                // Skip invalid accounts
+        const runLimitsCollection = async () => {
+            const allAccounts = accountManager.getAllAccounts();
+            const results = [];
+            let didNetworkCall = false;
+            let dirty = false;
+
+            for (const account of allAccounts) {
                 if (account.isInvalid) {
-                    return {
+                    results.push({
                         email: account.email,
-                        status: 'invalid',
+                        status: classifyInvalidStatus(account),
+                        verifyUrl: account.verifyUrl || null,
                         error: account.invalidReason,
+                        subscription: account.subscription || { tier: 'unknown', projectId: null },
                         models: {}
-                    };
+                    });
+                    continue;
+                }
+
+                const now = Date.now();
+                const cachedModels = account.quota?.models;
+                const hasCachedModels = cachedModels && Object.keys(cachedModels).length > 0;
+                const cacheAgeMs = account.quota?.lastChecked ? (now - account.quota.lastChecked) : Infinity;
+                const hasKnownSub = account.subscription?.tier && account.subscription.tier !== 'unknown';
+
+                if (!forceLive && (account.enabled === false || (hasCachedModels && hasKnownSub && cacheAgeMs < ttlMs))) {
+                    results.push({
+                        email: account.email,
+                        status: account.enabled === false ? 'disabled' : 'ok',
+                        subscription: account.subscription || { tier: 'unknown', projectId: null },
+                        models: cachedModels || {},
+                        cached: true
+                    });
+                    continue;
+                }
+
+                if (didNetworkCall) {
+                    await sleep(300 + Math.floor(Math.random() * 350));
                 }
 
                 try {
+                    didNetworkCall = true;
                     const token = await accountManager.getTokenForAccount(account);
 
-                    // Fetch subscription tier first to get project ID
-                    const subscription = await getSubscriptionTier(token);
+                    const subDetectedAt = typeof account.subscription?.detectedAt === 'number'
+                        ? account.subscription.detectedAt
+                        : (account.subscription?.detectedAt ? new Date(account.subscription.detectedAt).getTime() : 0);
+                    const subFresh = hasKnownSub && account.subscription?.projectId && (now - subDetectedAt < subTtlMs);
 
-                    // Then fetch quotas with project ID for accurate quota info
-                    const quotas = await getModelQuotas(token, subscription.projectId);
+                    let tier = account.subscription?.tier || 'unknown';
+                    let projectId = account.subscription?.projectId || account.projectId || null;
 
-                    // Update account object with fresh data
-                    account.subscription = {
-                        tier: subscription.tier,
-                        projectId: subscription.projectId,
-                        detectedAt: Date.now()
-                    };
+                    if (forceSub || !subFresh) {
+                        const sub = await getSubscriptionTier(token, account.email);
+                        tier = sub.tier;
+                        projectId = sub.projectId || projectId;
+                        account.subscription = {
+                            tier,
+                            projectId,
+                            detectedAt: Date.now()
+                        };
+                    }
+
+                    const quotas = await getModelQuotas(token, projectId, account.email);
                     account.quota = {
                         models: quotas,
                         lastChecked: Date.now()
                     };
+                    dirty = true;
 
-                    // Save updated account data to disk (async, don't wait)
-                    accountManager.saveToDisk().catch(err => {
-                        logger.error('[Server] Failed to save account data:', err);
-                    });
-
-                    return {
+                    results.push({
                         email: account.email,
                         status: 'ok',
                         subscription: account.subscription,
                         models: quotas
-                    };
+                    });
                 } catch (error) {
-                    // Detect ToS ban from quota/subscription fetch and mark account invalid
                     if (error.message?.startsWith('ACCOUNT_BANNED:')) {
-                        accountManager.markInvalid(account.email, 'Account banned — Gemini disabled for Terms of Service violation');
-                        return {
+                        const banMsg = 'Account suspended / ToS restriction by Google';
+                        accountManager.markInvalid(account.email, banMsg);
+                        dirty = true;
+                        results.push({
                             email: account.email,
                             status: 'banned',
-                            error: 'Account banned — Gemini disabled for Terms of Service violation',
+                            error: banMsg,
                             subscription: account.subscription || { tier: 'unknown', projectId: null },
                             models: {}
-                        };
+                        });
+                    } else if (error.message?.startsWith('VALIDATION_REQUIRED:')) {
+                        const verifyMsg = 'Account requires verification (403)';
+                        accountManager.markInvalid(account.email, verifyMsg, error.verifyUrl || null);
+                        dirty = true;
+                        results.push({
+                            email: account.email,
+                            status: 'verify-required',
+                            verifyUrl: error.verifyUrl || null,
+                            error: verifyMsg,
+                            subscription: account.subscription || { tier: 'unknown', projectId: null },
+                            models: {}
+                        });
+                    } else {
+                        results.push({
+                            email: account.email,
+                            status: 'error',
+                            error: error.message,
+                            subscription: account.subscription || { tier: 'unknown', projectId: null },
+                            models: account.quota?.models || {}
+                        });
                     }
-                    return {
-                        email: account.email,
-                        status: 'error',
-                        error: error.message,
-                        subscription: account.subscription || { tier: 'unknown', projectId: null },
-                        models: {}
-                    };
                 }
-            })
-        );
-
-        // Process results
-        const accountLimits = results.map((result, index) => {
-            if (result.status === 'fulfilled') {
-                return result.value;
-            } else {
-                return {
-                    email: allAccounts[index].email,
-                    status: 'error',
-                    error: result.reason?.message || 'Unknown error',
-                    models: {}
-                };
             }
-        });
+
+            if (dirty) {
+                accountManager.saveToDisk().catch((err) => {
+                    logger.error('[Server] Failed to save account data:', err);
+                });
+            }
+
+            return results;
+        };
+
+        let accountLimits;
+        if (accountLimitsInFlight) {
+            accountLimits = await accountLimitsInFlight;
+        } else {
+            accountLimitsInFlight = runLimitsCollection().finally(() => {
+                accountLimitsInFlight = null;
+            });
+            accountLimits = await accountLimitsInFlight;
+        }
 
         // Collect all unique model IDs
         const allModelIds = new Set();

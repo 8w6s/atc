@@ -159,8 +159,9 @@ export async function sendMessage(anthropicRequest, accountManager, fallbackEnab
 
                     const response = await throttledFetch(url, {
                         method: 'POST',
-                        headers: buildHeaders(token, model, isThinking ? 'text/event-stream' : 'application/json', payload.request.sessionId),
-                        body: JSON.stringify(payload)
+                        headers: buildHeaders(token),
+                        body: JSON.stringify(payload),
+                        accountKey: account.email
                     });
 
                     if (!response.ok) {
@@ -278,8 +279,7 @@ export async function sendMessage(anthropicRequest, accountManager, fallbackEnab
                             }
 
                             lastError = new Error(`API error ${response.status}: ${errorText}`);
-                            // Try next endpoint for 403/404/5xx errors (matches opencode-antigravity-auth behavior)
-                            if (response.status === 403 || response.status === 404) {
+                            if (response.status === 404) {
                                 logger.warn(`[CloudCode] ${response.status} at ${endpoint}...`);
                             } else if (response.status >= 500) {
                                 logger.warn(`[CloudCode] ${response.status} error, waiting 1s before retry...`);

@@ -5,11 +5,7 @@
  */
 
 import crypto from 'crypto';
-import {
-    ANTIGRAVITY_HEADERS,
-    getModelFamily,
-    isThinkingModel
-} from '../constants.js';
+import { ANTIGRAVITY_HEADERS } from '../constants.js';
 import { convertAnthropicToGoogle } from '../format/index.js';
 import { deriveSessionId } from './session-manager.js';
 
@@ -66,6 +62,7 @@ function scrubClientIdentity(text) {
 export function buildCloudCodeRequest(anthropicRequest, projectId, accountEmail) {
     const model = (anthropicRequest.model || '').replace(/\[\d+[kmbKMB]?\]$/, '');
     const googleRequest = convertAnthropicToGoogle(anthropicRequest);
+    delete googleRequest.stream;
 
     // Use stable session ID derived from first user message for cache continuity
     googleRequest.sessionId = deriveSessionId(anthropicRequest, accountEmail);
@@ -103,37 +100,15 @@ export function buildCloudCodeRequest(anthropicRequest, projectId, accountEmail)
     return payload;
 }
 
-/**
- * Build headers for Cloud Code API requests
- *
- * @param {string} token - OAuth access token
- * @param {string} model - Model name
- * @param {string} accept - Accept header value (default: 'application/json')
- * @param {string} [sessionId] - Optional session ID for X-Machine-Session-Id header
- * @returns {Object} Headers object
+/*
+ * Emit only the minimal wire headers sent by the native Go client. Never forward
+ * Anthropic-specific headers (e.g. anthropic-beta) or legacy 1.x X-Client-* /
+ * X-Machine-Session-Id headers to Google's Cloud Code endpoints.
  */
-export function buildHeaders(token, model, accept = 'application/json', sessionId) {
-    const headers = {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-        ...ANTIGRAVITY_HEADERS
+export function buildHeaders(token) {
+    return {
+        ...ANTIGRAVITY_HEADERS,
+        'Accept-Encoding': 'gzip',
+        'Authorization': `Bearer ${token}`
     };
-
-    // Add session ID header if provided (matches Antigravity binary behavior)
-    if (sessionId) {
-        headers['X-Machine-Session-Id'] = sessionId;
-    }
-
-    const modelFamily = getModelFamily(model);
-
-    // Add interleaved thinking header only for Claude thinking models
-    if (modelFamily === 'claude' && isThinkingModel(model)) {
-        headers['anthropic-beta'] = 'interleaved-thinking-2025-05-14';
-    }
-
-    if (accept !== 'application/json') {
-        headers['Accept'] = accept;
-    }
-
-    return headers;
 }

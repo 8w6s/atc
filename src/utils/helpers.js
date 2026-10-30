@@ -2,6 +2,7 @@ import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import { config } from '../config.js';
+import { shouldUseUpstreamTransport, upstreamFetch } from './upstream-transport.js';
 
 /**
  * Shared Utility Functions
@@ -81,10 +82,14 @@ export function isNetworkError(error) {
  */
 export async function throttledFetch(url, options) {
     if (config.requestThrottlingEnabled) {
-        const delayMs = config.requestDelayMs || 200;
-        if (delayMs > 0) {
-            await sleep(delayMs);
+        const baseDelayMs = config.requestDelayMs || 200;
+        if (baseDelayMs > 0) {
+            const jitteredMs = Math.round(baseDelayMs * (0.75 + Math.random() * 0.5));
+            await sleep(jitteredMs);
         }
+    }
+    if (shouldUseUpstreamTransport(url, options)) {
+        return upstreamFetch(url, options);
     }
     return fetch(url, options);
 }

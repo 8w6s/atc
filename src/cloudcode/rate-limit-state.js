@@ -142,22 +142,27 @@ export function extractVerificationUrl(errorText) {
     return raw[0].replace(/[,.)}>\]]+$/, '');
 }
 
-/**
- * Detect if 403 error is due to a permanent account ban (ToS violation).
- * These accounts are permanently disabled by Google and cannot be recovered
- * by retrying or re-authenticating. User must contact Google support to appeal.
- * @param {string} errorText - Error message from API
- * @returns {boolean} True if account is permanently banned
+/*
+ * Distinguish recoverable Google checkpoints (403 VALIDATION_REQUIRED with a
+ * browser verification URL) from permanent service / ToS suspensions so
+ * verified accounts remain recoverable via the dashboard while true bans lock
+ * token refresh immediately.
  */
 export function isAccountBanned(errorText) {
-    const lower = (errorText || '').toLowerCase();
+    if (!errorText) return false;
+    const lower = errorText.toLowerCase();
+    if (lower.includes('validation_required') || lower.includes('verify your account') || extractVerificationUrl(errorText)) {
+        return false;
+    }
     return lower.includes('violation of terms of service') ||
-        lower.includes('terms of service') ||
-        lower.includes('terms_of_service') ||
-        lower.includes('tos_violation') ||
-        lower.includes('policy_violation') ||
-        lower.includes('has been disabled') ||
+        lower.includes('this service has been disabled in this account') ||
+        lower.includes('account has been disabled') ||
+        lower.includes('your account has been suspended') ||
+        lower.includes('account_deactivated') ||
         lower.includes('account_suspended') ||
+        lower.includes('tos_violation') ||
+        lower.includes('terms_of_service') ||
+        lower.includes('policy_violation') ||
         lower.includes('service_disabled');
 }
 
@@ -215,4 +220,4 @@ setInterval(() => {
             rateLimitStateByAccountModel.delete(key);
         }
     }
-}, 60000);
+}, 60000).unref();

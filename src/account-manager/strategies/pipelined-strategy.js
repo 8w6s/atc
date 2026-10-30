@@ -1,30 +1,26 @@
-/**
- * Pipelined 5% Quota Rotation Strategy
- *
- * Implements Staggered Quota Scheduling:
- * Instead of draining an account until 100% quota exhaustion (which causes a painful 5-hour outage),
- * this strategy rotates active accounts every ~5% of quota consumption (or ~20 requests).
- *
- * This staggers the 5-hour recovery windows across all available accounts in parallel:
- *   Account 1: uses 5% -> starts 5h recovery window -> proxy switches to Account 2
- *   Account 2: uses 5% -> starts 5h recovery window -> proxy switches to Account 3
- *   ...
- *   Account N: by the time rotation completes, Account 1 has already recovered substantial quota!
- */
-
 import { BaseStrategy } from './base-strategy.js';
 import { logger } from '../../utils/logger.js';
 
+/*
+ * Stagger 5-hour quota recovery across accounts while enforcing a minimum stay
+ * floor (+0..20% random jitter) on healthy accounts. Without a time floor,
+ * parallel subagent bursts can cycle through all consumer accounts in under a
+ * minute from one IP. Rate-limited, invalid, or critically low (<20%) accounts
+ * still fail over immediately.
+ */
 export class PipelinedStrategy extends BaseStrategy {
-    #stepStates = new Map(); // email -> { startFraction, requestCount, lastRotatedAt }
+    #stepStates = new Map();
     #cursor = 0;
-    #stepThreshold = 0.05; // 5% quota threshold
-    #requestThreshold = 20; // 20 requests threshold if live quota is delayed
+    #stepThreshold = 0.05;
+    #requestThreshold = 20;
+    #minStaySec = 180;
+    #lowQuotaBypass = 0.20;
 
     /**
      * @param {Object} config
      * @param {number} [config.stepThreshold=0.05]
      * @param {number} [config.requestThreshold=20]
+     * @param {number} [config.minStaySec=180]
      */
     constructor(config = {}) {
         super(config);
@@ -34,11 +30,11 @@ export class PipelinedStrategy extends BaseStrategy {
         if (typeof config.requestThreshold === 'number' && config.requestThreshold > 0) {
             this.#requestThreshold = config.requestThreshold;
         }
+        if (typeof config.minStaySec === 'number' && config.minStaySec >= 0) {
+            this.#minStaySec = config.minStaySec;
+        }
     }
 
-    /**
-     * Select account with pipelined 5% quota rotation
-     */
     selectAccount(accounts, modelId, options = {}) {
         const { currentIndex = 0, onSave } = options;
 
@@ -49,36 +45,37 @@ export class PipelinedStrategy extends BaseStrategy {
         let idx = currentIndex >= accounts.length ? 0 : currentIndex;
         let currentAccount = accounts[idx];
 
-        // 1. Check if current account is usable
         const isCurrentUsable = this.isAccountUsable(currentAccount, modelId);
 
-        // 2. Check if current account has finished its 5% quota step
         let shouldRotate = false;
         if (isCurrentUsable) {
             const state = this.#getOrCreateState(currentAccount, modelId);
             const currentFraction = this.#getQuotaFraction(currentAccount, modelId);
+            const elapsedMs = Date.now() - state.lastRotatedAt;
+            const isLowQuota = currentFraction !== null && currentFraction < this.#lowQuotaBypass;
+            const staySatisfied = elapsedMs >= state.minStayMs || isLowQuota;
 
-            if (state.startFraction !== null && currentFraction !== null) {
-                const consumed = state.startFraction - currentFraction;
-                if (consumed >= this.#stepThreshold) {
-                    logger.info(`[Pipelined] Account ${currentAccount.email} consumed ${(consumed * 100).toFixed(1)}% quota (>= ${(this.#stepThreshold * 100)}%). Rotating to pipeline 5h recovery.`);
+            if (staySatisfied) {
+                if (state.startFraction !== null && currentFraction !== null) {
+                    const consumed = state.startFraction - currentFraction;
+                    if (consumed >= this.#stepThreshold) {
+                        logger.info(`[Pipelined] Account ${currentAccount.email} consumed ${(consumed * 100).toFixed(1)}% quota after ${Math.round(elapsedMs / 1000)}s. Rotating to stagger 5h recovery.`);
+                        shouldRotate = true;
+                    }
+                } else if (state.requestCount >= this.#requestThreshold) {
+                    logger.info(`[Pipelined] Account ${currentAccount.email} completed ${state.requestCount} requests after ${Math.round(elapsedMs / 1000)}s. Rotating to stagger cooldown.`);
                     shouldRotate = true;
                 }
-            } else if (state.requestCount >= this.#requestThreshold) {
-                logger.info(`[Pipelined] Account ${currentAccount.email} completed ${state.requestCount} requests step. Rotating to stagger cooldown.`);
-                shouldRotate = true;
             }
         } else {
             shouldRotate = true;
         }
 
-        // 3. If rotation is triggered, select next usable account in pool
         if (shouldRotate || !isCurrentUsable) {
             const nextResult = this.#pickNextUsable(accounts, idx, modelId);
             if (nextResult.account) {
                 currentAccount = nextResult.account;
                 idx = nextResult.index;
-                // Reset step state for the new account
                 this.#resetState(currentAccount, modelId);
             }
         }
@@ -93,7 +90,7 @@ export class PipelinedStrategy extends BaseStrategy {
         return { account: null, index: idx, waitMs: 0 };
     }
 
-    onSuccess(account, modelId) {
+    onSuccess(account) {
         if (!account?.email) return;
         const state = this.#stepStates.get(account.email);
         if (state) {
@@ -101,9 +98,14 @@ export class PipelinedStrategy extends BaseStrategy {
         }
     }
 
-    onRateLimit(account, modelId) {
+    onRateLimit(account) {
         if (!account?.email) return;
         this.#stepStates.delete(account.email);
+    }
+
+    #computeJitteredStayMs() {
+        if (this.#minStaySec <= 0) return 0;
+        return Math.round(this.#minStaySec * 1000 * (1 + Math.random() * 0.2));
     }
 
     #getOrCreateState(account, modelId) {
@@ -112,7 +114,8 @@ export class PipelinedStrategy extends BaseStrategy {
             state = {
                 startFraction: this.#getQuotaFraction(account, modelId),
                 requestCount: 0,
-                lastRotatedAt: Date.now()
+                lastRotatedAt: Date.now(),
+                minStayMs: this.#computeJitteredStayMs()
             };
             this.#stepStates.set(account.email, state);
         }
@@ -123,7 +126,8 @@ export class PipelinedStrategy extends BaseStrategy {
         this.#stepStates.set(account.email, {
             startFraction: this.#getQuotaFraction(account, modelId),
             requestCount: 0,
-            lastRotatedAt: Date.now()
+            lastRotatedAt: Date.now(),
+            minStayMs: this.#computeJitteredStayMs()
         });
     }
 

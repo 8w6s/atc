@@ -157,8 +157,9 @@ export async function* sendMessageStream(anthropicRequest, accountManager, fallb
 
                     const response = await throttledFetch(url, {
                         method: 'POST',
-                        headers: buildHeaders(token, model, 'text/event-stream', payload.request.sessionId),
-                        body: JSON.stringify(payload)
+                        headers: buildHeaders(token),
+                        body: JSON.stringify(payload),
+                        accountKey: account.email
                     });
 
                     if (!response.ok) {
@@ -270,8 +271,7 @@ export async function* sendMessageStream(anthropicRequest, accountManager, fallb
 
                         lastError = new Error(`API error ${response.status}: ${errorText}`);
 
-                        // Try next endpoint for 403/404/5xx errors (matches opencode-antigravity-auth behavior)
-                        if (response.status === 403 || response.status === 404) {
+                        if (response.status === 404) {
                             logger.warn(`[CloudCode] ${response.status} at ${endpoint}..`);
                         } else if (response.status >= 500) {
                             logger.warn(`[CloudCode] ${response.status} stream error, waiting 1s before retry...`);
@@ -314,8 +314,9 @@ export async function* sendMessageStream(anthropicRequest, accountManager, fallb
                             // Refetch the response
                             currentResponse = await throttledFetch(url, {
                                 method: 'POST',
-                                headers: buildHeaders(token, model, 'text/event-stream', payload.request.sessionId),
-                                body: JSON.stringify(payload)
+                                headers: buildHeaders(token),
+                                body: JSON.stringify(payload),
+                                accountKey: account.email
                             });
 
                             // Handle specific error codes on retry
@@ -347,8 +348,9 @@ export async function* sendMessageStream(anthropicRequest, accountManager, fallb
                                     await sleep(1000);
                                     currentResponse = await throttledFetch(url, {
                                         method: 'POST',
-                                        headers: buildHeaders(token, model, 'text/event-stream'),
-                                        body: JSON.stringify(payload)
+                                        headers: buildHeaders(token),
+                                        body: JSON.stringify(payload),
+                                        accountKey: account.email
                                     });
                                     if (currentResponse.ok) {
                                         continue;
