@@ -499,7 +499,17 @@ async function updateCommand() {
     const data = await res.json();
     const latestVersion = data.version;
 
-    if (!latestVersion || latestVersion === currentVersion) {
+    const isNewerVersion = (remote, local) => {
+      const r = (remote || '').replace(/^v/, '').split('.').map(n => parseInt(n, 10) || 0);
+      const l = (local || '').replace(/^v/, '').split('.').map(n => parseInt(n, 10) || 0);
+      for (let i = 0; i < 3; i++) {
+        if ((r[i] || 0) > (l[i] || 0)) return true;
+        if ((r[i] || 0) < (l[i] || 0)) return false;
+      }
+      return false;
+    };
+
+    if (!latestVersion || !isNewerVersion(latestVersion, currentVersion)) {
       console.log(`\n${c.green}✓ atc is already on the latest version (v${currentVersion}).${c.reset}\n`);
       return;
     }
