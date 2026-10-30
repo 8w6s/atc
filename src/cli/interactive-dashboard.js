@@ -14,7 +14,7 @@ import {
     showModelMappings
 } from './terminal-manager.js';
 
-// Refined ANSI color palette for high contrast and readability on dark terminals
+// Calibrated ANSI color palette for high contrast and readability on dark terminals
 const c = {
     reset: '\x1b[0m',
     bold: '\x1b[1m',
@@ -33,9 +33,15 @@ const c = {
     statusDanger: '\x1b[38;5;196m',   // [invalid] crisp red
     statusMuted: '\x1b[38;5;244m',    // [disabled] slate gray
     
+    // Plan tiers
+    planPro: '\x1b[38;5;141m',        // [pro] lavender purple
+    planUltra: '\x1b[38;5;220m',      // [ultra] gold
+    planFree: '\x1b[38;5;245m',       // [free] soft gray
+    planStd: '\x1b[38;5;75m',         // [standard] sky blue
+
     // Progress bar tones
     barFill: '\x1b[38;5;42m',         // ##########
-    barEmpty: '\x1b[38;5;240m',        // ----------
+    barEmpty: '\x1b[38;5;238m',       // ----------
     
     // UI neutrals
     textBright: '\x1b[38;5;254m',     // High-contrast off-white
@@ -44,6 +50,9 @@ const c = {
     textDark: '\x1b[38;5;240m',       // Dividers
     
     clearScreen: '\x1b[2J\x1b[H',
+    cursorHome: '\x1b[H',
+    clearToEndOfLine: '\x1b[K',
+    clearToEndOfScreen: '\x1b[J',
     hideCursor: '\x1b[?25l',
     showCursor: '\x1b[?25h'
 };
@@ -82,24 +91,47 @@ function formatTimeAgo(isoString) {
     return `${formatDuration(diff)} ago`;
 }
 
+function formatPlanBadge(tier) {
+    const t = (tier || 'unknown').toLowerCase();
+    switch (t) {
+        case 'pro':
+            return `${c.planPro}[pro]${c.reset}`;
+        case 'ultra':
+            return `${c.planUltra}[ultra]${c.reset}`;
+        case 'free':
+            return `${c.planFree}[free]${c.reset}`;
+        case 'standard':
+            return `${c.planStd}[standard]${c.reset}`;
+        default:
+            return `${c.textMuted}[${t}]${c.reset}`;
+    }
+}
+
 export async function runInteractiveDashboard() {
     let accountsData = await loadAccounts(ACCOUNT_CONFIG_PATH);
     const port = getProxyPort();
 
     let proxyHealth = null;
+    let proxyLimits = null;
     let statusMessage = '';
 
     async function refreshData() {
         accountsData = await loadAccounts(ACCOUNT_CONFIG_PATH);
         try {
-            const res = await fetch(`http://127.0.0.1:${port}/health`, {
-                signal: AbortSignal.timeout(3000)
-            });
-            if (res.ok) {
-                proxyHealth = await res.json();
+            const [healthRes, limitsRes] = await Promise.allSettled([
+                fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(3000) }),
+                fetch(`http://127.0.0.1:${port}/account-limits`, { signal: AbortSignal.timeout(3000) })
+            ]);
+
+            if (healthRes.status === 'fulfilled' && healthRes.value.ok) {
+                proxyHealth = await healthRes.value.json();
+            }
+            if (limitsRes.status === 'fulfilled' && limitsRes.value.ok) {
+                proxyLimits = await limitsRes.value.json();
             }
         } catch {
             proxyHealth = null;
+            proxyLimits = null;
         }
     }
 
@@ -143,16 +175,27 @@ export async function runInteractiveDashboard() {
     if (selectedIndex === -1) selectedIndex = items.findIndex(it => it.type === 'account') || 1;
     if (selectedIndex === -1) selectedIndex = 1;
 
+    // Initial clear screen only once
+    process.stdout.write(c.clearScreen + c.hideCursor);
+
+    // Flicker-free render function using virtual buffer and cursor home
     function render() {
-        process.stdout.write(c.clearScreen + c.hideCursor);
+        let buf = c.cursorHome;
 
         // Header Title
-        console.log(`${c.brandGreen}+ Accounts Dashboard (atc v2.9.1)${c.reset}\n`);
+        buf += `${c.brandGreen}+ Accounts Dashboard (atc v2.9.1)${c.reset}${c.clearToEndOfLine}\n\n`;
 
         const liveMap = new Map();
         if (proxyHealth && Array.isArray(proxyHealth.accounts)) {
             for (const a of proxyHealth.accounts) {
                 liveMap.set(a.email, a);
+            }
+        }
+
+        const limitsMap = new Map();
+        if (proxyLimits && Array.isArray(proxyLimits.accounts)) {
+            for (const a of proxyLimits.accounts) {
+                limitsMap.set(a.email, a);
             }
         }
 
@@ -162,7 +205,7 @@ export async function runInteractiveDashboard() {
             const isSelected = i === selectedIndex;
 
             if (it.type === 'header') {
-                console.log(`${c.textBright}${it.label}${c.reset}`);
+                buf += `${c.textBright}${it.label}${c.reset}${c.clearToEndOfLine}\n`;
                 continue;
             }
 
@@ -177,7 +220,7 @@ export async function runInteractiveDashboard() {
                         ? `${c.bold}${c.statusDanger}${it.label}${c.reset}`
                         : `${c.statusDanger}${it.label}${c.reset}`;
                 }
-                console.log(`${pointer}${text}`);
+                buf += `${pointer}${text}${c.clearToEndOfLine}\n`;
                 continue;
             }
 
@@ -185,13 +228,18 @@ export async function runInteractiveDashboard() {
                 const acc = it.account;
                 const idx = it.accountIndex + 1;
                 const live = liveMap.get(acc.email) || {};
+                const lim = limitsMap.get(acc.email) || {};
 
                 const isInvalid = acc.isInvalid || live.status === 'invalid';
                 const isLimited = Object.values(acc.modelRateLimits || {}).some(
                     l => l.isRateLimited && l.resetTime > Date.now()
                 ) || (live.rateLimitCooldownRemaining > 0);
 
-                let badges = [];
+                // Detect plan from limits API or account stored subscription
+                const planTier = lim.subscription?.tier || acc.subscription?.tier || 'free';
+                const planBadge = formatPlanBadge(planTier);
+
+                let badges = [planBadge];
                 if (it.isCurrent) badges.push(`${c.statusCurrent}[current]${c.reset}`);
                 if (!acc.enabled) badges.push(`${c.statusMuted}[disabled]${c.reset}`);
                 else if (isInvalid) badges.push(`${c.statusDanger}[invalid]${c.reset}`);
@@ -203,11 +251,11 @@ export async function runInteractiveDashboard() {
                     ? `${c.activeBright}${idx}. ${acc.email}${c.reset}`
                     : `${c.textNormal}${idx}. ${acc.email}${c.reset}`;
 
-                console.log(`${pointer}${emailStr} ${badges.join(' ')}`);
+                buf += `${pointer}${emailStr} ${badges.join(' ')}${c.clearToEndOfLine}\n`;
 
                 // Dynamic details pane when hovered
                 if (isSelected) {
-                    const models = live.models || {};
+                    const models = live.models || lim.models || {};
                     const high = models['gemini-3.8-flash-high'] || {};
                     const med = models['gemini-3.8-flash-medium'] || {};
 
@@ -223,17 +271,25 @@ export async function runInteractiveDashboard() {
                     let statusTag = isLimited ? `${c.statusWarn}rate-limited${c.reset}` : `${c.statusOk}active${c.reset}`;
                     if (isInvalid) statusTag = `${c.statusDanger}invalid (press R to re-login)${c.reset}`;
 
-                    console.log(`  ${c.textMuted}Last used:${c.reset} ${timeAgo} ${c.textDark}|${c.reset} ${c.textMuted}High:${c.reset} ${highBar} ${highPct} ${c.textDark}|${c.reset} ${c.textMuted}Med:${c.reset} ${medBar} ${medPct} ${c.textDark}|${c.reset} ${statusTag}`);
+                    const projectInfo = (lim.subscription?.projectId || acc.subscription?.projectId) ? ` ${c.textDark}[${lim.subscription?.projectId || acc.subscription?.projectId}]${c.reset}` : '';
+
+                    buf += `  ${c.textMuted}Last used:${c.reset} ${timeAgo} ${c.textDark}|${c.reset} ${c.textMuted}High:${c.reset} ${highBar} ${highPct} ${c.textDark}|${c.reset} ${c.textMuted}Med:${c.reset} ${medBar} ${medPct} ${c.textDark}|${c.reset} ${statusTag}${projectInfo}${c.clearToEndOfLine}\n`;
                 }
             }
         }
 
-        console.log('');
+        buf += `\n`;
         if (statusMessage) {
-            console.log(`${c.statusWarn}ℹ ${statusMessage}${c.reset}`);
+            buf += `${c.statusWarn}ℹ ${statusMessage}${c.reset}${c.clearToEndOfLine}\n`;
         }
-        console.log(`${c.textMuted}↑↓ Move | Enter Select | R Re-login | 1-9 Switch | Q Back${c.reset}`);
-        console.log(`${c.brandGreen}+${c.reset}`);
+        buf += `${c.textMuted}↑↓ Move | Enter Select | R Re-login | 1-9 Switch | Q Back${c.reset}${c.clearToEndOfLine}\n`;
+        buf += `${c.brandGreen}+${c.reset}${c.clearToEndOfLine}\n`;
+
+        // Clear any leftover lines below
+        buf += c.clearToEndOfScreen;
+
+        // Single write to stdout guarantees 0% screen flicker
+        process.stdout.write(buf);
     }
 
     // Set up interactive raw terminal input
@@ -375,10 +431,10 @@ export async function runInteractiveDashboard() {
                     }
 
                     if (cur.id === 'refresh_all') {
-                        statusMessage = 'Refreshing quotas from proxy...';
+                        statusMessage = 'Refreshing quotas and plans from proxy...';
                         render();
                         await refreshData();
-                        statusMessage = 'Refreshed quotas from proxy.';
+                        statusMessage = 'Refreshed quotas and plans from proxy.';
                         render();
                         return;
                     }

@@ -390,20 +390,16 @@ USAGE
   atc <command> [options]
   acc <command> [options]                 ← legacy alias
 
-━━━ ACCOUNT CONTROL (TERMINAL FIRST) ━━━━━━━━━━━━━━━━━━━━
-  status, list       List accounts, live quota & health
-  switch <target>    Switch active account by index or email
-  check, probe       Probe credentials and refresh tokens
-  login, add         Add new Google account via OAuth
-  remove <target>    Unlink account by index or email
-  toggle <target>    Enable / disable account in pool
-  models             Display model mapping table
+━━━ CORE (DASHBOARD-FIRST) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  atc                Open interactive TUI dashboard (default)
+  atc dash           Interactive dashboard with hotkeys (↑↓, 1-9, R)
+  atc switch <id>    Quick switch active account by index/email
+  atc status         Print non-interactive status overview
 
 ━━━ PROXY DAEMON ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  start [--log]      Launch proxy (foreground if --log)
-  stop               Shut down the proxy
-  restart            Relaunch the proxy
-  ui                 Open legacy WebUI dashboard
+  atc start [--log]  Launch proxy daemon (optional --log for foreground)
+  atc stop           Shut down proxy daemon
+  atc restart        Relaunch proxy daemon
 
 ━━━ OPTIONS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   --help, -h         Show this help
@@ -532,7 +528,11 @@ async function main() {
       break;
 
     case undefined:
-      await showAccountStatus();
+      if (process.stdin.isTTY) {
+        await runInteractiveDashboard();
+      } else {
+        await showAccountStatus();
+      }
       break;
 
     default:
