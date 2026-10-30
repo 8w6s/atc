@@ -183,40 +183,35 @@ function writeClaudeSettings(settings) {
 }
 
 
-// Brand-accurate gradient color palette and shimmer animation
+// Brand-accurate gradient color palette and shimmer animation: atc (Antigravity to Claude)
 const TITLE_CHARS = [
-    // Antigravity (11 chars): Continuous Spectrum Linear Gradient
-    // Blue 40% (#38bdf8) -> Green 20% (#22c55e) -> Yellow 20% (#eab308) -> Red 20% (#ef4444)
-    { ch: 'A', r:  56, g: 189, b: 248 }, // Bright Sky Blue (0%)
-    { ch: 'n', r:  50, g: 191, b: 210 }, // Blue-Cyan transition
-    { ch: 't', r:  45, g: 193, b: 171 }, // Cyan-Aqua transition
-    { ch: 'i', r:  40, g: 195, b: 132 }, // Aqua-Green transition
-    { ch: 'g', r:  34, g: 197, b:  94 }, // Pure Vibrant Green (40%)
-    { ch: 'r', r: 134, g: 188, b:  51 }, // Lime transition
-    { ch: 'a', r: 234, g: 179, b:   8 }, // Pure Yellow (60%)
-    { ch: 'v', r: 242, g: 147, b:  15 }, // Amber transition
-    { ch: 'i', r: 249, g: 115, b:  22 }, // Orange transition (80%)
-    { ch: 't', r: 244, g:  92, b:  45 }, // Red-Orange transition
-    { ch: 'y', r: 239, g:  68, b:  68 }, // Pure Red (100%)
+    { ch: 'a', r:  34, g: 197, b:  94 },
+    { ch: 't', r:  45, g: 193, b: 171 },
+    { ch: 'c', r:  56, g: 189, b: 248 },
     { ch: ' ', r: 255, g: 255, b: 255 },
-
-    // to: Pure Bright White
+    { ch: '(', r: 156, g: 163, b: 175 },
+    { ch: 'A', r:  56, g: 189, b: 248 },
+    { ch: 'n', r:  50, g: 191, b: 210 },
+    { ch: 't', r:  45, g: 193, b: 171 },
+    { ch: 'i', r:  40, g: 195, b: 132 },
+    { ch: 'g', r:  34, g: 197, b:  94 },
+    { ch: 'r', r: 134, g: 188, b:  51 },
+    { ch: 'a', r: 234, g: 179, b:   8 },
+    { ch: 'v', r: 242, g: 147, b:  15 },
+    { ch: 'i', r: 249, g: 115, b:  22 },
+    { ch: 't', r: 244, g:  92, b:  45 },
+    { ch: 'y', r: 239, g:  68, b:  68 },
+    { ch: ' ', r: 255, g: 255, b: 255 },
     { ch: 't', r: 255, g: 255, b: 255 },
     { ch: 'o', r: 255, g: 255, b: 255 },
     { ch: ' ', r: 255, g: 255, b: 255 },
-
-    // Claude Code (11 chars): Smooth Anthropic Orange 60% (#f97316) -> Warm Yellow 40% (#facc15)
     { ch: 'C', r: 249, g: 115, b:  22 },
     { ch: 'l', r: 249, g: 115, b:  22 },
     { ch: 'a', r: 249, g: 115, b:  22 },
     { ch: 'u', r: 249, g: 115, b:  22 },
-    { ch: 'd', r: 249, g: 115, b:  22 },
-    { ch: 'e', r: 249, g: 115, b:  22 },
-    { ch: ' ', r: 249, g: 115, b:  22 },
-    { ch: 'C', r: 249, g: 137, b:  22 },
-    { ch: 'o', r: 250, g: 160, b:  22 },
     { ch: 'd', r: 250, g: 182, b:  21 },
-    { ch: 'e', r: 250, g: 204, b:  21 }
+    { ch: 'e', r: 250, g: 204, b:  21 },
+    { ch: ')', r: 156, g: 163, b: 175 }
 ];
 
 function getShimmerTitle() {
@@ -258,7 +253,7 @@ function getShimmerTitle() {
     return out;
 }
 
-export async function runInteractiveDashboard() {
+export async function runInteractiveDashboard(options = {}) {
     let accountsData = await loadAccounts(ACCOUNT_CONFIG_PATH);
     const port = getProxyPort();
 
@@ -351,7 +346,7 @@ export async function runInteractiveDashboard() {
         let buf = c.hideCursor + c.disableWrap + c.cursorHome;
 
         // Header Title
-        buf += `${getShimmerTitle()} ${c.textMuted}(${c.brandMint}atc v${getPackageVersion()}${c.textMuted})${c.reset}${c.clearToEndOfLine}\n`;
+        buf += `${getShimmerTitle()} ${c.textMuted}v${getPackageVersion()}${c.reset}${c.clearToEndOfLine}\n`;
 
         const liveMap = new Map();
         if (proxyHealth && Array.isArray(proxyHealth.accounts)) {
@@ -428,11 +423,13 @@ export async function runInteractiveDashboard() {
                 const planStr = formatPlanBadge(planTier) + planPad;
 
                 // Column 3 & 4: 5h-Cap and Weekly Quota
-                const models = live.models || lim.models || {};
+                const models = lim.limits || lim.models || acc.quota?.models || live.models || {};
                 const qSummary = getAccountQuotaSummary(models);
 
-                let fiveCol = `\x1b[38;5;240m  --  \x1b[0m  `;
-                if (qSummary.fiveHour) {
+                let fiveCol = `\x1b[38;5;120m 100%\x1b[0m   `;
+                if (isInvalid) {
+                    fiveCol = `\x1b[38;5;240m  -- \x1b[0m   `;
+                } else if (qSummary.fiveHour) {
                     const p = qSummary.fiveHour.remainingPct;
                     const pStr = `${p.toString().padStart(3)}%`;
                     if (p === 0) fiveCol = `\x1b[1;31m${pStr}\x1b[0m   `;
@@ -440,8 +437,10 @@ export async function runInteractiveDashboard() {
                     else fiveCol = `\x1b[38;5;120m${pStr}\x1b[0m   `;
                 }
 
-                let weekCol = `\x1b[38;5;240m  n/a \x1b[0m  `;
-                if (qSummary.weekly) {
+                let weekCol = `\x1b[38;5;120m 100%\x1b[0m   `;
+                if (isInvalid) {
+                    weekCol = `\x1b[38;5;240m  -- \x1b[0m   `;
+                } else if (qSummary.weekly) {
                     const wp = qSummary.weekly.remainingPct;
                     const wpStr = `${wp.toString().padStart(3)}%`;
                     if (wp === 0) weekCol = `\x1b[1;31m${wpStr}\x1b[0m   `;
@@ -570,6 +569,352 @@ export async function runInteractiveDashboard() {
                 items = getItems();
                 render();
             }
+        }
+
+        async function openEngineSettings() {
+            await runSubScreen(async () => {
+                let thresholdPct = Math.round((config?.accountSelection?.stepThreshold || 0.05) * 100);
+                let reqCap = config?.accountSelection?.requestThreshold || 20;
+                let cooldown = config?.switchAccountDelayMs || 5000;
+                let proxyPort = config?.port || 43128;
+                let secretKey = config?.apiKey || 'atc-local-key';
+                let activeSettingIdx = 0;
+                let isFocusEditing = false;
+                let editBuffer = '';
+                let notice = '';
+
+                const settingsMeta = [
+                    {
+                        id: 'threshold',
+                        label: 'Quota Rotation Threshold',
+                        unit: '%',
+                        desc: 'Rotates account after using this quota % to stagger 5h recovery in parallel',
+                        min: 1, max: 50, step: 1,
+                        safeMin: 3, safeMax: 15,
+                        warnLow: 'Below 3%: rapid account cycling from same IP may trigger Google scrutiny',
+                        warnHigh: 'Above 15%: single account quota drains heavily before rotation'
+                    },
+                    {
+                        id: 'reqCap',
+                        label: 'Fallback Request Cap',
+                        unit: 'reqs',
+                        desc: 'Rotates account after this many requests if quota telemetry delayed',
+                        min: 5, max: 200, step: 5,
+                        safeMin: 10, safeMax: 50,
+                        warnLow: 'Below 10 reqs: switches accounts excessively during slow telemetry',
+                        warnHigh: 'Above 50 reqs: risk of depleting account quota before switching'
+                    },
+                    {
+                        id: 'cooldown',
+                        label: 'Switch Delay Cooldown',
+                        unit: 'ms',
+                        desc: 'Cooldown delay in milliseconds before switching account on error',
+                        min: 500, max: 30000, step: 500,
+                        safeMin: 2000, safeMax: 10000,
+                        warnLow: 'Below 2000ms: rapid failovers may trigger Google rate limit firewalls',
+                        warnHigh: 'Above 10000ms: sluggish error recovery time for user requests'
+                    },
+                    {
+                        id: 'port',
+                        label: 'Proxy Listen Port',
+                        unit: '',
+                        desc: 'Local HTTP proxy listen port (requires proxy restart to take effect)',
+                        min: 1024, max: 65535, step: 1,
+                        safeMin: 1024, safeMax: 65535,
+                        warnLow: 'Ports below 1024 require root/administrator privileges',
+                        warnHigh: 'Port number out of valid TCP range'
+                    },
+                    {
+                        id: 'secretKey',
+                        label: 'Secret API Key',
+                        unit: '',
+                        desc: 'Internal API Key required for Claude Code requests (auto-syncs to ~/.claude/settings.json)',
+                        isText: true
+                    },
+                    {
+                        id: 'reset',
+                        label: 'Reset All to Defaults',
+                        unit: '',
+                        desc: 'Restore recommended safe defaults (5% quota, 20 requests, 5000ms cooldown, atc-local-key)'
+                    },
+                    {
+                        id: 'save',
+                        label: 'Save & Return to Dashboard',
+                        unit: '',
+                        desc: 'Save all parameters to ~/.config/atc/config.json and Claude Code settings'
+                    }
+                ];
+
+                function getValNum(idx) {
+                    if (idx === 0) return thresholdPct;
+                    if (idx === 1) return reqCap;
+                    if (idx === 2) return cooldown;
+                    if (idx === 3) return proxyPort;
+                    return 0;
+                }
+
+                function setValNum(idx, num) {
+                    const meta = settingsMeta[idx];
+                    const clamped = Math.max(meta.min, Math.min(meta.max, num));
+                    if (idx === 0) thresholdPct = clamped;
+                    else if (idx === 1) reqCap = clamped;
+                    else if (idx === 2) cooldown = clamped;
+                    else if (idx === 3) proxyPort = clamped;
+                }
+
+                function getWarning(idx) {
+                    if (idx >= 4) return null;
+                    const meta = settingsMeta[idx];
+                    const val = getValNum(idx);
+                    if (val < meta.safeMin) return meta.warnLow;
+                    if (val > meta.safeMax) return meta.warnHigh;
+                    return null;
+                }
+
+                function getDisplayVal(idx) {
+                    if (idx === 0) return thresholdPct + '%';
+                    if (idx === 1) return reqCap + ' reqs';
+                    if (idx === 2) return cooldown + 'ms';
+                    if (idx === 3) return proxyPort.toString();
+                    if (idx === 4) return secretKey || '(none)';
+                    return '';
+                }
+
+                function renderScreen() {
+                    let out = c.clearScreen + c.cursorHome;
+                    out += `${c.brandGreen}╭─────────────────────────────────────────────────────────────────╮${c.reset}\n`;
+                    out += `${c.brandGreen}│  atc Engine Settings & Parameters                               │${c.reset}\n`;
+                    out += `${c.brandGreen}╰─────────────────────────────────────────────────────────────────╯${c.reset}\n\n`;
+
+                    for (let i = 0; i < settingsMeta.length; i++) {
+                        const meta = settingsMeta[i];
+                        const isSel = i === activeSettingIdx;
+                        const pointer = isSel ? `\x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
+                        const warn = getWarning(i);
+
+                        let line = '';
+                        if (i <= 4) {
+                            let valBox = '';
+                            if (isSel && isFocusEditing) {
+                                valBox = `\x1b[1;38;5;226;48;5;236m[ ${editBuffer || ''}_ ]\x1b[0m \x1b[38;5;220m✎ editing\x1b[0m`;
+                            } else {
+                                const displayStr = getDisplayVal(i);
+                                valBox = isSel
+                                    ? `\x1b[1;38;5;120m[${displayStr}]\x1b[0m`
+                                    : `\x1b[38;5;147m[${displayStr}]\x1b[0m`;
+                            }
+
+                            let warnBadge = '';
+                            if (warn) {
+                                warnBadge = ` \x1b[38;5;214m▲ outside safe zone\x1b[0m`;
+                            }
+
+                            line = isSel
+                                ? `\x1b[1;38;5;255m${meta.label}:\x1b[0m ${valBox}${warnBadge}`
+                                : `\x1b[38;5;250m${meta.label}:\x1b[0m ${valBox}${warnBadge}`;
+                        } else {
+                            line = isSel
+                                ? `\x1b[1;38;5;255m${meta.label}${c.reset}`
+                                : `\x1b[38;5;248m${meta.label}${c.reset}`;
+                        }
+
+                        out += `${pointer}${line}${c.clearToEndOfLine}\n`;
+                    }
+
+                    out += `\n`;
+                    const curMeta = settingsMeta[activeSettingIdx];
+                    const activeWarn = getWarning(activeSettingIdx);
+
+                    if (notice) {
+                        out += `\x1b[38;5;153m› ${notice}${c.reset}${c.clearToEndOfLine}\n`;
+                    } else if (activeWarn) {
+                        out += `${c.textMuted}Details:${c.reset} \x1b[1;38;5;214m▲ ${activeWarn}${c.reset}${c.clearToEndOfLine}\n`;
+                    } else {
+                        out += `${c.textMuted}Details:${c.reset} ${c.textNormal}${curMeta.desc}${c.reset}${c.clearToEndOfLine}\n`;
+                    }
+
+                    if (isFocusEditing) {
+                        out += `${c.textMuted}Type Value | Backspace Delete | Enter/ESC Confirm${c.reset}${c.clearToEndOfLine}`;
+                    } else {
+                        out += `${c.textMuted}↑↓ Move | Enter Edit/Select | ←→ Adjust Numbers | ESC Return${c.reset}${c.clearToEndOfLine}`;
+                    }
+
+                    process.stdout.write(out);
+                }
+
+                function saveAllSettings() {
+                    const accSel = { ...(config.accountSelection || {}), stepThreshold: thresholdPct / 100, requestThreshold: reqCap };
+                    saveConfig({ accountSelection: accSel, switchAccountDelayMs: cooldown, port: proxyPort, apiKey: secretKey });
+                    const cs = readClaudeSettings();
+                    cs.env = cs.env || {};
+                    cs.env.ANTHROPIC_API_KEY = secretKey;
+                    writeClaudeSettings(cs);
+                }
+
+                await new Promise((resolve) => {
+                    if (process.stdin.isTTY) process.stdin.setRawMode(true);
+                    readline.emitKeypressEvents(process.stdin);
+
+                    function onKey(str, key) {
+                        if (!key) return;
+
+                        if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
+                            if (isFocusEditing) {
+                                if (activeSettingIdx === 4) {
+                                    if (editBuffer) secretKey = editBuffer;
+                                } else if (editBuffer) {
+                                    const parsed = parseInt(editBuffer, 10);
+                                    if (!isNaN(parsed)) setValNum(activeSettingIdx, parsed);
+                                }
+                                isFocusEditing = false;
+                                editBuffer = '';
+                                renderScreen();
+                                return;
+                            }
+
+                            saveAllSettings();
+                            cleanup();
+                            resolve();
+                            return;
+                        }
+
+                        if (isFocusEditing) {
+                            if (key.name === 'return' || key.name === 'enter') {
+                                if (activeSettingIdx === 4) {
+                                    secretKey = editBuffer.trim() || 'atc-local-key';
+                                } else if (editBuffer) {
+                                    const parsed = parseInt(editBuffer, 10);
+                                    if (!isNaN(parsed)) setValNum(activeSettingIdx, parsed);
+                                }
+                                isFocusEditing = false;
+                                editBuffer = '';
+                                notice = `Updated ${settingsMeta[activeSettingIdx].label} to ${getDisplayVal(activeSettingIdx)}`;
+                                renderScreen();
+                                return;
+                            }
+
+                            if (key.name === 'backspace') {
+                                editBuffer = editBuffer.slice(0, -1);
+                                renderScreen();
+                                return;
+                            }
+
+                            if (activeSettingIdx === 4) {
+                                if (str && /^[a-zA-Z0-9_\-\.]$/.test(str) && editBuffer.length < 64) {
+                                    editBuffer += str;
+                                    renderScreen();
+                                }
+                                return;
+                            }
+
+                            if (/^[0-9]$/.test(str)) {
+                                if (editBuffer.length < 5) {
+                                    editBuffer += str;
+                                }
+                                renderScreen();
+                                return;
+                            }
+
+                            if (key.name === 'left') {
+                                let current = parseInt(editBuffer, 10);
+                                if (isNaN(current)) current = getValNum(activeSettingIdx);
+                                const step = settingsMeta[activeSettingIdx].step;
+                                const updated = Math.max(settingsMeta[activeSettingIdx].min, current - step);
+                                editBuffer = updated.toString();
+                                renderScreen();
+                                return;
+                            }
+
+                            if (key.name === 'right') {
+                                let current = parseInt(editBuffer, 10);
+                                if (isNaN(current)) current = getValNum(activeSettingIdx);
+                                const step = settingsMeta[activeSettingIdx].step;
+                                const updated = Math.min(settingsMeta[activeSettingIdx].max, current + step);
+                                editBuffer = updated.toString();
+                                renderScreen();
+                                return;
+                            }
+                            return;
+                        }
+
+                        if (key.name === 'up' || key.name === 'k') {
+                            notice = '';
+                            activeSettingIdx = (activeSettingIdx - 1 + settingsMeta.length) % settingsMeta.length;
+                            renderScreen();
+                            return;
+                        }
+
+                        if (key.name === 'down' || key.name === 'j') {
+                            notice = '';
+                            activeSettingIdx = (activeSettingIdx + 1) % settingsMeta.length;
+                            renderScreen();
+                            return;
+                        }
+
+                        if (key.name === 'left' && activeSettingIdx < 4) {
+                            notice = '';
+                            const meta = settingsMeta[activeSettingIdx];
+                            const cur = getValNum(activeSettingIdx);
+                            const next = Math.max(meta.min, cur - meta.step);
+                            setValNum(activeSettingIdx, next);
+                            renderScreen();
+                            return;
+                        }
+
+                        if (key.name === 'right' && activeSettingIdx < 4) {
+                            notice = '';
+                            const meta = settingsMeta[activeSettingIdx];
+                            const cur = getValNum(activeSettingIdx);
+                            const next = Math.min(meta.max, cur + meta.step);
+                            setValNum(activeSettingIdx, next);
+                            renderScreen();
+                            return;
+                        }
+
+                        if (key.name === 'return' || key.name === 'enter') {
+                            notice = '';
+                            if (activeSettingIdx <= 4) {
+                                isFocusEditing = true;
+                                editBuffer = activeSettingIdx === 4 ? secretKey : getValNum(activeSettingIdx).toString();
+                                renderScreen();
+                                return;
+                            }
+
+                            if (activeSettingIdx === 5) {
+                                thresholdPct = 5;
+                                reqCap = 20;
+                                cooldown = 5000;
+                                secretKey = 'atc-local-key';
+                                notice = 'Reset all settings to recommended safe defaults';
+                                renderScreen();
+                                return;
+                            }
+
+                            if (activeSettingIdx === 6) {
+                                saveAllSettings();
+                                cleanup();
+                                resolve();
+                                return;
+                            }
+                        }
+                    }
+
+                    function cleanup() {
+                        process.stdin.removeListener('keypress', onKey);
+                    }
+
+                    process.stdin.on('keypress', onKey);
+                    renderScreen();
+                });
+
+                setStatus(`Saved Engine Settings & Parameters.`, 2000);
+            });
+        }
+
+        if (options && options.initialScreen === 'settings') {
+            setTimeout(() => {
+                openEngineSettings().catch(() => {});
+            }, 50);
         }
 
         async function onKeypress(str, key) {
@@ -799,67 +1144,29 @@ export async function runInteractiveDashboard() {
                             let selectedIdx = 0;
                             let notice = '';
 
-                            // Ensure initial recommended fake models exist if map is empty
-                            if (!config.modelMapping || Object.keys(config.modelMapping).length === 0) {
-                                config.modelMapping = {
-                                    'claude-opus-5-5': { mapping: 'gemini-3.8-pro' },
-                                    'claude-sonnet-5-5': { mapping: 'gemini-3.8-flash-high' },
-                                    'claude-haiku-5-5': { mapping: 'gemini-3.1-flash-lite' }
-                                };
-                                saveConfig({ modelMapping: config.modelMapping });
-                            }
-
                             function getItemsList() {
                                 const env = claudeSettings.env || {};
                                 const mm = config.modelMapping || {};
                                 const list = [];
 
-                                // Section 1: Fake Model IDs -> Google Backend
+                                // Section 1: Claude Code Essential Model Slots
                                 list.push({
                                     type: 'header',
-                                    label: 'Registered Fake Model IDs (Fake ID → Google Backend Model)',
-                                    id: 'hdr_fake'
-                                });
-
-                                const fakeKeys = Object.keys(mm);
-                                for (const fk of fakeKeys) {
-                                    const tgt = typeof mm[fk] === 'object' ? (mm[fk].mapping || 'unknown') : mm[fk];
-                                    list.push({
-                                        type: 'fake_model',
-                                        id: `fake_${fk}`,
-                                        fakeId: fk,
-                                        target: tgt,
-                                        label: `Fake: [${fk}]`,
-                                        val: fk,
-                                        desc: `Maps client request "${fk}" → executes Google "${tgt}". Press Enter to edit or bind.`
-                                    });
-                                }
-
-                                list.push({
-                                    type: 'action',
-                                    id: 'add_fake',
-                                    label: '+ Register New Fake Model ID (e.g. gpt-6-sol)',
-                                    desc: 'Define an arbitrary model name (e.g. gpt-6-sol, claude-opus-5.5) mapped to a Gemini backend'
-                                });
-
-                                // Section 2: Claude Code Environment Variables Binding
-                                list.push({
-                                    type: 'header',
-                                    label: 'Claude Code Environment Variables Binding',
+                                    label: 'Claude Code Model Slots (Fake ID → Google Backend Model)',
                                     id: 'hdr_env'
                                 });
 
                                 const envDefs = [
-                                    { key: 'ANTHROPIC_MODEL', label: 'Main Model (ANTHROPIC_MODEL)', def: 'claude-sonnet-5-5' },
-                                    { key: 'CLAUDE_CODE_SUBAGENT_MODEL', label: 'Subagent Model (CLAUDE_CODE_SUBAGENT)', def: 'claude-haiku-5-5' },
-                                    { key: 'ANTHROPIC_DEFAULT_OPUS_MODEL', label: 'Opus Override (ANTHROPIC_DEFAULT_OPUS)', def: 'claude-opus-5-5' },
-                                    { key: 'ANTHROPIC_DEFAULT_SONNET_MODEL', label: 'Sonnet Override (ANTHROPIC_DEFAULT_SONNET)', def: 'claude-sonnet-5-5' },
-                                    { key: 'ANTHROPIC_DEFAULT_HAIKU_MODEL', label: 'Haiku Override (ANTHROPIC_DEFAULT_HAIKU)', def: 'claude-haiku-5-5' }
+                                    { key: 'ANTHROPIC_MODEL', label: 'Main Model (ANTHROPIC_MODEL)', def: 'claude-sonnet-5-5', defTgt: 'gemini-3.8-flash-high' },
+                                    { key: 'CLAUDE_CODE_SUBAGENT_MODEL', label: 'Subagent Model (CLAUDE_CODE_SUBAGENT)', def: 'claude-haiku-5-5', defTgt: 'gemini-3.1-flash-lite' },
+                                    { key: 'ANTHROPIC_DEFAULT_OPUS_MODEL', label: 'Opus Override (ANTHROPIC_DEFAULT_OPUS)', def: 'claude-opus-5-5', defTgt: 'gemini-3.8-pro' },
+                                    { key: 'ANTHROPIC_DEFAULT_SONNET_MODEL', label: 'Sonnet Override (ANTHROPIC_DEFAULT_SONNET)', def: 'claude-sonnet-5-5', defTgt: 'gemini-3.8-flash-high' },
+                                    { key: 'ANTHROPIC_DEFAULT_HAIKU_MODEL', label: 'Haiku Override (ANTHROPIC_DEFAULT_HAIKU)', def: 'claude-haiku-5-5', defTgt: 'gemini-3.1-flash-lite' }
                                 ];
 
                                 for (const ed of envDefs) {
                                     const curVal = env[ed.key] || ed.def;
-                                    const tgt = getMappingTarget(mm, curVal);
+                                    const tgt = getMappingTarget(mm, curVal) || ed.defTgt;
                                     list.push({
                                         type: 'env_var',
                                         id: ed.key,
@@ -867,28 +1174,64 @@ export async function runInteractiveDashboard() {
                                         label: ed.label,
                                         val: curVal,
                                         target: tgt,
-                                        desc: `Claude Code env var "${ed.key}". Press Enter to bind to any Fake Model ID.`
+                                        desc: `Press Enter to set Fake Model ID & Google Backend Target for ${ed.key}`
                                     });
                                 }
 
-                                // Section 3: Presets & Maintenance
+                                // Section 2: Custom Fake IDs (Only non-default custom mappings)
                                 list.push({
                                     type: 'header',
-                                    label: 'Presets & Maintenance',
+                                    label: 'Custom Fake Model Mappings',
+                                    id: 'hdr_custom'
+                                });
+
+                                list.push({
+                                    type: 'action',
+                                    id: 'add_fake',
+                                    label: '+ Register Custom Fake Model (e.g. gpt-6-sol → gemini-2.5-flash)',
+                                    desc: 'Map any arbitrary Fake ID client requests to a target Google Gemini model'
+                                });
+
+                                const registeredKeys = Object.keys(mm);
+                                const standardKeys = new Set(['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5']);
+                                for (const rk of registeredKeys) {
+                                    if (!standardKeys.has(rk)) {
+                                        const tgt = typeof mm[rk] === 'object' ? (mm[rk].mapping || 'gemini-3.8-flash-high') : mm[rk];
+                                        list.push({
+                                            type: 'custom_item',
+                                            id: `custom_${rk}`,
+                                            fakeId: rk,
+                                            target: tgt,
+                                            label: `Custom: [${rk}]`,
+                                            desc: `Maps "${rk}" → Google "${tgt}". Press Enter to change target or remove.`
+                                        });
+                                    }
+                                }
+
+                                // Section 3: Presets & Actions
+                                list.push({
+                                    type: 'header',
+                                    label: 'Quick Presets & Maintenance',
                                     id: 'hdr_actions'
                                 });
 
                                 list.push({
                                     type: 'action',
+                                    id: 'preset_flex',
+                                    label: '✨ Flex Mode (Claude 3.7 Sonnet & Claude 3 Opus signatures)',
+                                    desc: 'Fakes flagship Anthropic models (Claude 3.7 Sonnet) backed by Gemini Pro & Flash'
+                                });
+                                list.push({
+                                    type: 'action',
                                     id: 'preset_default',
-                                    label: 'Apply Default Recommended Fake Models (Sonnet, Opus, Haiku)',
-                                    desc: 'Sets up standard high-performance fake model mappings for Claude Code'
+                                    label: 'Apply Default Balanced Setup (Sonnet 5.5 & Haiku 5.5)',
+                                    desc: 'Default fast setup: Flash-High for main/sonnet/opus, Flash-Lite for subagents'
                                 });
                                 list.push({
                                     type: 'action',
                                     id: 'clean',
                                     label: 'Clean All Custom Model Overrides',
-                                    desc: 'Remove custom model environment variables from ~/.claude/settings.json'
+                                    desc: 'Remove all custom model environment variables from ~/.claude/settings.json'
                                 });
                                 list.push({
                                     type: 'action',
@@ -919,16 +1262,16 @@ export async function runInteractiveDashboard() {
                                     const pointer = isSel ? `\x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
                                     let line = '';
 
-                                    if (it.type === 'fake_model') {
+                                    if (it.type === 'env_var') {
+                                        const tgtTag = it.target ? ` \x1b[38;5;245m→\x1b[0m \x1b[1;38;5;51m[${it.target}]\x1b[0m` : '';
+                                        line = isSel
+                                            ? `\x1b[1;38;5;255m${it.label}:\x1b[0m \x1b[1;38;5;120m[${it.val}]\x1b[0m${tgtTag}`
+                                            : `\x1b[38;5;250m${it.label}:\x1b[0m \x1b[38;5;147m[${it.val}]\x1b[0m${tgtTag}`;
+                                    } else if (it.type === 'custom_item') {
                                         const tgtTag = ` \x1b[38;5;245m→\x1b[0m \x1b[1;38;5;51m[${it.target}]\x1b[0m`;
                                         line = isSel
                                             ? `\x1b[1;38;5;255m${it.label}\x1b[0m${tgtTag}`
                                             : `\x1b[38;5;250m${it.label}\x1b[0m${tgtTag}`;
-                                    } else if (it.type === 'env_var') {
-                                        const tgtTag = it.target ? ` \x1b[38;5;245m→\x1b[0m \x1b[1;38;5;51m${it.target}\x1b[0m` : '';
-                                        line = isSel
-                                            ? `\x1b[1;38;5;255m${it.label}:\x1b[0m \x1b[1;38;5;120m[${it.val}]\x1b[0m${tgtTag}`
-                                            : `\x1b[38;5;250m${it.label}:\x1b[0m \x1b[38;5;147m[${it.val}]\x1b[0m${tgtTag}`;
                                     } else {
                                         line = isSel
                                             ? `\x1b[1;38;5;255m${it.label}${c.reset}`
@@ -991,151 +1334,49 @@ export async function runInteractiveDashboard() {
                                         const curIt = list[selectedIdx];
                                         if (!curIt || curIt.type === 'header') return;
 
-                                        // Click on registered fake model: edit target, bind to env, or delete
-                                        if (itIsFakeModel(curIt)) {
-                                            process.stdin.removeListener('keypress', onKey);
-                                            if (process.stdin.isTTY) process.stdin.setRawMode(false);
-                                            process.stdout.write(c.showCursor);
-
-                                            console.log(`\n\nManage Fake Model: [${curIt.fakeId}] → [${curIt.target}]`);
-                                            console.log(`  1. Change Google Backend Target model`);
-                                            console.log(`  2. Bind [${curIt.fakeId}] to a Claude Code Environment Variable`);
-                                            console.log(`  3. Delete this Fake Model mapping`);
-                                            console.log(`  4. Cancel`);
-
-                                            const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-                                            const choice = await new Promise(r => rl.question(`Choose [1-4]: `, r));
-
-                                            if (choice.trim() === '1') {
-                                                console.log(`\nEnter new Google Backend Model (e.g. gemini-3.8-flash-high, gemini-3.8-pro, gemini-2.5-flash):`);
-                                                const newBackend = await new Promise(r => rl.question(`[default: ${curIt.target}] > `, r));
-                                                const b = newBackend.trim() || curIt.target;
-                                                const newMm = { ...(config.modelMapping || {}) };
-                                                newMm[curIt.fakeId] = { mapping: b };
-                                                saveConfig({ modelMapping: newMm });
-                                                notice = `Updated [${curIt.fakeId}] → [${b}]`;
-                                            } else if (choice.trim() === '2') {
-                                                console.log(`\nSelect Claude Code Environment Variable to bind:`);
-                                                console.log(`  1. ANTHROPIC_MODEL (Main Claude Code model)`);
-                                                console.log(`  2. CLAUDE_CODE_SUBAGENT_MODEL (Subagents / Task runners)`);
-                                                console.log(`  3. ANTHROPIC_DEFAULT_OPUS_MODEL (Opus overrides)`);
-                                                console.log(`  4. ANTHROPIC_DEFAULT_SONNET_MODEL (Sonnet overrides)`);
-                                                console.log(`  5. ANTHROPIC_DEFAULT_HAIKU_MODEL (Haiku overrides)`);
-                                                const envChoice = await new Promise(r => rl.question(`Choose [1-5]: `, r));
-                                                const envKeys = [
-                                                    'ANTHROPIC_MODEL',
-                                                    'CLAUDE_CODE_SUBAGENT_MODEL',
-                                                    'ANTHROPIC_DEFAULT_OPUS_MODEL',
-                                                    'ANTHROPIC_DEFAULT_SONNET_MODEL',
-                                                    'ANTHROPIC_DEFAULT_HAIKU_MODEL'
-                                                ];
-                                                const selectedKey = envKeys[parseInt(envChoice.trim(), 10) - 1];
-                                                if (selectedKey) {
-                                                    claudeSettings.env = claudeSettings.env || {};
-                                                    claudeSettings.env[selectedKey] = curIt.fakeId;
-                                                    writeClaudeSettings(claudeSettings);
-                                                    notice = `Bound ${selectedKey} = [${curIt.fakeId}]`;
-                                                }
-                                            } else if (choice.trim() === '3') {
-                                                const newMm = { ...(config.modelMapping || {}) };
-                                                delete newMm[curIt.fakeId];
-                                                saveConfig({ modelMapping: newMm });
-                                                notice = `Deleted Fake Model [${curIt.fakeId}]`;
-                                            }
-                                            rl.close();
-
-                                            if (process.stdin.isTTY) process.stdin.setRawMode(true);
-                                            process.stdout.write(c.hideCursor);
-                                            process.stdin.on('keypress', onKey);
-                                            renderScreen();
-                                            return;
-                                        }
-
-                                        // Click on "+ Register New Fake Model ID"
-                                        if (curIt.id === 'add_fake') {
-                                            process.stdin.removeListener('keypress', onKey);
-                                            if (process.stdin.isTTY) process.stdin.setRawMode(false);
-                                            process.stdout.write(c.showCursor);
-
-                                            console.log(`\n\nRegister New Fake Model ID:`);
-                                            const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-                                            console.log(`Enter Fake Model ID client will request (e.g. gpt-6-sol, claude-opus-5.5, deepseek-r2):`);
-                                            const fakeName = await new Promise(r => rl.question(`> `, r));
-
-                                            console.log(`Enter Google Backend Model to execute (e.g. gemini-3.8-flash-high, gemini-3.8-pro, gemini-2.5-flash):`);
-                                            const backendName = await new Promise(r => rl.question(`[default: gemini-3.8-flash-high] > `, r));
-
-                                            console.log(`Optional: Bind to Claude Code env var (1: ANTHROPIC_MODEL, 2: SUBAGENT, 3: OPUS, 4: SONNET, 5: HAIKU, Enter to skip):`);
-                                            const envBind = await new Promise(r => rl.question(`Choose [1-5 or Enter]: `, r));
-                                            rl.close();
-
-                                            const f = fakeName.trim();
-                                            const b = backendName.trim() || 'gemini-3.8-flash-high';
-                                            if (f) {
-                                                const newMm = { ...(config.modelMapping || {}) };
-                                                newMm[f] = { mapping: b };
-                                                saveConfig({ modelMapping: newMm });
-
-                                                const envKeys = [
-                                                    'ANTHROPIC_MODEL',
-                                                    'CLAUDE_CODE_SUBAGENT_MODEL',
-                                                    'ANTHROPIC_DEFAULT_OPUS_MODEL',
-                                                    'ANTHROPIC_DEFAULT_SONNET_MODEL',
-                                                    'ANTHROPIC_DEFAULT_HAIKU_MODEL'
-                                                ];
-                                                const bKey = envKeys[parseInt(envBind.trim(), 10) - 1];
-                                                if (bKey) {
-                                                    claudeSettings.env = claudeSettings.env || {};
-                                                    claudeSettings.env[bKey] = f;
-                                                    writeClaudeSettings(claudeSettings);
-                                                }
-                                                notice = `Registered Fake Model [${f}] → [${b}]${bKey ? ` & bound to ${bKey}` : ''}`;
-                                            }
-
-                                            if (process.stdin.isTTY) process.stdin.setRawMode(true);
-                                            process.stdout.write(c.hideCursor);
-                                            process.stdin.on('keypress', onKey);
-                                            renderScreen();
-                                            return;
-                                        }
-
-                                        // Click on Claude Code Env Var
+                                        // Click on an Env Var Slot (e.g. ANTHROPIC_MODEL)
                                         if (curIt.type === 'env_var') {
                                             process.stdin.removeListener('keypress', onKey);
                                             if (process.stdin.isTTY) process.stdin.setRawMode(false);
                                             process.stdout.write(c.showCursor);
 
-                                            console.log(`\n\nConfigure Environment Variable: ${curIt.envKey}`);
-                                            console.log(`Currently set to: [${curIt.val}] → executing [${curIt.target}]`);
-
-                                            const fakeList = Object.keys(config.modelMapping || {});
-                                            if (fakeList.length > 0) {
-                                                console.log(`\nAvailable registered Fake Models:`);
-                                                fakeList.forEach((fm, idx) => {
-                                                    const tgt = getMappingTarget(config.modelMapping, fm);
-                                                    console.log(`  ${idx + 1}. ${fm} → ${tgt}`);
-                                                });
-                                            }
+                                            console.log(`\n\nConfigure ${curIt.label}:`);
+                                            console.log(`Current: Fake ID = [${curIt.val}] → Google Backend = [${curIt.target}]\n`);
 
                                             const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-                                            console.log(`\nEnter number (1-${fakeList.length}) to pick from list, or type custom Fake Model ID:`);
-                                            const ans = await new Promise(r => rl.question(`[default: ${curIt.val}] > `, r));
+                                            console.log(`Step 1: Enter Fake Model ID (what Claude Code sends, e.g. claude-sonnet-5-5, gpt-6-sol):`);
+                                            const fakeAns = await new Promise(r => rl.question(`[default: ${curIt.val}] > `, r));
+                                            const finalFake = fakeAns.trim() || curIt.val;
+
+                                            console.log(`\nStep 2: Choose Google Backend Model to execute:`);
+                                            console.log(`  1. gemini-3.8-flash-high (Fast & smart daily driver)`);
+                                            console.log(`  2. gemini-3.8-pro (Deep reasoning & coding)`);
+                                            console.log(`  3. gemini-2.5-flash (Standard high speed)`);
+                                            console.log(`  4. gemini-3.1-flash-lite (Ultra-fast, ideal for subagents)`);
+                                            console.log(`  Or type custom backend model name:`);
+                                            const backendAns = await new Promise(r => rl.question(`[default: ${curIt.target}] > `, r));
                                             rl.close();
 
-                                            const rawAns = ans.trim();
-                                            let chosenFake = rawAns;
-                                            const num = parseInt(rawAns, 10);
-                                            if (!isNaN(num) && num >= 1 && num <= fakeList.length) {
-                                                chosenFake = fakeList[num - 1];
-                                            }
+                                            const bRaw = backendAns.trim();
+                                            let finalBackend = curIt.target;
+                                            if (bRaw === '1') finalBackend = 'gemini-3.8-flash-high';
+                                            else if (bRaw === '2') finalBackend = 'gemini-3.8-pro';
+                                            else if (bRaw === '3') finalBackend = 'gemini-2.5-flash';
+                                            else if (bRaw === '4') finalBackend = 'gemini-3.1-flash-lite';
+                                            else if (bRaw) finalBackend = bRaw;
 
-                                            if (!chosenFake) chosenFake = curIt.val;
-
+                                            // Save to Claude Code settings
                                             claudeSettings.env = claudeSettings.env || {};
-                                            claudeSettings.env[curIt.envKey] = chosenFake;
+                                            claudeSettings.env[curIt.envKey] = finalFake;
                                             writeClaudeSettings(claudeSettings);
 
-                                            notice = `Updated ${curIt.envKey} = [${chosenFake}]`;
+                                            // Register in atc modelMapping
+                                            const newMm = { ...(config.modelMapping || {}) };
+                                            newMm[finalFake] = { mapping: finalBackend };
+                                            config.modelMapping = newMm;
+                                            saveConfig({ modelMapping: newMm });
+
+                                            notice = `Set ${curIt.envKey} = [${finalFake}] → [${finalBackend}]`;
 
                                             if (process.stdin.isTTY) process.stdin.setRawMode(true);
                                             process.stdout.write(c.hideCursor);
@@ -1144,7 +1385,114 @@ export async function runInteractiveDashboard() {
                                             return;
                                         }
 
-                                        // Preset Default
+                                        // Click on "+ Register Custom Fake Model"
+                                        if (curIt.id === 'add_fake') {
+                                            process.stdin.removeListener('keypress', onKey);
+                                            if (process.stdin.isTTY) process.stdin.setRawMode(false);
+                                            process.stdout.write(c.showCursor);
+
+                                            console.log(`\n\nRegister Custom Fake Model ID:`);
+                                            const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+                                            console.log(`Enter Fake Model ID (e.g. gpt-6-sol, my-custom-model, claude-opus-5.5):`);
+                                            const fAns = await new Promise(r => rl.question(`> `, r));
+
+                                            console.log(`\nChoose Google Backend Model to execute:`);
+                                            console.log(`  1. gemini-3.8-flash-high (Fast & smart)`);
+                                            console.log(`  2. gemini-3.8-pro (Deep reasoning)`);
+                                            console.log(`  3. gemini-2.5-flash (Standard flash)`);
+                                            console.log(`  4. gemini-3.1-flash-lite (Ultra-fast)`);
+                                            const bAns = await new Promise(r => rl.question(`[default: 1] > `, r));
+                                            rl.close();
+
+                                            const fakeId = fAns.trim();
+                                            let backend = 'gemini-3.8-flash-high';
+                                            const b = bAns.trim();
+                                            if (b === '2') backend = 'gemini-3.8-pro';
+                                            else if (b === '3') backend = 'gemini-2.5-flash';
+                                            else if (b === '4') backend = 'gemini-3.1-flash-lite';
+                                            else if (b && b !== '1') backend = b;
+
+                                            if (fakeId) {
+                                                const newMm = { ...(config.modelMapping || {}) };
+                                                newMm[fakeId] = { mapping: backend };
+                                                config.modelMapping = newMm;
+                                                saveConfig({ modelMapping: newMm });
+                                                notice = `Registered Fake Model [${fakeId}] → [${backend}]`;
+                                            }
+
+                                            if (process.stdin.isTTY) process.stdin.setRawMode(true);
+                                            process.stdout.write(c.hideCursor);
+                                            process.stdin.on('keypress', onKey);
+                                            renderScreen();
+                                            return;
+                                        }
+
+                                        // Click on a custom item
+                                        if (curIt.type === 'custom_item') {
+                                            process.stdin.removeListener('keypress', onKey);
+                                            if (process.stdin.isTTY) process.stdin.setRawMode(false);
+                                            process.stdout.write(c.showCursor);
+
+                                            console.log(`\n\nManage Custom Fake Model: [${curIt.fakeId}] → [${curIt.target}]`);
+                                            console.log(`  1. Change Google Backend Target`);
+                                            console.log(`  2. Delete this Fake Model`);
+                                            console.log(`  3. Cancel`);
+
+                                            const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+                                            const ch = await new Promise(r => rl.question(`Choose [1-3]: `, r));
+
+                                            if (ch.trim() === '1') {
+                                                console.log(`\nEnter new Google Backend Model (e.g. gemini-3.8-flash-high, gemini-3.8-pro):`);
+                                                const nb = await new Promise(r => rl.question(`[default: ${curIt.target}] > `, r));
+                                                const finalB = nb.trim() || curIt.target;
+                                                const newMm = { ...(config.modelMapping || {}) };
+                                                newMm[curIt.fakeId] = { mapping: finalB };
+                                                config.modelMapping = newMm;
+                                                saveConfig({ modelMapping: newMm });
+                                                notice = `Updated [${curIt.fakeId}] → [${finalB}]`;
+                                            } else if (ch.trim() === '2') {
+                                                const newMm = { ...(config.modelMapping || {}) };
+                                                delete newMm[curIt.fakeId];
+                                                config.modelMapping = newMm;
+                                                saveConfig({ modelMapping: newMm });
+                                                notice = `Deleted [${curIt.fakeId}]`;
+                                            }
+                                            rl.close();
+
+                                            if (process.stdin.isTTY) process.stdin.setRawMode(true);
+                                            process.stdout.write(c.hideCursor);
+                                            process.stdin.on('keypress', onKey);
+                                            renderScreen();
+                                            return;
+                                        }
+
+                                        // Preset: Flex Mode
+                                        if (curIt.id === 'preset_flex') {
+                                            claudeSettings.env = claudeSettings.env || {};
+                                            claudeSettings.env.ANTHROPIC_MODEL = 'claude-3-7-sonnet-20250219';
+                                            claudeSettings.env.CLAUDE_CODE_SUBAGENT_MODEL = 'claude-3-5-haiku-20241022';
+                                            claudeSettings.env.ANTHROPIC_DEFAULT_OPUS_MODEL = 'claude-3-opus-20240229';
+                                            claudeSettings.env.ANTHROPIC_DEFAULT_SONNET_MODEL = 'claude-3-7-sonnet-20250219';
+                                            claudeSettings.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = 'claude-3-5-haiku-20241022';
+                                            writeClaudeSettings(claudeSettings);
+
+                                            const newMm = {
+                                                'claude-3-7-sonnet-20250219': { mapping: 'gemini-3.8-flash-high' },
+                                                'claude-3-5-sonnet-20241022': { mapping: 'gemini-3.8-flash-high' },
+                                                'claude-3-opus-20240229': { mapping: 'gemini-3.8-pro' },
+                                                'claude-3-5-haiku-20241022': { mapping: 'gemini-3.1-flash-lite' },
+                                                'claude-opus-5-5': { mapping: 'gemini-3.8-pro' },
+                                                'claude-sonnet-5-5': { mapping: 'gemini-3.8-flash-high' },
+                                                'claude-haiku-5-5': { mapping: 'gemini-3.1-flash-lite' }
+                                            };
+                                            config.modelMapping = newMm;
+                                            saveConfig({ modelMapping: newMm });
+                                            notice = 'Applied Flex Mode: Claude 3.7 Sonnet & Claude 3 Opus!';
+                                            renderScreen();
+                                            return;
+                                        }
+
+                                        // Preset: Default
                                         if (curIt.id === 'preset_default') {
                                             claudeSettings.env = claudeSettings.env || {};
                                             claudeSettings.env.ANTHROPIC_MODEL = 'claude-sonnet-5-5';
@@ -1154,12 +1502,14 @@ export async function runInteractiveDashboard() {
                                             claudeSettings.env.CLAUDE_CODE_SUBAGENT_MODEL = 'claude-haiku-5-5';
                                             writeClaudeSettings(claudeSettings);
 
-                                            const newMm = { ...(config.modelMapping || {}) };
-                                            newMm['claude-opus-5-5'] = { mapping: 'gemini-3.8-pro' };
-                                            newMm['claude-sonnet-5-5'] = { mapping: 'gemini-3.8-flash-high' };
-                                            newMm['claude-haiku-5-5'] = { mapping: 'gemini-3.1-flash-lite' };
+                                            const newMm = {
+                                                'claude-opus-5-5': { mapping: 'gemini-3.8-pro' },
+                                                'claude-sonnet-5-5': { mapping: 'gemini-3.8-flash-high' },
+                                                'claude-haiku-5-5': { mapping: 'gemini-3.1-flash-lite' }
+                                            };
+                                            config.modelMapping = newMm;
                                             saveConfig({ modelMapping: newMm });
-                                            notice = 'Applied recommended Fake Models preset (Opus, Sonnet, Haiku)';
+                                            notice = 'Applied default Fake Models setup (Sonnet 5.5, Haiku 5.5)';
                                             renderScreen();
                                             return;
                                         }
@@ -1187,10 +1537,6 @@ export async function runInteractiveDashboard() {
                                             return;
                                         }
                                     }
-                                }
-
-                                function itIsFakeModel(it) {
-                                    return it && it.type === 'fake_model';
                                 }
 
                                 process.stdin.on('keypress', onKey);
@@ -1348,325 +1694,7 @@ export async function runInteractiveDashboard() {
                     }
 
                     if (cur.id === 'engine_settings') {
-                        await runSubScreen(async () => {
-                            let thresholdPct = Math.round((config?.accountSelection?.stepThreshold || 0.05) * 100);
-                            let reqCap = config?.accountSelection?.requestThreshold || 20;
-                            let cooldown = config?.switchAccountDelayMs || 5000;
-                            let proxyPort = config?.port || 43128;
-                            let activeSettingIdx = 0;
-                            let isFocusEditing = false;
-                            let editBuffer = '';
-                            let notice = '';
-
-                            const settingsMeta = [
-                                {
-                                    id: 'threshold',
-                                    label: 'Quota Rotation Threshold',
-                                    unit: '%',
-                                    desc: 'Rotates account after using this quota % to stagger 5h recovery in parallel',
-                                    min: 1, max: 50, step: 1,
-                                    safeMin: 3, safeMax: 15,
-                                    warnLow: 'Below 3%: rapid account cycling from same IP may trigger Google scrutiny',
-                                    warnHigh: 'Above 15%: single account quota drains heavily before rotation'
-                                },
-                                {
-                                    id: 'reqCap',
-                                    label: 'Fallback Request Cap',
-                                    unit: 'reqs',
-                                    desc: 'Rotates account after this many requests if quota telemetry delayed',
-                                    min: 5, max: 200, step: 5,
-                                    safeMin: 10, safeMax: 50,
-                                    warnLow: 'Below 10 reqs: switches accounts excessively during slow telemetry',
-                                    warnHigh: 'Above 50 reqs: risk of depleting account quota before switching'
-                                },
-                                {
-                                    id: 'cooldown',
-                                    label: 'Switch Delay Cooldown',
-                                    unit: 'ms',
-                                    desc: 'Cooldown delay in milliseconds before switching account on error',
-                                    min: 500, max: 30000, step: 500,
-                                    safeMin: 2000, safeMax: 10000,
-                                    warnLow: 'Below 2000ms: rapid failovers may trigger Google rate limit firewalls',
-                                    warnHigh: 'Above 10000ms: sluggish error recovery time for user requests'
-                                },
-                                {
-                                    id: 'port',
-                                    label: 'Proxy Listen Port',
-                                    unit: '',
-                                    desc: 'Local HTTP proxy listen port (requires proxy restart to take effect)',
-                                    min: 1024, max: 65535, step: 1,
-                                    safeMin: 1024, safeMax: 65535,
-                                    warnLow: 'Ports below 1024 require root/administrator privileges',
-                                    warnHigh: 'Port number out of valid TCP range'
-                                },
-                                {
-                                    id: 'reset',
-                                    label: 'Reset All to Defaults',
-                                    unit: '',
-                                    desc: 'Restore recommended safe defaults (5% quota, 20 requests, 5000ms cooldown)'
-                                },
-                                {
-                                    id: 'save',
-                                    label: 'Save & Return to Dashboard',
-                                    unit: '',
-                                    desc: 'Save all parameters to ~/.config/atc/config.json'
-                                }
-                            ];
-
-                            function getValNum(idx) {
-                                if (idx === 0) return thresholdPct;
-                                if (idx === 1) return reqCap;
-                                if (idx === 2) return cooldown;
-                                if (idx === 3) return proxyPort;
-                                return 0;
-                            }
-
-                            function setValNum(idx, num) {
-                                const meta = settingsMeta[idx];
-                                const clamped = Math.max(meta.min, Math.min(meta.max, num));
-                                if (idx === 0) thresholdPct = clamped;
-                                else if (idx === 1) reqCap = clamped;
-                                else if (idx === 2) cooldown = clamped;
-                                else if (idx === 3) proxyPort = clamped;
-                            }
-
-                            function getWarning(idx) {
-                                if (idx >= 4) return null;
-                                const meta = settingsMeta[idx];
-                                const val = getValNum(idx);
-                                if (val < meta.safeMin) return meta.warnLow;
-                                if (val > meta.safeMax) return meta.warnHigh;
-                                return null;
-                            }
-
-                            function getDisplayVal(idx) {
-                                if (idx === 0) return thresholdPct + '%';
-                                if (idx === 1) return reqCap + ' reqs';
-                                if (idx === 2) return cooldown + 'ms';
-                                if (idx === 3) return proxyPort.toString();
-                                return '';
-                            }
-
-                            function renderScreen() {
-                                let out = c.clearScreen + c.cursorHome;
-                                out += `${c.brandGreen}╭─────────────────────────────────────────────────────────────────╮${c.reset}\n`;
-                                out += `${c.brandGreen}│  atc Engine Settings & Parameters                               │${c.reset}\n`;
-                                out += `${c.brandGreen}╰─────────────────────────────────────────────────────────────────╯${c.reset}\n\n`;
-
-                                for (let i = 0; i < settingsMeta.length; i++) {
-                                    const meta = settingsMeta[i];
-                                    const isSel = i === activeSettingIdx;
-                                    const pointer = isSel ? `\x1b[1;38;5;48m> ` : `  \x1b[38;5;240m· `;
-                                    const warn = getWarning(i);
-
-                                    let line = '';
-                                    if (i < 4) {
-                                        let valBox = '';
-                                        if (isSel && isFocusEditing) {
-                                            // Focus / Editing Mode indicator
-                                            valBox = `\x1b[1;38;5;226;48;5;236m[ ${editBuffer || '0'}_ ]\x1b[0m \x1b[38;5;220m✎ editing\x1b[0m`;
-                                        } else {
-                                            const displayStr = getDisplayVal(i);
-                                            valBox = isSel
-                                                ? `\x1b[1;38;5;120m[${displayStr}]\x1b[0m`
-                                                : `\x1b[38;5;147m[${displayStr}]\x1b[0m`;
-                                        }
-
-                                        // Subtle non-emoji threshold warning indicator
-                                        let warnBadge = '';
-                                        if (warn) {
-                                            warnBadge = ` \x1b[38;5;214m▲ outside safe zone\x1b[0m`;
-                                        }
-
-                                        line = isSel
-                                            ? `\x1b[1;38;5;255m${meta.label}:\x1b[0m ${valBox}${warnBadge}`
-                                            : `\x1b[38;5;250m${meta.label}:\x1b[0m ${valBox}${warnBadge}`;
-                                    } else {
-                                        line = isSel
-                                            ? `\x1b[1;38;5;255m${meta.label}${c.reset}`
-                                            : `\x1b[38;5;248m${meta.label}${c.reset}`;
-                                    }
-
-                                    out += `${pointer}${line}${c.clearToEndOfLine}\n`;
-                                }
-
-                                out += `\n`;
-                                const curMeta = settingsMeta[activeSettingIdx];
-                                const activeWarn = getWarning(activeSettingIdx);
-
-                                if (notice) {
-                                    out += `\x1b[38;5;153m› ${notice}${c.reset}${c.clearToEndOfLine}\n`;
-                                } else if (activeWarn) {
-                                    out += `${c.textMuted}Details:${c.reset} \x1b[1;38;5;214m▲ ${activeWarn}${c.reset}${c.clearToEndOfLine}\n`;
-                                } else {
-                                    out += `${c.textMuted}Details:${c.reset} ${c.textNormal}${curMeta.desc}${c.reset}${c.clearToEndOfLine}\n`;
-                                }
-
-                                if (isFocusEditing) {
-                                    out += `${c.textMuted}0-9 Type Value | ←→ Adjust | Backspace Delete | Enter/ESC Confirm${c.reset}${c.clearToEndOfLine}`;
-                                } else {
-                                    out += `${c.textMuted}↑↓ Move | Enter Focus to Edit | ←→ Quick Step | ESC Return${c.reset}${c.clearToEndOfLine}`;
-                                }
-
-                                process.stdout.write(out);
-                            }
-
-                            await new Promise((resolve) => {
-                                if (process.stdin.isTTY) process.stdin.setRawMode(true);
-                                readline.emitKeypressEvents(process.stdin);
-
-                                function onKey(str, key) {
-                                    if (!key) return;
-
-                                    if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
-                                        if (isFocusEditing) {
-                                            // Finish focus editing
-                                            if (editBuffer) {
-                                                const parsed = parseInt(editBuffer, 10);
-                                                if (!isNaN(parsed)) setValNum(activeSettingIdx, parsed);
-                                            }
-                                            isFocusEditing = false;
-                                            editBuffer = '';
-                                            renderScreen();
-                                            return;
-                                        }
-
-                                        // Exit screen and save
-                                        const accSel = { ...(config.accountSelection || {}), stepThreshold: thresholdPct / 100, requestThreshold: reqCap };
-                                        saveConfig({ accountSelection: accSel, switchAccountDelayMs: cooldown, port: proxyPort });
-                                        cleanup();
-                                        resolve();
-                                        return;
-                                    }
-
-                                    // Mode 1: In Focus Editing Mode
-                                    if (isFocusEditing) {
-                                        if (key.name === 'return' || key.name === 'enter') {
-                                            if (editBuffer) {
-                                                const parsed = parseInt(editBuffer, 10);
-                                                if (!isNaN(parsed)) setValNum(activeSettingIdx, parsed);
-                                            }
-                                            isFocusEditing = false;
-                                            editBuffer = '';
-                                            notice = `Updated ${settingsMeta[activeSettingIdx].label} to ${getDisplayVal(activeSettingIdx)}`;
-                                            renderScreen();
-                                            return;
-                                        }
-
-                                        if (key.name === 'backspace') {
-                                            editBuffer = editBuffer.slice(0, -1);
-                                            renderScreen();
-                                            return;
-                                        }
-
-                                        if (/^[0-9]$/.test(str)) {
-                                            if (editBuffer.length < 5) {
-                                                editBuffer += str;
-                                            }
-                                            renderScreen();
-                                            return;
-                                        }
-
-                                        if (key.name === 'left') {
-                                            let current = parseInt(editBuffer, 10);
-                                            if (isNaN(current)) current = getValNum(activeSettingIdx);
-                                            const step = settingsMeta[activeSettingIdx].step;
-                                            const updated = Math.max(settingsMeta[activeSettingIdx].min, current - step);
-                                            editBuffer = updated.toString();
-                                            renderScreen();
-                                            return;
-                                        }
-
-                                        if (key.name === 'right') {
-                                            let current = parseInt(editBuffer, 10);
-                                            if (isNaN(current)) current = getValNum(activeSettingIdx);
-                                            const step = settingsMeta[activeSettingIdx].step;
-                                            const updated = Math.min(settingsMeta[activeSettingIdx].max, current + step);
-                                            editBuffer = updated.toString();
-                                            renderScreen();
-                                            return;
-                                        }
-                                        return;
-                                    }
-
-                                    // Mode 2: Normal Navigation Mode
-                                    if (key.name === 'up' || key.name === 'k') {
-                                        notice = '';
-                                        activeSettingIdx = (activeSettingIdx - 1 + settingsMeta.length) % settingsMeta.length;
-                                        renderScreen();
-                                        return;
-                                    }
-
-                                    if (key.name === 'down' || key.name === 'j') {
-                                        notice = '';
-                                        activeSettingIdx = (activeSettingIdx + 1) % settingsMeta.length;
-                                        renderScreen();
-                                        return;
-                                    }
-
-                                    // Quick Adjust with Left / Right
-                                    if (key.name === 'left' && activeSettingIdx < 4) {
-                                        notice = '';
-                                        const meta = settingsMeta[activeSettingIdx];
-                                        const cur = getValNum(activeSettingIdx);
-                                        const next = Math.max(meta.min, cur - meta.step);
-                                        setValNum(activeSettingIdx, next);
-                                        renderScreen();
-                                        return;
-                                    }
-
-                                    if (key.name === 'right' && activeSettingIdx < 4) {
-                                        notice = '';
-                                        const meta = settingsMeta[activeSettingIdx];
-                                        const cur = getValNum(activeSettingIdx);
-                                        const next = Math.min(meta.max, cur + meta.step);
-                                        setValNum(activeSettingIdx, next);
-                                        renderScreen();
-                                        return;
-                                    }
-
-                                    // Enter Selection
-                                    if (key.name === 'return' || key.name === 'enter') {
-                                        notice = '';
-                                        if (activeSettingIdx < 4) {
-                                            // Focus into editing mode
-                                            isFocusEditing = true;
-                                            editBuffer = getValNum(activeSettingIdx).toString();
-                                            renderScreen();
-                                            return;
-                                        }
-
-                                        if (activeSettingIdx === 4) {
-                                            // Reset to safe defaults
-                                            thresholdPct = 5;
-                                            reqCap = 20;
-                                            cooldown = 5000;
-                                            notice = 'Reset all settings to recommended safe defaults (5% quota, 20 reqs, 5000ms delay)';
-                                            renderScreen();
-                                            return;
-                                        }
-
-                                        if (activeSettingIdx === 5) {
-                                            // Save and return
-                                            const accSel = { ...(config.accountSelection || {}), stepThreshold: thresholdPct / 100, requestThreshold: reqCap };
-                                            saveConfig({ accountSelection: accSel, switchAccountDelayMs: cooldown, port: proxyPort });
-                                            cleanup();
-                                            resolve();
-                                            return;
-                                        }
-                                    }
-                                }
-
-                                function cleanup() {
-                                    process.stdin.removeListener('keypress', onKey);
-                                }
-
-                                process.stdin.on('keypress', onKey);
-                                renderScreen();
-                            });
-
-                            setStatus(`Saved Engine Settings: ${thresholdPct}% quota, ${reqCap} req cap.`, 2000);
-                        });
+                        await openEngineSettings();
                         return;
                     }
 

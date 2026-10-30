@@ -17,7 +17,8 @@ import {
   loginAccount,
   removeAccount,
   toggleAccount,
-  showModelMappings
+  showModelMappings,
+  showBackendModels
 } from '../src/cli/terminal-manager.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -490,25 +491,34 @@ ${c.bold + c.cyan}USAGE${c.reset}
 ${c.bold + c.bCyan}━━━ LIFECYCLE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}
   ${c.cyan}init, initialize${c.reset}    Configure atc for Claude Code & Windows startup
   ${c.cyan}reinit${c.reset}              Repair configuration & restart proxy daemon
-  ${c.cyan}remove${c.reset}              Remove Windows startup integration
-  ${c.cyan}start [--log]${c.reset}       Launch proxy daemon (background by default)
-  ${c.cyan}stop${c.reset}                Shut down proxy daemon
+  ${c.cyan}defuse${c.reset}              Remove Windows startup & Claude Code integration
+  ${c.cyan}start [--log]${c.reset}       Launch proxy daemon in background (or live log)
+  ${c.cyan}stop${c.reset}                Shut down active proxy daemon
   ${c.cyan}restart${c.reset}             Restart proxy daemon
+  ${c.cyan}daemon${c.reset}              Run deep health & latency diagnostic on daemon
+  ${c.cyan}uninstall${c.reset}           Completely remove atc from PC (clean/keep config)
 
-${c.bold + c.bCyan}━━━ DASHBOARD & MANAGEMENT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}
+${c.bold + c.bCyan}━━━ DASHBOARD & ACCOUNTS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}
   ${c.cyan}atc, dash${c.reset}           Open interactive TUI dashboard (default)
-  ${c.cyan}status${c.reset}              Show daemon health & active accounts overview
-  ${c.cyan}models${c.reset}              List available Claude/Gemini model mappings
+  ${c.cyan}accounts, status${c.reset}    List all accounts with ID, Plan, 5h-Cap & Weekly
+  ${c.cyan}add [--no-browser]${c.reset}  Link new Google account via OAuth browser or URL
+  ${c.cyan}remove <id>${c.reset}         Remove account from pool by index (1-9) or email
   ${c.cyan}switch <id>${c.reset}         Switch active account by index (1-9) or email
-  ${c.cyan}toggle <id>${c.reset}         Enable/disable account in round-robin pool
+  ${c.cyan}toggle <id>${c.reset}         Enable or disable account in rotation pool
+  ${c.cyan}check, probe${c.reset}        Probe all accounts and refresh live quota stats
+
+${c.bold + c.bCyan}━━━ MODELS & SETTINGS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}
+  ${c.cyan}models [--refresh]${c.reset}  List available Antigravity models (from top plan)
+  ${c.cyan}mapid, map${c.reset}          List Claude Code fake model ID mappings
+  ${c.cyan}flex${c.reset}                Auto-bind Claude 3.7 Sonnet & Opus to Google backend
+  ${c.cyan}settings, config${c.reset}    Directly open proxy engine & secret key settings
 
 ${c.bold + c.bCyan}━━━ OPTIONS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}
   ${c.yellow}-h, -H, --help${c.reset}      Show this help
   ${c.yellow}-v, --version${c.reset}       Show version
   ${c.yellow}--log${c.reset}               Run in foreground with live stream logs
-  ${c.yellow}--strategy=NAME${c.reset}     Load balancer strategy: pipelined (default 5%),
-                      hybrid (token-bucket), round-robin, sticky
-  ${c.yellow}--fallback${c.reset}          Enable model fallback on errors
+  ${c.yellow}--strategy=NAME${c.reset}     Load balancer strategy: pipelined (5%),
+                      hybrid, round-robin, sticky
 `);
 }
 
@@ -642,7 +652,7 @@ async function initCommand() {
 
 async function reinitCommand() {
   console.log('');
-  printBox([`  ♻️  ${c.bold + c.bCyan}Reinitializing atc Configuration${c.reset}`], 56);
+  printBox([`  ♻️   ${c.bold + c.bCyan}Reinitializing atc Configuration${c.reset}`], 67);
   console.log('');
 
   // Controlled cleanup of previous instance: ensure only 1 instance
@@ -671,9 +681,9 @@ async function reinitCommand() {
   }
 }
 
-async function removeCommand() {
+async function defuseCommand() {
   console.log('');
-  printBox([`  🗑️  ${c.bold + c.bMagenta}Remove atc from Windows Startup / System${c.reset}`], 56);
+  printBox([`  🛡️   ${c.bold + c.bMagenta}Defuse atc from Windows Startup / System${c.reset}`], 67);
   console.log('');
 
   let startupRemoved = false;
@@ -681,7 +691,6 @@ async function removeCommand() {
     startupRemoved = removeWindowsStartup();
   }
 
-  // Check if proxy daemon is currently running
   const running = isServiceRunning();
   let proxyStopped = false;
 
@@ -697,7 +706,6 @@ async function removeCommand() {
     }
   }
 
-  // Claude Code configuration cleanup
   const readline = await import('readline');
   const rlClaude = readline.createInterface({ input: process.stdin, output: process.stdout });
   const ansClaude = await new Promise(r => rlClaude.question(`\n${c.bold}Do you also want to remove atc proxy from Claude Code settings? [y/N]:${c.reset} `, r));
@@ -711,7 +719,6 @@ async function removeCommand() {
 
   setConfigInitialized(false);
 
-  // Transparent UX summary
   console.log('');
   if (startupRemoved) {
     console.log(`${c.green}✓${c.reset} Windows Startup integration removed.`);
@@ -732,7 +739,168 @@ async function removeCommand() {
   }
 
   console.log(`${c.green}•${c.reset} ${c.bold}Existing accounts and credentials preserved${c.reset} (~/.config/atc/).\n`);
-  console.log(`${c.bold}atc has been removed from startup.${c.reset}\n`);
+  console.log(`${c.bold}atc has been safely defused.${c.reset}\n`);
+}
+
+async function flexCommand() {
+  console.log('');
+  printBox([`  ✨ ${c.bold + c.bCyan}Claude Code Flagship Flex Mode${c.reset}`], 67);
+  console.log('');
+
+  // 1. Update ~/.config/atc/config.json with premier model mappings
+  let cfg = {};
+  if (existsSync(CONFIG_FILE)) {
+    try {
+      cfg = JSON.parse(readFileSync(CONFIG_FILE, 'utf-8'));
+    } catch {}
+  }
+  cfg.modelMapping = cfg.modelMapping || {};
+  cfg.modelMapping['claude-3-7-sonnet-20250219'] = 'gemini-3.8-flash-high';
+  cfg.modelMapping['claude-3-5-sonnet-20241022'] = 'gemini-3.8-flash-high';
+  cfg.modelMapping['claude-3-opus-20240229'] = 'gemini-3.8-flash-high';
+  cfg.modelMapping['claude-3-5-haiku-20241022'] = 'gemini-3.1-flash-lite';
+  cfg.modelMapping['claude-opus-5-5'] = 'gemini-3.8-flash-high';
+  cfg.modelMapping['claude-sonnet-5-5'] = 'gemini-3.8-flash-high';
+  cfg.modelMapping['claude-haiku-5-5'] = 'gemini-3.1-flash-lite';
+  writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf-8');
+
+  // 2. Update ~/.claude/settings.json environment variables
+  if (!existsSync(CLAUDE_DIR)) {
+    mkdirSync(CLAUDE_DIR, { recursive: true });
+  }
+  let claudeSettings = {};
+  if (existsSync(CLAUDE_SETTINGS)) {
+    try {
+      claudeSettings = JSON.parse(readFileSync(CLAUDE_SETTINGS, 'utf-8'));
+    } catch {}
+  }
+  claudeSettings.env = claudeSettings.env || {};
+  claudeSettings.env.ANTHROPIC_MODEL = 'claude-3-7-sonnet-20250219';
+  claudeSettings.env.ANTHROPIC_DEFAULT_SONNET = 'claude-3-7-sonnet-20250219';
+  claudeSettings.env.ANTHROPIC_DEFAULT_OPUS = 'claude-3-opus-20240229';
+  claudeSettings.env.ANTHROPIC_DEFAULT_HAIKU = 'claude-3-5-haiku-20241022';
+  claudeSettings.env.CLAUDE_CODE_SUBAGENT = 'claude-3-5-haiku-20241022';
+  writeFileSync(CLAUDE_SETTINGS, JSON.stringify(claudeSettings, null, 2), 'utf-8');
+
+  console.log(`${c.green}✓${c.reset} ${c.bold + c.bGreen}Flex configuration locked and loaded!${c.reset}\n`);
+  console.log(`  Claude Code bindings mapped to Anthropic flagship tiers:`);
+  console.log(`  ${c.cyan}•${c.reset} Main Model (ANTHROPIC_MODEL)    : ${c.bYellow}claude-3-7-sonnet-20250219${c.reset}`);
+  console.log(`  ${c.cyan}•${c.reset} Default Sonnet                  : ${c.bYellow}claude-3-7-sonnet-20250219${c.reset}`);
+  console.log(`  ${c.cyan}•${c.reset} Default Opus                    : ${c.bYellow}claude-3-opus-20240229${c.reset}`);
+  console.log(`  ${c.cyan}•${c.reset} Fast Subagent                   : ${c.bYellow}claude-3-5-haiku-20241022${c.reset}\n`);
+  console.log(`  ${c.gray}Behind the scenes:${c.reset} Requests invisibly routed to Google Gemini 3.8 infrastructure.`);
+  console.log(`  ${c.gray}Flex away:${c.reset} Your Claude Code CLI now displays pristine flagship badges with zero API bills!\n`);
+}
+
+async function daemonCheckCommand() {
+  console.log('');
+  printBox([`  🛰️   ${c.bold + c.bCyan}atc Proxy Daemon Diagnostic${c.reset}`], 67);
+  console.log('');
+
+  const port = getPort();
+  const pid = getServicePid();
+
+  const startPing = Date.now();
+  let health = null;
+  let limits = null;
+  let latency = null;
+
+  try {
+    const [hRes, lRes] = await Promise.all([
+      fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(3000) }),
+      fetch(`http://127.0.0.1:${port}/account-limits`, { signal: AbortSignal.timeout(3000) })
+    ]);
+    if (hRes.ok) health = await hRes.json();
+    if (lRes.ok) limits = await lRes.json();
+    latency = Date.now() - startPing;
+  } catch {}
+
+  if (health) {
+    console.log(`  ${c.bold}DAEMON HEALTH${c.reset}`);
+    console.log(`  ${c.green}● ACTIVE & RESPONSIVE${c.reset}\n`);
+    console.log(`  ${c.bold}METRICS${c.reset}`);
+    console.log(`  ${c.cyan}├─${c.reset} Process PID:  ${c.bYellow}${pid || 'managed'}${c.reset}`);
+    console.log(`  ${c.cyan}├─${c.reset} Listen Port:  ${c.bYellow}${port}${c.reset} (${c.underline}http://127.0.0.1:${port}${c.reset})`);
+    console.log(`  ${c.cyan}├─${c.reset} Ping Latency: ${c.bGreen}${latency}ms${c.reset}`);
+    if (health.activeEmail) {
+      console.log(`  ${c.cyan}├─${c.reset} Active Account: ${c.bold + c.bCyan}${health.activeEmail}${c.reset}`);
+    }
+    if (health.summary) {
+      console.log(`  ${c.cyan}├─${c.reset} Pool Summary: ${health.summary}`);
+    }
+    console.log(`  ${c.cyan}└─${c.reset} Strategy:     ${c.magenta}${health.strategy || 'pipelined'}${c.reset}\n`);
+    console.log(`  ${c.bold}VERDICT${c.reset}`);
+    console.log(`  ${c.green}✓ Daemon is completely healthy and serving Claude Code CLI traffic.${c.reset}\n`);
+  } else {
+    console.log(`  ${c.bold}DAEMON HEALTH${c.reset}`);
+    console.log(`  ${c.red}○ OFFLINE / UNRESPONSIVE${c.reset}\n`);
+    console.log(`  ${c.bold}DIAGNOSTIC${c.reset}`);
+    console.log(`  ${c.cyan}├─${c.reset} Process PID:  ${pid ? c.yellow + pid + ' (stale)' + c.reset : c.gray + 'none' + c.reset}`);
+    console.log(`  ${c.cyan}├─${c.reset} Listen Port:  ${port}`);
+    console.log(`  ${c.cyan}└─${c.reset} HTTP Ping:    ${c.red}Failed / Timed out${c.reset}\n`);
+    console.log(`  ${c.bold}REMEDY${c.reset}`);
+    console.log(`  Run "${c.cyan}atc start${c.reset}" or "${c.cyan}atc restart${c.reset}" to bring proxy online.\n`);
+  }
+}
+
+async function uninstallCommand() {
+  console.log('');
+  printBox([`  ⚠️   ${c.bold + c.bRed}Uninstall atc Completely from System${c.reset}`], 67);
+  console.log('');
+
+  const readline = await import('readline');
+  const rlConfirm = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const ansConfirm = await new Promise(r => rlConfirm.question(`${c.bold}Are you sure you want to uninstall atc from this system? [y/N]:${c.reset} `, r));
+  rlConfirm.close();
+
+  if (ansConfirm.trim().toLowerCase() !== 'y') {
+    console.log(`\n${c.gray}• Uninstallation cancelled.${c.reset}\n`);
+    return;
+  }
+
+  // 1. Stop daemon
+  if (isServiceRunning()) {
+    console.log(`${c.cyan}•${c.reset} Stopping active proxy daemon...`);
+    await stopServer({ silent: true });
+  }
+
+  // 2. Remove Windows startup
+  if (process.platform === 'win32') {
+    removeWindowsStartup();
+  }
+
+  // 3. Unconfigure Claude Code settings
+  unconfigureClaudeCode();
+
+  // 4. Ask about ~/.config/atc
+  const rlConfig = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const ansConfig = await new Promise(r => rlConfig.question(`\n${c.bold}Do you also want to remove all saved accounts and configs (~/.config/atc)? [y/N]:${c.reset} `, r));
+  rlConfig.close();
+
+  let configRemoved = false;
+  if (ansConfig.trim().toLowerCase() === 'y') {
+    try {
+      const { rmSync } = await import('fs');
+      if (existsSync(CONFIG_DIR)) {
+        rmSync(CONFIG_DIR, { recursive: true, force: true });
+        configRemoved = true;
+      }
+    } catch {}
+  }
+
+  setConfigInitialized(false);
+
+  console.log(`\n${c.green}✓${c.reset} Proxy daemon stopped.`);
+  console.log(`${c.green}✓${c.reset} Windows Startup integration removed.`);
+  console.log(`${c.green}✓${c.reset} Claude Code proxy configuration restored.`);
+  if (configRemoved) {
+    console.log(`${c.green}✓${c.reset} Saved accounts and configuration removed (~/.config/atc).`);
+  } else {
+    console.log(`${c.gray}• Saved accounts preserved at ~/.config/atc.${c.reset}`);
+  }
+
+  console.log(`\n${c.bold}To complete total uninstallation, remove the CLI package:${c.reset}`);
+  console.log(`  ${c.bCyan}npm uninstall -g atc${c.reset}\n`);
 }
 
 async function main() {
@@ -748,7 +916,7 @@ async function main() {
   }
 
   // Handle commands
-  switch (command) {
+    switch (command) {
     case 'start':
       await startServer();
       break;
@@ -798,15 +966,32 @@ async function main() {
       await reinitCommand();
       break;
 
+    case 'defuse':
+      await defuseCommand();
+      break;
+
+    case 'uninstall':
+      await uninstallCommand();
+      break;
+
+    case 'flex':
+      await flexCommand();
+      break;
+
+    case 'daemon':
+      await daemonCheckCommand();
+      break;
+
+    case 'settings':
+    case 'config':
+      await runInteractiveDashboard({ initialScreen: 'settings' });
+      break;
+
     case 'remove':
     case 'rm':
     case 'del':
     case 'delete':
-      if (args[1]) {
-        await removeAccount(args[1]);
-      } else {
-        await removeCommand();
-      }
+      await removeAccount(args[1]);
       break;
 
     case 'toggle':
@@ -814,11 +999,16 @@ async function main() {
       break;
 
     case 'models':
+      await showBackendModels({ refresh: args.includes('--refresh') });
+      break;
+
+    case 'mapid':
+    case 'map':
       showModelMappings();
       break;
 
     case 'ui':
-      console.log(`\n${c.cyan}ℹ️  WebUI panel has been deprecated.${c.reset}`);
+      console.log(`\n${c.cyan}ℹ️  WebUI panel has been removed.${c.reset}`);
       console.log(`   Use the interactive terminal dashboard instead: ${c.bold + c.bGreen}atc${c.reset} (or ${c.cyan}atc dash${c.reset})\n`);
       break;
 

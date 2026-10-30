@@ -1,6 +1,6 @@
 {
   "name": "atc",
-  "version": "2.9.1",
+  "version": "1.0.0",
   "description": "atc (Antigravity to Claude) - Multi-account terminal manager and API proxy",
   "main": "src/index.js",
   "type": "module",
@@ -9,15 +9,11 @@
   },
   "files": [
     "src",
-    "bin",
-    "public"
+    "bin"
   ],
   "scripts": {
-    "build:css": "tailwindcss -i ./public/css/src/input.css -o ./public/css/style.css --minify",
-    "watch:css": "tailwindcss -i ./public/css/src/input.css -o ./public/css/style.css --watch",
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "dev:full": "concurrently \"npm run watch:css\" \"npm run dev\"",
     "accounts": "node src/cli/accounts.js",
     "accounts:add": "node src/cli/accounts.js add",
     "accounts:list": "node src/cli/accounts.js list",
@@ -64,13 +60,5 @@
     "cors": "^2.8.5",
     "express": "^4.18.2",
     "undici": "^7.20.0"
-  },
-  "devDependencies": {
-    "@tailwindcss/forms": "^0.5.7",
-    "autoprefixer": "^10.4.16",
-    "concurrently": "^8.2.2",
-    "daisyui": "^4.12.14",
-    "postcss": "^8.4.32",
-    "tailwindcss": "^3.4.0"
   }
 }

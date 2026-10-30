@@ -14,6 +14,8 @@ import {
     extractCodeFromInput
 } from '../auth/oauth.js';
 import { loadAccounts, saveAccounts } from '../account-manager/storage.js';
+import { getTokenForAccount, getProjectForAccount } from '../account-manager/credentials.js';
+import { fetchAvailableModels } from '../cloudcode/model-api.js';
 
 const CONFIG_DIR = dirname(ACCOUNT_CONFIG_PATH);
 const PID_FILE = join(CONFIG_DIR, 'server.pid');
@@ -226,10 +228,17 @@ export async function showAccountStatus() {
         const tagStr = `[${stateTags.join(', ')}]`;
         const lastUsedStr = formatTimeAgo(acc.lastUsed);
 
-        console.log(`${c.bold}${c.cyan}${i + 1}.${c.reset} Account ${i + 1} (${c.bold}${acc.email}${c.reset}) ${tagStr} ${c.gray}last used ${lastUsedStr}${c.reset}`);
+        const planTier = (acc.subscription?.tier || 'free').toLowerCase();
+        let planColor = c.gray;
+        if (planTier === 'ultra') planColor = c.brightYellow;
+        else if (planTier === 'pro' || planTier === 'standard') planColor = c.brightCyan;
+        else if (planTier === 'plus') planColor = c.brightGreen;
+        const planStr = `${planColor}[${planTier}]${c.reset}`;
 
-        // Health and quota details
-        const models = live.models || {};
+        console.log(`${c.bold}${c.cyan}${i + 1}.${c.reset} Account ${i + 1} (${c.bold}${acc.email}${c.reset}) ${planStr} ${tagStr} ${c.gray}last used ${lastUsedStr}${c.reset}`);
+
+        // Health and quota details (fallback to stored quota if live stats unavailable)
+        const models = (live.models && Object.keys(live.models).length > 0) ? live.models : (acc.quota?.models || {});
         const modelKeys = Object.keys(models);
 
         let fiveHour = null;
@@ -638,4 +647,111 @@ export async function verifyAccount(account) {
     const port = getProxyPort();
     await notifyProxyReload(port);
     console.log(`\n${c.green}✓${c.reset} Verification marked complete. Refreshing account status...\n`);
+}
+
+/**
+ * Probe and display available Antigravity models from the highest tier Google account
+ */
+export async function showBackendModels({ refresh = false } = {}) {
+    const { accounts, settings, activeIndex } = await loadAccounts(ACCOUNT_CONFIG_PATH);
+    if (!accounts || accounts.length === 0) {
+        console.log(`\n${c.yellow}▲ No Google accounts configured in ATC pool.${c.reset}`);
+        console.log(`  To inspect and use Antigravity models, please add an account first:`);
+        console.log(`  ${c.brightCyan}atc add${c.reset}\n`);
+        return;
+    }
+
+    // Rank accounts by subscription tier: ultra > pro/standard > plus > free > unknown
+    const tierRanks = { ultra: 5, pro: 4, standard: 4, plus: 3, free: 2, unknown: 1 };
+    const candidates = [...accounts].sort((a, b) => {
+        const tierA = (a.subscription?.tier || 'free').toLowerCase();
+        const tierB = (b.subscription?.tier || 'free').toLowerCase();
+        const diff = (tierRanks[tierB] || 1) - (tierRanks[tierA] || 1);
+        if (diff !== 0) return diff;
+        if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
+        if (a.isInvalid !== b.isInvalid) return a.isInvalid ? 1 : -1;
+        return 0;
+    });
+
+    const bestAcc = candidates[0];
+    const bestTier = (bestAcc.subscription?.tier || 'unknown').toUpperCase();
+
+    console.log(`\n${c.bold + c.brightCyan}atc${c.reset} ${c.gray}(Antigravity to Claude)${c.reset} — ${c.bold}Backend Model Catalog${c.reset}`);
+    console.log(`${c.gray}Probing via:${c.reset} ${c.bold}${bestAcc.email}${c.reset} [${c.brightYellow}${bestTier}${c.reset}] (Highest plan account in pool)`);
+    console.log(`${c.gray}Status:${c.reset} ${refresh ? 'Fetching fresh model catalog from Google...' : 'Connecting to Antigravity API...'}`);
+
+    try {
+        const token = await getTokenForAccount(bestAcc, new Map());
+        const project = await getProjectForAccount(bestAcc, token, new Map());
+        const raw = await fetchAvailableModels(token, project);
+        const models = raw.models || {};
+        const entries = Object.entries(models);
+
+        if (entries.length === 0) {
+            console.log(`\n${c.yellow}No models returned from Antigravity backend API.${c.reset}\n`);
+            return;
+        }
+
+        // Cache quotas into account for instant dashboard display
+        bestAcc.quota = bestAcc.quota || {};
+        bestAcc.quota.models = bestAcc.quota.models || {};
+        for (const [mId, mData] of entries) {
+            if (mData.quotaInfo) {
+                bestAcc.quota.models[mId] = {
+                    remainingFraction: mData.quotaInfo.remainingFraction ?? (mData.quotaInfo.resetTime ? 0 : null),
+                    resetTime: mData.quotaInfo.resetTime ?? null
+                };
+            }
+        }
+        bestAcc.quota.lastChecked = Date.now();
+        await saveAccounts(ACCOUNT_CONFIG_PATH, accounts, settings, activeIndex);
+
+        console.log(`\n${c.bold}Model ID                         Display Name                      Capabilities          5h-Cap   Weekly${c.reset}`);
+        console.log(`${c.gray}${'─'.repeat(97)}${c.reset}`);
+
+        const now = Date.now();
+        for (const [mId, mData] of entries) {
+            const paddedId = mId.padEnd(32, ' ');
+            const dispName = (mData.displayName || mId).slice(0, 32).padEnd(33, ' ');
+
+            let caps = [];
+            if (mData.supportsThinking) caps.push('think');
+            if (mData.supportsImages || mData.supportsVideo) caps.push('vision');
+            if (mData.recommended) caps.push('rec');
+            const capStr = (caps.length > 0 ? `[${caps.join(',')}]` : '').padEnd(20, ' ');
+
+            let fiveStr = ' 100% ';
+            let weekStr = ' 100% ';
+
+            if (mData.quotaInfo) {
+                const frac = mData.quotaInfo.remainingFraction;
+                const rTime = mData.quotaInfo.resetTime;
+                const rMs = rTime ? Math.max(0, new Date(rTime).getTime() - now) : 0;
+                const isWeekly = rMs > 24 * 3600 * 1000 || mId.includes('argon') || mId.includes('weekly');
+
+                if (typeof frac === 'number') {
+                    const pct = Math.round(frac * 100);
+                    const pctPadded = `${pct}%`.padStart(5, ' ');
+                    if (isWeekly) {
+                        weekStr = pct === 0 ? `${c.red}0%${c.reset}    ` : `${pctPadded} `;
+                    } else {
+                        fiveStr = pct === 0 ? `${c.red}0%${c.reset}    ` : `${pctPadded} `;
+                    }
+                }
+            }
+
+            console.log(`  ${c.cyan}${paddedId}${c.reset}${dispName}${c.gray}${capStr}${c.reset}  ${c.brightGreen}${fiveStr}${c.reset}   ${c.brightGreen}${weekStr}${c.reset}`);
+        }
+
+        console.log(`${c.gray}${'─'.repeat(97)}${c.reset}`);
+        console.log(`Total: ${c.bold}${entries.length}${c.reset} models active and accessible.\n`);
+        console.log(`Manage models & shortcuts:`);
+        console.log(`  • ${c.cyan}atc mapid${c.reset}        Show Claude Code fake model mappings`);
+        console.log(`  • ${c.cyan}atc flex${c.reset}         Instantly map flagship Sonnet & Opus to Google infrastructure`);
+        console.log(`  • ${c.cyan}atc${c.reset}              Open interactive dashboard\n`);
+
+    } catch (err) {
+        console.log(`\n${c.red}Failed to retrieve models from Antigravity API:${c.reset} ${err.message}`);
+        console.log(`Try refreshing credentials with: ${c.cyan}atc check${c.reset} or ${c.cyan}atc add${c.reset}\n`);
+    }
 }

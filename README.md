@@ -9,9 +9,12 @@
 ## Key Features
 
 - **Dashboard-First TUI (`atc`)**: Interactive terminal dashboard with zero-flicker double buffering, arrow-key navigation, instant account switching (`1`-`9`), and in-place OAuth re-login (`R`).
-- **Multi-Account Pool Management**: Rotate requests across multiple Google accounts to bypass single-account rate limits. Automatically discovers subscription tiers (`[pro]`, `[free]`, `[ultra]`) and live model quotas.
+- **Multi-Account Pool Management**: Rotate requests across multiple Google accounts to bypass single-account rate limits. Automatically discovers subscription tiers (`[pro]`, `[free]`, `[ultra]`) and live 5h & weekly quota metrics.
+- **Pipelined Quota Rotation**: Automatically staggers usage across accounts by shifting traffic upon each configured quota drop threshold (default 5%), allowing 5-hour quota pools to recover in parallel.
+- **Antigravity Model Catalog (`atc models`)**: Introspects available Gemini and Claude backend models from the highest-tier account in your pool.
+- **Flagship Flex Mode (`atc flex`)**: Instantly binds Claude Code CLI to Anthropic flagship tiers (`claude-3-7-sonnet-20250219`, `claude-3-opus-20240229`) silently backed by Google Gemini 3.8 infrastructure.
+- **Deep Daemon Diagnostics (`atc daemon`)**: Live health checks, PID verification, and HTTP ping latency measurements.
 - **Zero-Downtime Hot Reload**: Add, re-authenticate, toggle, or switch accounts without restarting the background daemon. Changes reload instantly in-memory.
-- **Custom Model Mappings**: Out-of-the-box support for Claude tiers (`claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`) and Claude 3.x aliases mapped to high-efficiency Gemini backends (`gemini-3.8-flash-high`, `gemini-3.8-flash-medium`).
 - **Complete Messages API Emulation**: Full streaming SSE response converter, tool use / function calling, and thinking block handling.
 
 ---
@@ -42,55 +45,63 @@ From the project root:
 # Install dependencies
 pnpm install --allow-build=better-sqlite3
 
-# Link CLI commands globally (atc & acc)
+# Link CLI command globally
 npm link --force
 ```
 
-### 2. Launch the Proxy Daemon
+### 2. Automatic Initialization
+
+Run `atc init` to configure Claude Code settings and Windows boot startup automatically:
 
 ```bash
-atc start
+atc init
 ```
-
-The daemon starts in the background on port `43128` and persists across terminal sessions.
 
 ### 3. Open the Dashboard
 
-Simply run `atc` without arguments:
+Simply run `atc` without arguments to launch the isolated TUI:
 
 ```bash
 atc
 ```
 
-```text
-+ Accounts Dashboard (atc v2.9.1)
+---
 
-Quick Actions
-o Add New Account
-o Run Health Check
-o Pick Best Account
-o API credentials and models
+## CLI Command Reference
 
-Advanced Checks
-o Refresh All Accounts
-o Check Problem Accounts
+### Lifecycle & Management
 
-Saved Accounts
-o 1. satofam2321@gmail.com [pro] [ok]
-> 2. satoharuki2202@gmail.com [pro] [current] [ok]
-  Last used: 2m ago | High: [##########] 95% | Med: [##########] 95% | active [aicode-consumers]
-o 3. neyu6639@gmail.com [pro] [ok]
-o 4. satoharuki2575@gmail.com [pro] [ok]
-o 5. ysnyuki2321@gmail.com [pro] [ok]
-o 6. satoharuki5654@gmail.com [pro] [invalid]
+| Command | Description |
+| :--- | :--- |
+| `atc` | Open the interactive TUI dashboard (default) |
+| `atc init` | One-touch setup: configure Claude Code and Windows startup |
+| `atc reinit` | Repair configuration and restart proxy daemon instance |
+| `atc defuse` | Safely remove Windows startup and Claude Code proxy bindings |
+| `atc uninstall` | Completely uninstall atc from PC (with option to keep or purge configs) |
+| `atc start [--log]` | Launch proxy daemon (background by default, or foreground live logs) |
+| `atc stop` | Shut down active proxy daemon |
+| `atc restart` | Restart proxy daemon |
+| `atc daemon` | Run deep health, latency, and account pool diagnostic on daemon |
 
-Danger Zone
-o Toggle Selected Account
-o Delete Selected Account
+### Accounts & Quotas
 
-↑↓ Move | Enter Select | R Re-login | 1-9 Switch | Q Back
-+
-```
+| Command | Description |
+| :--- | :--- |
+| `atc accounts` | List all saved accounts with index numbers, tiers, 5h-Cap, and weekly quotas |
+| `atc add [--no-browser]` | Link a new Google account via OAuth browser flow or manual URL |
+| `atc remove <id \| email>` | Remove an account from the pool by index (1-9) or email |
+| `atc switch <id \| email>` | Switch active routing account from the command line |
+| `atc toggle <id \| email>` | Enable or disable an account in the rotation pool |
+| `atc check` | Probe all accounts and refresh live quota metrics |
+
+### Models & Settings
+
+| Command | Description |
+| :--- | :--- |
+| `atc models [--refresh]` | Probe and list available Antigravity backend models from top-tier account |
+| `atc mapid` | Display current Claude alias → backend model mappings |
+| `atc flex` | Auto-bind Claude 3.7 Sonnet & Opus to Google backend models |
+| `atc settings` / `atc config` | Directly open proxy engine settings and custom secret API key |
 
 ---
 
@@ -99,48 +110,35 @@ o Delete Selected Account
 | Key | Action |
 | :--- | :--- |
 | `↑` / `↓` (or `k` / `j`) | Navigate between actions and accounts |
-| `Enter` | Select action or switch active account |
+| `Enter` | Select action, switch active account, or edit parameter |
 | `1` – `9` | Instant one-touch switch to account number |
-| `R` / `r` | In-place OAuth re-login for the highlighted account (repairs `[invalid]` credentials) |
+| `V` / `v` | Open Google Security Verification URL if account flagged |
+| `R` / `r` | In-place OAuth re-login for the highlighted account |
+| `T` / `t` | Toggle account enabled / disabled in rotation pool |
+| `D` / `d` | Delete account from pool with confirmation |
 | `Q` / `Esc` / `Ctrl+C` | Exit dashboard back to terminal |
-
----
-
-## CLI Command Reference
-
-| Command | Description |
-| :--- | :--- |
-| `atc` | Open the interactive TUI dashboard (default) |
-| `atc dash` | Explicit shortcut to interactive dashboard |
-| `atc switch <id \| email>` | Quick-switch active account from CLI |
-| `atc status` | Print non-interactive status overview (script-friendly) |
-| `atc models` | Display active Claude alias → Gemini backend mappings |
-| `atc start` | Launch proxy background service |
-| `atc start --log` | Run proxy in foreground with live console logs |
-| `atc restart` | Restart proxy background service |
-| `atc stop` | Stop proxy daemon |
 
 ---
 
 ## Claude Code CLI Configuration
 
-Edit `%USERPROFILE%\.claude\settings.json` (Windows) or `~/.claude/settings.json` (macOS / Linux):
+When running `atc init` or `atc flex`, Claude Code is automatically configured in `%USERPROFILE%\.claude\settings.json` (Windows) or `~/.claude/settings.json` (macOS / Linux):
 
 ```json
 {
   "env": {
-    "ANTHROPIC_AUTH_TOKEN": "test",
-    "ANTHROPIC_BASE_URL": "http://127.0.0.1:43128",
-    "ANTHROPIC_MODEL": "claude-sonnet-5-5",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-5-5",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-5-5",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-5-5",
-    "CLAUDE_CODE_SUBAGENT_MODEL": "claude-haiku-5-5"
+    "ANTHROPIC_BASE_URL": "http://localhost:43128",
+    "ANTHROPIC_API_KEY": "atc-local-key",
+    "ANTHROPIC_MODEL": "claude-3-7-sonnet-20250219",
+    "ANTHROPIC_DEFAULT_SONNET": "claude-3-7-sonnet-20250219",
+    "ANTHROPIC_DEFAULT_OPUS": "claude-3-opus-20240229",
+    "ANTHROPIC_DEFAULT_HAIKU": "claude-3-5-haiku-20241022",
+    "CLAUDE_CODE_SUBAGENT": "claude-3-5-haiku-20241022"
   }
 }
 ```
 
-Once configured, run Claude Code normally:
+Once configured, simply run Claude Code normally:
 
 ```bash
 claude
@@ -148,14 +146,6 @@ claude
 
 ---
 
-## Storage & Configuration Files
-
-- Accounts Pool: `~/.config/antigravity-proxy/accounts.json`
-- Proxy Configuration: `~/.config/antigravity-proxy/config.json`
-- Daemon PID: `~/.config/antigravity-proxy/server.pid`
-
----
-
 ## License
 
-MIT
+MIT License. See [LICENSE](LICENSE) for details.
