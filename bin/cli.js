@@ -251,12 +251,12 @@ async function startServer() {
     if (isHealthy) {
       if (!logMode) {
         console.log('');
-        printBox([`  🛸 ${c.bold + c.bCyan}atc proxy is already in orbit${c.reset}`], 56);
+        printBox([`  🛸 ${c.bold + c.bCyan}atc proxy is already in orbit${c.reset}`], 67);
         console.log('');
         const pid = getServicePid();
         if (pid) console.log(`   ${c.cyan}├─${c.reset} PID:       ${c.bYellow}${pid}${c.reset}`);
-        console.log(`   ${c.cyan}├─${c.reset} Local:     ${c.underline}http://localhost:${port}${c.reset}`);
-        console.log(`   ${c.cyan}└─${c.reset} Dashboard: ${c.underline}http://localhost:${port}/${c.reset}\n`);
+        console.log(`   ${c.cyan}├─${c.reset} Endpoint:  ${c.underline}http://localhost:${port}${c.reset}`);
+        console.log(`   ${c.cyan}└─${c.reset} TUI:       Run "atc" or "atc dash"\n`);
       }
       return { success: true, pid: getServicePid(), port, alreadyRunning: true };
     } else {
@@ -276,12 +276,12 @@ async function startServer() {
     const healthy = await checkProxyHealth(port, 2000);
     if (healthy) {
       console.log('');
-      printBox([`  🛸 ${c.bold + c.bCyan}atc proxy is already in orbit${c.reset}`], 56);
+      printBox([`  🛸 ${c.bold + c.bCyan}atc proxy is already in orbit${c.reset}`], 67);
       console.log('');
       const pid = getServicePid();
       console.log(`   ${c.cyan}├─${c.reset} PID:       ${c.bYellow}${pid}${c.reset}`);
-      console.log(`   ${c.cyan}├─${c.reset} Local:     ${c.underline}http://localhost:${port}${c.reset}`);
-      console.log(`   ${c.cyan}└─${c.reset} Dashboard: ${c.underline}http://localhost:${port}/${c.reset}\n`);
+      console.log(`   ${c.cyan}├─${c.reset} Endpoint:  ${c.underline}http://localhost:${port}${c.reset}`);
+      console.log(`   ${c.cyan}└─${c.reset} TUI:       Run "atc" or "atc dash"\n`);
       return { success: true, pid, port, alreadyRunning: true };
     } else {
       console.log(`\n${c.yellow}▲${c.reset} Stale atc proxy process detected, recycling...`);
