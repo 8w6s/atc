@@ -622,7 +622,7 @@ export async function runInteractiveDashboard() {
                                 { id: 'val', label: 'Custom GCP Project ID', getVal: () => customProj || 'Default (auto)', desc: 'Route Gemini API requests with your own Google Cloud project' },
                                 { id: 'edit', label: 'Set Custom Project ID', getVal: () => '', desc: 'Enter custom project ID string (e.g. my-project-513208)' },
                                 { id: 'reset', label: 'Reset to Default (auto)', getVal: () => '', desc: 'Revert to automatic default project routing' },
-                                { id: 'save', label: 'Save & Return to Dashboard', getVal: () => '', desc: 'Write changes to ~/.config/antigravity-proxy/config.json' }
+                                { id: 'save', label: 'Save & Return to Dashboard', getVal: () => '', desc: 'Write changes to ~/.config/atc/config.json' }
                             ];
 
                             function renderScreen() {
@@ -1159,7 +1159,7 @@ export async function runInteractiveDashboard() {
                                     id: 'save',
                                     label: 'Save & Return to Dashboard',
                                     unit: '',
-                                    desc: 'Save all parameters to ~/.config/antigravity-proxy/config.json'
+                                    desc: 'Save all parameters to ~/.config/atc/config.json'
                                 }
                             ];
 

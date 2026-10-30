@@ -66,9 +66,9 @@ async function ensureServerStopped() {
     const isRunning = await isServerRunning();
     if (isRunning) {
         console.error(`
-\x1b[31mError: Antigravity Proxy server is currently running on port ${SERVER_PORT}.\x1b[0m
+\x1b[31mError: atc proxy server is currently running on port ${SERVER_PORT}.\x1b[0m
 
-Please stop the server (Ctrl+C) before adding or managing accounts.
+Please stop the server before adding or managing accounts.
 This ensures that your account changes are loaded correctly when you restart the server.
 `);
         process.exit(1);
@@ -460,7 +460,7 @@ async function main() {
     const noBrowser = args.includes('--no-browser');
 
     console.log('╔════════════════════════════════════════╗');
-    console.log('║   Antigravity Proxy Account Manager    ║');
+    console.log('║        atc Account Manager             ║');
     console.log('║   Use --no-browser for headless mode   ║');
     console.log('╚════════════════════════════════════════╝');
 

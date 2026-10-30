@@ -92,7 +92,7 @@ const DEFAULT_CONFIG = {
 
 // Config locations
 const HOME_DIR = os.homedir();
-const CONFIG_DIR = path.join(HOME_DIR, '.config', 'antigravity-proxy');
+const CONFIG_DIR = path.join(HOME_DIR, '.config', 'atc');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 
 // Ensure config dir exists

@@ -2,7 +2,7 @@
 
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, openSync } from 'fs';
 import { spawn, exec } from 'child_process';
 import { logger } from '../src/utils/logger.js';
 if (!process.argv.includes('--log')) {
@@ -28,8 +28,79 @@ const packageJson = JSON.parse(
   readFileSync(join(__dirname, '..', 'package.json'), 'utf-8')
 );
 
+// ANSI Colors & Styles
+const c = {
+  reset: '\x1b[0m',
+  bold: '\x1b[1m',
+  dim: '\x1b[2m',
+  italic: '\x1b[3m',
+  underline: '\x1b[4m',
+  cyan: '\x1b[36m',
+  bCyan: '\x1b[96m',
+  magenta: '\x1b[35m',
+  bMagenta: '\x1b[95m',
+  green: '\x1b[32m',
+  bGreen: '\x1b[92m',
+  yellow: '\x1b[33m',
+  bYellow: '\x1b[93m',
+  red: '\x1b[31m',
+  bRed: '\x1b[91m',
+  gray: '\x1b[90m',
+  white: '\x1b[97m'
+};
+
+/**
+ * Calculate display width of string in terminal, handling emojis (width=2)
+ * and stripping ANSI codes (width=0).
+ */
+function getDisplayWidth(str) {
+  const stripped = str.replace(/\x1b\[[0-9;]*m/g, '');
+  let width = 0;
+  for (const ch of stripped) {
+    const cp = ch.codePointAt(0);
+    if (!cp) continue;
+    if ((cp >= 0xFE00 && cp <= 0xFE0F) || cp === 0x200D) {
+      continue;
+    }
+    if (
+      (cp >= 0x1F300 && cp <= 0x1F9FF) || // Emojis & Pictographs
+      (cp >= 0x2600 && cp <= 0x27BF) ||   // Misc symbols & Dingbats
+      (cp >= 0x2300 && cp <= 0x23FF) ||   // Misc Technical
+      (cp >= 0x2B50 && cp <= 0x2B55) ||   // Stars
+      (cp >= 0x1100 && cp <= 0x115F) ||   // Hangul Jamo
+      (cp >= 0x2E80 && cp <= 0xA4CF && cp !== 0x303F) || // CJK
+      (cp >= 0xAC00 && cp <= 0xD7A3) ||   // Hangul Syllables
+      (cp >= 0xF900 && cp <= 0xFAFF) ||   // CJK Compatibility
+      (cp >= 0xFF01 && cp <= 0xFF60) ||   // Fullwidth Forms
+      (cp >= 0xFFE0 && cp <= 0xFFE6)
+    ) {
+      width += 2;
+    } else {
+      width += 1;
+    }
+  }
+  return width;
+}
+
+/**
+ * Render a perfectly aligned cyberpunk/neon rounded box
+ */
+function printBox(contentLines, width = 58) {
+  const innerWidth = width - 2;
+  const top = `${c.cyan}╭${'─'.repeat(innerWidth)}╮${c.reset}`;
+  const bottom = `${c.cyan}╰${'─'.repeat(innerWidth)}╯${c.reset}`;
+
+  console.log(top);
+  for (const rawLine of contentLines) {
+    const dispWidth = getDisplayWidth(rawLine);
+    const pad = Math.max(0, innerWidth - dispWidth);
+    console.log(`${c.cyan}│${c.reset}${rawLine}${' '.repeat(pad)}${c.cyan}│${c.reset}`);
+  }
+  console.log(bottom);
+}
+
 // PID file location for background process management
-const CONFIG_DIR = join(process.env.HOME || process.env.USERPROFILE || '', '.config', 'antigravity-proxy');
+const CONFIG_DIR = join(process.env.HOME || process.env.USERPROFILE || '', '.config', 'atc');
 const PID_FILE = join(CONFIG_DIR, 'server.pid');
 
 const args = process.argv.slice(2);
@@ -69,6 +140,19 @@ function isServiceRunning() {
 }
 
 /**
+ * Check if a specific PID is still running
+ */
+function isPidRunning(pid) {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Get the PID of the running service
  */
 function getServicePid() {
@@ -87,10 +171,8 @@ function getServicePid() {
  * Save PID to file
  */
 function savePid(pid) {
-  if (!existsSync(CONFIG_DIR)) {
-    mkdirSync(CONFIG_DIR, { recursive: true });
-  }
-  writeFileSync(PID_FILE, pid.toString());
+  ensureConfigDir();
+  writeFileSync(PID_FILE, pid.toString(), 'utf-8');
 }
 
 /**
@@ -114,19 +196,43 @@ function getPort() {
 }
 
 /**
- * Wait for service to be ready
+ * Check if TCP port is in use
  */
-async function waitForService(timeout = 10000, initialDelay = 1000) {
-  await new Promise(resolve => setTimeout(resolve, initialDelay));
+async function isPortInUse(port = getPort()) {
+  return new Promise((resolve) => {
+    import('net').then(({ createConnection }) => {
+      const socket = createConnection({ port: Number(port), host: '127.0.0.1' }, () => {
+        socket.destroy();
+        resolve(true);
+      });
+      socket.on('error', () => {
+        resolve(false);
+      });
+      socket.setTimeout(500, () => {
+        socket.destroy();
+        resolve(false);
+      });
+    }).catch(() => resolve(false));
+  });
+}
 
+/**
+ * P0: Ping real HTTP /health endpoint to verify health status
+ */
+async function checkProxyHealth(port = getPort(), timeoutMs = 10000) {
   const startTime = Date.now();
-  while (Date.now() - startTime < timeout) {
-    if (isServiceRunning()) {
-      // Additional wait to ensure service is fully ready
-      await new Promise(resolve => setTimeout(resolve, 500));
-      return true;
+  const healthUrl = `http://127.0.0.1:${port}/health`;
+
+  while (Date.now() - startTime < timeoutMs) {
+    try {
+      const res = await fetch(healthUrl, { signal: AbortSignal.timeout(1500) });
+      if (res.ok) {
+        return true;
+      }
+    } catch {
+      // Wait and retry
     }
-    await new Promise(resolve => setTimeout(resolve, 100));
+    await new Promise(r => setTimeout(r, 400));
   }
   return false;
 }
@@ -135,164 +241,207 @@ async function waitForService(timeout = 10000, initialDelay = 1000) {
  * Start the server as a background process (or foreground with --log)
  */
 async function startServer() {
-  // Check for --log flag
   const logMode = args.includes('--log');
+  const port = getPort();
+
+  // Process-level Singleton: Check if port is already active
+  const inUse = await isPortInUse(port);
+  if (inUse) {
+    const isHealthy = await checkProxyHealth(port, 2000);
+    if (isHealthy) {
+      if (!logMode) {
+        console.log('');
+        printBox([`  🛸 ${c.bold + c.bCyan}atc proxy is already in orbit${c.reset}`], 56);
+        console.log('');
+        const pid = getServicePid();
+        if (pid) console.log(`   ${c.cyan}├─${c.reset} PID:       ${c.bYellow}${pid}${c.reset}`);
+        console.log(`   ${c.cyan}├─${c.reset} Local:     ${c.underline}http://localhost:${port}${c.reset}`);
+        console.log(`   ${c.cyan}└─${c.reset} Dashboard: ${c.underline}http://localhost:${port}/${c.reset}\n`);
+      }
+      return { success: true, pid: getServicePid(), port, alreadyRunning: true };
+    } else {
+      console.log(`\n${c.yellow}▲ Port ${port} is occupied but health check failed.${c.reset}`);
+      console.log(`  Cleaning up any stale atc process...`);
+      await stopServer({ silent: true });
+      const stillInUse = await isPortInUse(port);
+      if (stillInUse) {
+        console.error(`\n${c.red}▲ Port ${port} is occupied by another application.${c.reset}`);
+        console.log(`  Please free port ${port} before starting atc.\n`);
+        return { success: false, port };
+      }
+    }
+  }
 
   if (isServiceRunning() && !logMode) {
-    console.log('');
-    console.log('╭' + '─'.repeat(48) + '╮');
-    console.log('│  🛸 Antigravity Proxy is already in orbit      │');
-    console.log('╰' + '─'.repeat(48) + '╯');
-    console.log('');
-
-    const pid = getServicePid();
-    const port = getPort();
-    console.log(`   ┌─ PID: ${pid}`);
-    console.log(`   ├─ Local: http://localhost:${port}`);
-    console.log(`   └─ Dashboard: http://localhost:${port}`);
-    console.log('');
-    return;
+    const healthy = await checkProxyHealth(port, 2000);
+    if (healthy) {
+      console.log('');
+      printBox([`  🛸 ${c.bold + c.bCyan}atc proxy is already in orbit${c.reset}`], 56);
+      console.log('');
+      const pid = getServicePid();
+      console.log(`   ${c.cyan}├─${c.reset} PID:       ${c.bYellow}${pid}${c.reset}`);
+      console.log(`   ${c.cyan}├─${c.reset} Local:     ${c.underline}http://localhost:${port}${c.reset}`);
+      console.log(`   ${c.cyan}└─${c.reset} Dashboard: ${c.underline}http://localhost:${port}/${c.reset}\n`);
+      return { success: true, pid, port, alreadyRunning: true };
+    } else {
+      console.log(`\n${c.yellow}▲${c.reset} Stale atc proxy process detected, recycling...`);
+      await stopServer({ silent: true });
+    }
   }
 
   console.log('');
   if (logMode) {
-    console.log('🌌 Launching Antigravity Proxy (foreground mode)...');
-    console.log('   Press Ctrl+C to stop');
-    console.log('');
+    console.log(`${c.bCyan}🌌 Launching atc proxy (foreground mode)...${c.reset}`);
+    console.log(`   ${c.gray}Press Ctrl+C to stop${c.reset}\n`);
   } else {
-    console.log('🌌 Launching Antigravity Proxy...');
+    console.log(`${c.bCyan}🌌 Launching atc proxy...${c.reset}`);
   }
 
   const serverScript = join(__dirname, '..', 'src', 'index.js');
-  const port = getPort();
-
-  // Filter out --log from args passed to server
   const serverArgs = args.slice(1).filter(arg => arg !== '--log');
 
   if (logMode) {
-    // Foreground mode - show logs directly
-    const serverProcess = spawn('node', [serverScript, ...serverArgs], {
-      stdio: 'inherit', // Show output in current terminal
+    const serverProcess = spawn(process.execPath, [serverScript, ...serverArgs], {
+      stdio: 'inherit',
       env: { ...process.env, PORT: port.toString() }
     });
 
     serverProcess.on('error', (error) => {
-      console.error('');
-      console.error('⚠️  Launch failed:', error.message);
-      console.error('');
+      console.error(`\n${c.red}▲ Launch failed:${c.reset} ${error.message}\n`);
       process.exit(1);
     });
 
     serverProcess.on('exit', (code) => {
-      console.log('');
-      console.log('🌙 Proxy has exited');
-      console.log('');
+      console.log(`\n${c.gray}🌙 atc proxy has exited${c.reset}\n`);
       process.exit(code || 0);
     });
 
-    // Keep process running
-    return;
+    return { success: true, pid: serverProcess.pid, port };
   }
 
-  // Background mode - detached process
-  const isWin = process.platform === 'win32';
-  const serverProcess = spawn('node', [serverScript, ...serverArgs], {
+  // Background detached mode with log redirection
+  ensureConfigDir();
+  const logFile = join(CONFIG_DIR, 'daemon.log');
+  const logFd = openSync(logFile, 'a');
+
+  const serverProcess = spawn(process.execPath, [serverScript, ...serverArgs], {
     detached: true,
-    stdio: 'ignore',
+    stdio: ['ignore', logFd, logFd],
     windowsHide: true,
-    shell: isWin,
+    shell: false,
     env: { ...process.env, PORT: port.toString() }
   });
 
   serverProcess.on('error', (error) => {
-    console.error('');
-    console.error('⚠️  Launch failed:', error.message);
-    console.error('');
+    console.error(`\n${c.red}▲ Launch failed:${c.reset} ${error.message}\n`);
     process.exit(1);
   });
 
-  // Save PID and detach
   savePid(serverProcess.pid);
   serverProcess.unref();
 
-  // Wait for service to be ready
-  if (await waitForService()) {
-    console.log('╭' + '─'.repeat(48) + '╮');
-    console.log('│ ⚡ Proxy is now in orbit!                      │');
-    console.log('╰' + '─'.repeat(48) + '╯');
-
+  // Wait for real HTTP health endpoint confirmation
+  const isHealthy = await checkProxyHealth(port, 12000);
+  if (isHealthy) {
     console.log('');
-    console.log('   ┌─ Process ID:', serverProcess.pid);
-    console.log('   ├─ Local:', `http://localhost:${port}`);
-    console.log('   └─ Dashboard:', `http://localhost:${port}/`);
+    printBox([`  ⚡ ${c.bold + c.bGreen}atc proxy is now in orbit!${c.reset}`], 56);
     console.log('');
-    console.log('   Next steps:');
-    console.log('   • acc ui       → Open dashboard');
-    console.log('   • acc status   → View proxy health');
-    console.log('   • acc stop     → Shut down proxy');
-    console.log('');
+    console.log(`   ${c.cyan}├─${c.reset} Process ID: ${c.bYellow}${serverProcess.pid}${c.reset}`);
+    console.log(`   ${c.cyan}├─${c.reset} Local:      ${c.underline}http://localhost:${port}${c.reset}`);
+    console.log(`   ${c.cyan}└─${c.reset} Dashboard:  ${c.underline}http://localhost:${port}/${c.reset}\n`);
+    console.log(`   ${c.bold}Quick Commands:${c.reset}`);
+    console.log(`   • ${c.cyan}atc${c.reset}           → Open interactive TUI`);
+    console.log(`   • ${c.cyan}atc ui${c.reset}        → Open dashboard in browser`);
+    console.log(`   • ${c.cyan}atc status${c.reset}    → View proxy health`);
+    console.log(`   • ${c.cyan}atc stop${c.reset}      → Shut down proxy\n`);
+    return { success: true, pid: serverProcess.pid, port };
   } else {
-    console.error('');
-    console.error('⚠️  Proxy launched but health check timed out');
-    console.log(`   Try: curl http://localhost:${port}/health`);
-    console.error('');
+    console.error(`\n${c.yellow}▲ Proxy launched but health check timed out${c.reset}`);
+    console.log(`   Verify manually: ${c.cyan}curl http://localhost:${port}/health${c.reset}`);
+    console.log(`   Or run with logs: ${c.cyan}atc start --log${c.reset}\n`);
+    return { success: false, pid: serverProcess.pid, port };
   }
 }
 
 /**
- * Stop the running server
+ * Stop the running server gracefully
  */
-function stopServer() {
-  if (!isServiceRunning()) {
-    console.log('');
-    console.log('🌑 Proxy is not running');
-    console.log('');
-    cleanupPidFile();
-    return;
+async function stopServer({ silent = false } = {}) {
+  const pid = getServicePid();
+  let stopped = false;
+
+  if (pid && isPidRunning(pid)) {
+    try {
+      process.kill(pid, 'SIGTERM');
+      for (let i = 0; i < 15; i++) {
+        await new Promise(r => setTimeout(r, 200));
+        if (!isPidRunning(pid)) {
+          stopped = true;
+          break;
+        }
+      }
+      if (isPidRunning(pid)) {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {}
+      }
+    } catch {}
   }
 
-  const pid = getServicePid();
-  try {
-    process.kill(pid, 'SIGTERM');
-    cleanupPidFile();
-    console.log('');
-    console.log('🌙 Proxy has been taken offline');
-    console.log('');
-  } catch (e) {
-    console.error('');
-    console.error('⚠️  Shutdown failed:', e.message);
-    console.error('');
-    cleanupPidFile();
+  cleanupPidFile();
+
+  // Wait for port release
+  const port = getPort();
+  for (let i = 0; i < 10; i++) {
+    const inUse = await isPortInUse(port);
+    if (!inUse) break;
+    await new Promise(r => setTimeout(r, 200));
   }
+
+  if (!silent) {
+    if (stopped || pid) {
+      console.log(`\n${c.green}✓${c.reset} atc proxy daemon has been taken offline.\n`);
+    } else {
+      console.log(`\n${c.gray}• atc proxy is not running.${c.reset}\n`);
+    }
+  }
+  return true;
 }
 
 /**
  * Restart the server
  */
 async function restartServer() {
-  console.log('');
-  console.log('♻️  Restarting proxy...');
-  console.log('');
+  console.log(`\n${c.bCyan}♻️  Restarting atc proxy...${c.reset}`);
+  await stopServer({ silent: true });
+  await startServer();
+}
 
-  // Stop if running
-  if (isServiceRunning()) {
-    const pid = getServicePid();
+const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
+
+function isConfigInitialized() {
+  if (!existsSync(CONFIG_FILE)) return false;
+  try {
+    const raw = readFileSync(CONFIG_FILE, 'utf-8');
+    const cfg = JSON.parse(raw);
+    return !!cfg.initialized;
+  } catch {
+    return false;
+  }
+}
+
+function setConfigInitialized(val = true) {
+  ensureConfigDir();
+  let cfg = {};
+  if (existsSync(CONFIG_FILE)) {
     try {
-      process.kill(pid, 'SIGTERM');
-      cleanupPidFile();
-      console.log('   └─ Existing instance stopped');
-      console.log('');
-      // Wait for process to fully terminate
-      await new Promise(resolve => setTimeout(resolve, 1000));
-    } catch (e) {
-      console.log('   └─ No previous instance found');
-      console.log('');
-      cleanupPidFile();
+      cfg = JSON.parse(readFileSync(CONFIG_FILE, 'utf-8'));
+    } catch {
+      cfg = {};
     }
   }
-
-  // Start fresh
-  await startServer();
+  cfg.initialized = val;
+  writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf-8');
 }
 
 /**
@@ -300,33 +449,28 @@ async function restartServer() {
  */
 function showStatus() {
   console.log('');
-  console.log('╭' + '─'.repeat(48) + '╮');
-  console.log('│  🛸 atc (Antigravity to Claude)                   │');
-  console.log('╰' + '─'.repeat(48) + '╯');
+  printBox([`  🛸 ${c.bold + c.bCyan}atc (Antigravity to Claude)${c.reset}`], 56);
   console.log('');
 
   if (isServiceRunning()) {
     const pid = getServicePid();
     const port = getPort();
-    console.log('  STATUS');
-    console.log('  ⚡ Proxy is active');
-    console.log('');
-    console.log('  DETAILS');
-    console.log(`  ├─ PID: ${pid}`);
-    console.log(`  ├─ Port: ${port}`);
-    console.log(`  ├─ API: http://localhost:${port}`);
-    console.log(`  └─ Dashboard: http://localhost:${port}/`);
-    console.log('');
-    console.log('  AVAILABLE COMMANDS');
-    console.log('  • acc ui         Open dashboard');
-    console.log('  • acc restart    Relaunch proxy');
-    console.log('  • acc stop       Take offline');
+    console.log(`  ${c.bold}STATUS${c.reset}`);
+    console.log(`  ${c.green}⚡ Proxy is active${c.reset}\n`);
+    console.log(`  ${c.bold}DETAILS${c.reset}`);
+    console.log(`  ${c.cyan}├─${c.reset} PID:       ${c.bYellow}${pid}${c.reset}`);
+    console.log(`  ${c.cyan}├─${c.reset} Port:      ${c.bYellow}${port}${c.reset}`);
+    console.log(`  ${c.cyan}├─${c.reset} API:       ${c.underline}http://localhost:${port}${c.reset}`);
+    console.log(`  ${c.cyan}└─${c.reset} Dashboard: ${c.underline}http://localhost:${port}/${c.reset}\n`);
+    console.log(`  ${c.bold}AVAILABLE COMMANDS${c.reset}`);
+    console.log(`  • ${c.cyan}atc ui${c.reset}         Open dashboard in browser`);
+    console.log(`  • ${c.cyan}atc restart${c.reset}    Relaunch proxy`);
+    console.log(`  • ${c.cyan}atc stop${c.reset}       Take offline`);
   } else {
-    console.log('  STATUS');
-    console.log('  🌑 Proxy is offline');
-    console.log('');
-    console.log('  TO LAUNCH');
-    console.log('  • acc start      Bring proxy online');
+    console.log(`  ${c.bold}STATUS${c.reset}`);
+    console.log(`  ${c.gray}🌑 Proxy is offline${c.reset}\n`);
+    console.log(`  ${c.bold}TO LAUNCH${c.reset}`);
+    console.log(`  • ${c.cyan}atc start${c.reset}      Bring proxy online`);
   }
   console.log('');
 }
@@ -335,23 +479,17 @@ function showStatus() {
  * Open WebUI in browser
  */
 async function openUI() {
-  // Start server if not running
   if (!isServiceRunning()) {
-    console.log('');
-    console.log('🌌 Proxy offline - launching now...');
+    console.log(`\n${c.bCyan}🌌 atc proxy offline - launching now...${c.reset}`);
     await startServer();
-    // Wait for it to be fully ready
     await new Promise(resolve => setTimeout(resolve, 1000));
   }
 
   const port = getPort();
   const uiUrl = `http://localhost:${port}/`;
 
-  console.log('');
-  console.log(`🖥️  Opening dashboard → ${uiUrl}`);
-  console.log('');
+  console.log(`\n🖥️  Opening dashboard → ${c.underline}${uiUrl}${c.reset}\n`);
 
-  // Open URL in browser based on platform
   const platform = process.platform;
   let openCommand = '';
 
@@ -362,71 +500,61 @@ async function openUI() {
   } else if (platform === 'linux') {
     openCommand = `xdg-open ${uiUrl}`;
   } else {
-    console.error('⚠️  Cannot auto-open browser on this platform');
-    console.log(`   Manual URL: ${uiUrl}`);
-    console.log('');
+    console.error(`${c.yellow}▲ Cannot auto-open browser on this platform${c.reset}`);
+    console.log(`   Manual URL: ${uiUrl}\n`);
     return;
   }
 
   exec(openCommand, (error) => {
     if (error) {
-      console.error('⚠️  Browser launch failed:', error.message);
-      console.log(`   Manual URL: ${uiUrl}`);
-      console.log('');
+      console.error(`${c.yellow}▲ Browser launch failed:${c.reset} ${error.message}`);
+      console.log(`   Manual URL: ${uiUrl}\n`);
     }
   });
 }
 
 function showHelp() {
-  console.log(`
-╭${'─'.repeat(58)}╮
-│  🛸 atc (Antigravity to Claude) v${packageJson.version.padEnd(27)}│
-╰${'─'.repeat(58)}╯
+  console.log('');
+  printBox([
+    `  🛸 ${c.bold + c.bCyan}ATC — Antigravity to Claude ${c.bMagenta}v${packageJson.version}${c.reset}`
+  ], 58);
 
+  console.log(`
 Route Claude Code CLI through Antigravity's multi-model API
 with intelligent load balancing across Google accounts.
 
-USAGE
-  atc <command> [options]
+${c.bold + c.cyan}USAGE${c.reset}
+  ${c.bCyan}atc${c.reset} <command> [options]
 
-━━━ DASHBOARD (DEFAULT) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  atc                Open interactive TUI dashboard (default)
-  atc dash           Interactive dashboard (↑↓, Enter, 1-9, R, T, D)
-  atc status         Print quick non-interactive accounts overview
-  atc switch <id>    Switch active account by index (1-9) or email
+${c.bold + c.bCyan}━━━ LIFECYCLE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}
+  ${c.cyan}init, initialize${c.reset}    Configure atc for Claude Code & Windows startup
+  ${c.cyan}reinit${c.reset}              Repair configuration & restart proxy daemon
+  ${c.cyan}remove${c.reset}              Remove Windows startup integration
+  ${c.cyan}start [--log]${c.reset}       Launch proxy daemon (background by default)
+  ${c.cyan}stop${c.reset}                Shut down proxy daemon
+  ${c.cyan}restart${c.reset}             Restart proxy daemon
 
-━━━ SYSTEM & SETUP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  atc init           Configure Claude Code and setup Windows autostart
-  atc reinit         Re-sync Claude Code settings, refresh startup & restart
-  atc remove         Remove atc from Windows autostart and cleanup
+${c.bold + c.bCyan}━━━ DASHBOARD & MANAGEMENT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}
+  ${c.cyan}atc, dash${c.reset}           Open interactive TUI dashboard (default)
+  ${c.cyan}status${c.reset}              Show daemon health & active accounts overview
+  ${c.cyan}ui${c.reset}                  Open WebUI dashboard in browser
+  ${c.cyan}models${c.reset}              List available Claude/Gemini model mappings
+  ${c.cyan}switch <id>${c.reset}         Switch active account by index (1-9) or email
+  ${c.cyan}toggle <id>${c.reset}         Enable/disable account in round-robin pool
 
-━━━ PROXY DAEMON ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  atc start [--log]  Launch proxy daemon (background by default)
-  atc stop           Shut down proxy daemon
-  atc restart        Restart proxy daemon
-
-━━━ OPTIONS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  --help, -h         Show this help
-  --version, -v      Show version
-  --log              Run in foreground with live stream logs
-  --strategy=NAME    Load balancer strategy: pipelined (default 5%),
-                     hybrid (token-bucket), round-robin, sticky
-  --fallback         Enable model fallback on errors
-
-━━━ CLAUDE CODE CONFIGURATION ━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  In ~/.claude/settings.json:
-  {
-    "env": {
-      "ANTHROPIC_BASE_URL": "http://localhost:8080"
-    }
-  }
+${c.bold + c.bCyan}━━━ OPTIONS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}
+  ${c.yellow}-h, -H, --help${c.reset}      Show this help
+  ${c.yellow}-v, --version${c.reset}       Show version
+  ${c.yellow}--log${c.reset}               Run in foreground with live stream logs
+  ${c.yellow}--strategy=NAME${c.reset}     Load balancer strategy: pipelined (default 5%),
+                      hybrid (token-bucket), round-robin, sticky
+  ${c.yellow}--fallback${c.reset}          Enable model fallback on errors
 `);
 }
 
 function showVersion() {
   console.log(packageJson.version);
 }
-
 
 // Startup & Claude Code configuration paths
 const STARTUP_DIR = join(
@@ -500,102 +628,156 @@ function isWindowsStartupInstalled() {
 }
 
 async function initCommand() {
-  console.log('\n╭────────────────────────────────────────────────╮');
-  console.log('│  ⚡ Initializing atc (Antigravity to Claude)   │');
-  console.log('╰────────────────────────────────────────────────╯\n');
+  console.log('');
+  printBox([`  ⚡ ${c.bold + c.bCyan}Initializing atc (Antigravity to Claude)${c.reset}`], 56);
+  console.log('');
 
   const port = getPort();
+
+  // Singleton guard: if already initialized and healthy, prevent redundant spawns
+  if (isConfigInitialized()) {
+    const isHealthy = await checkProxyHealth(port, 2000);
+    if (isHealthy) {
+      console.log(`${c.green}✓${c.reset} ${c.bold + c.bGreen}atc is already initialized and proxy is running healthy!${c.reset}`);
+      console.log(`  • Proxy endpoint: ${c.underline}http://localhost:${port}${c.reset}`);
+      console.log(`  • Dashboard:      ${c.underline}http://localhost:${port}/${c.reset}\n`);
+      console.log(`  To re-sync or change configuration, run: ${c.cyan}atc reinit${c.reset}`);
+      console.log(`  To view current accounts and quota, run:  ${c.cyan}atc${c.reset} or ${c.cyan}atc status${c.reset}\n`);
+      return;
+    }
+  }
+
   configureClaudeCode(port);
-  console.log(`✓ Configured Claude Code (~/.claude/settings.json):`);
-  console.log(`  • ANTHROPIC_BASE_URL = http://localhost:${port}`);
-  console.log(`  • ANTHROPIC_API_KEY  = atc-local-key\n`);
+  console.log(`${c.green}✓${c.reset} ${c.bold}Configuration updated${c.reset} (~/.claude/settings.json):`);
+  console.log(`  ${c.cyan}•${c.reset} ANTHROPIC_BASE_URL = http://localhost:${port}`);
+  console.log(`  ${c.cyan}•${c.reset} ANTHROPIC_API_KEY  = atc-local-key\n`);
 
   if (process.platform === 'win32') {
     const readline = await import('readline');
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    const answer = await new Promise(r => rl.question('Do you want atc to start automatically on Windows boot? [Y/n]: ', r));
+    const answer = await new Promise(r => rl.question(`${c.bold}Do you want atc to start automatically on Windows boot? [Y/n]:${c.reset} `, r));
     rl.close();
 
     if (answer.trim().toLowerCase() !== 'n') {
       installWindowsStartup(join(__dirname, 'cli.js'));
-      console.log('✓ Added atc to Windows Startup (silently runs in background on PC boot).\n');
+      console.log(`${c.green}✓${c.reset} Added atc to Windows Startup (runs silently in background on PC boot).\n`);
     } else {
-      console.log('• Skipped Windows Startup configuration.\n');
+      console.log(`${c.gray}• Skipped Windows Startup configuration.${c.reset}\n`);
     }
   }
 
-  if (!isServiceRunning()) {
-    console.log('Starting atc proxy daemon...');
-    await startServer();
-  } else {
-    console.log('✓ atc proxy daemon is already in orbit!\n');
-  }
+  console.log(`${c.bCyan}Starting atc proxy daemon...${c.reset}`);
+  const result = await startServer();
 
-  console.log('🎉 Setup complete! Just run "claude" in any terminal to start using Antigravity models.\n');
+  if (result && result.success) {
+    setConfigInitialized(true);
+    console.log(`\n🎉 ${c.bold + c.bGreen}Setup complete!${c.reset} Just run "${c.cyan}claude${c.reset}" in any terminal to start using Antigravity models.\n`);
+  } else {
+    console.log(`\n${c.yellow}▲${c.reset} ${c.bold + c.yellow}Proxy status unknown / launch timeout${c.reset}`);
+    console.log(`  Configuration has been saved, but the proxy daemon is not responding yet.`);
+    console.log(`  Verify manually: ${c.cyan}curl http://localhost:${port}/health${c.reset}`);
+    console.log(`  Or run in foreground: ${c.cyan}atc start --log${c.reset}\n`);
+  }
 }
 
 async function reinitCommand() {
-  console.log('\n╭────────────────────────────────────────────────╮');
-  console.log('│  ♻️  Reinitializing atc Configuration           │');
-  console.log('╰────────────────────────────────────────────────╯\n');
+  console.log('');
+  printBox([`  ♻️  ${c.bold + c.bCyan}Reinitializing atc Configuration${c.reset}`], 56);
+  console.log('');
 
-  if (isServiceRunning()) {
-    console.log('Stopping current proxy...');
-    stopServer();
-    await new Promise(r => setTimeout(r, 1000));
-  }
+  // Controlled cleanup of previous instance: ensure only 1 instance
+  console.log(`${c.cyan}•${c.reset} Ensuring any existing proxy daemon is stopped...`);
+  await stopServer({ silent: true });
 
   const port = getPort();
   configureClaudeCode(port);
-  console.log(`✓ Re-synced Claude Code (~/.claude/settings.json) to http://localhost:${port}`);
+  console.log(`${c.green}✓${c.reset} ${c.bold}Configuration updated:${c.reset} Claude Code re-synced to http://localhost:${port}`);
 
   if (process.platform === 'win32' && isWindowsStartupInstalled()) {
     installWindowsStartup(join(__dirname, 'cli.js'));
-    console.log('✓ Refreshed Windows Startup shortcut.');
+    console.log(`${c.green}✓${c.reset} Refreshed Windows Startup shortcut.`);
   }
 
-  console.log('Launching fresh atc proxy instance...');
-  await startServer();
-  console.log('\n✓ atc proxy successfully reinitialized!\n');
+  console.log(`\n${c.bCyan}Launching fresh atc proxy instance...${c.reset}`);
+  const result = await startServer();
+
+  if (result && result.success) {
+    setConfigInitialized(true);
+    console.log(`\n${c.green}✓${c.reset} ${c.bold + c.bGreen}atc proxy successfully reinitialized!${c.reset}\n`);
+  } else {
+    console.log(`\n${c.yellow}▲${c.reset} ${c.bold + c.yellow}Proxy status unknown / launch timeout${c.reset}`);
+    console.log(`  Configuration was updated, but the fresh proxy instance timed out during health check.`);
+    console.log(`  Run ${c.cyan}atc start --log${c.reset} to diagnose startup errors.\n`);
+  }
 }
 
 async function removeCommand() {
-  console.log('\n╭────────────────────────────────────────────────╮');
-  console.log('│  🗑️  Remove atc from Windows Startup / System    │');
-  console.log('╰────────────────────────────────────────────────╯\n');
+  console.log('');
+  printBox([`  🗑️  ${c.bold + c.bMagenta}Remove atc from Windows Startup / System${c.reset}`], 56);
+  console.log('');
 
+  let startupRemoved = false;
   if (process.platform === 'win32') {
-    const removed = removeWindowsStartup();
-    if (removed) {
-      console.log('✓ Removed atc from Windows Startup (will no longer run on PC boot).');
-    } else {
-      console.log('• atc was not found in Windows Startup.');
+    startupRemoved = removeWindowsStartup();
+  }
+
+  // Check if proxy daemon is currently running
+  const running = isServiceRunning();
+  let proxyStopped = false;
+
+  if (running) {
+    const readline = await import('readline');
+    const rlDaemon = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const stopAns = await new Promise(r => rlDaemon.question(`${c.bold}Do you want to stop the currently running proxy daemon? [Y/n]:${c.reset} `, r));
+    rlDaemon.close();
+
+    if (stopAns.trim().toLowerCase() !== 'n') {
+      await stopServer({ silent: true });
+      proxyStopped = true;
     }
   }
 
-  if (isServiceRunning()) {
-    console.log('Stopping atc proxy daemon...');
-    stopServer();
-  }
-
+  // Claude Code configuration cleanup
   const readline = await import('readline');
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  const ans = await new Promise(r => rl.question('\nDo you also want to remove atc proxy from Claude Code settings? [y/N]: ', r));
-  rl.close();
+  const rlClaude = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const ansClaude = await new Promise(r => rlClaude.question(`\n${c.bold}Do you also want to remove atc proxy from Claude Code settings? [y/N]:${c.reset} `, r));
+  rlClaude.close();
 
-  if (ans.trim().toLowerCase() === 'y') {
+  let claudeRemoved = false;
+  if (ansClaude.trim().toLowerCase() === 'y') {
     unconfigureClaudeCode();
-    console.log('✓ Removed atc proxy configuration from Claude Code (~/.claude/settings.json).\n');
-  } else {
-    console.log('• Preserved Claude Code settings.\n');
+    claudeRemoved = true;
   }
 
-  console.log('✓ atc remove completed.\n');
+  setConfigInitialized(false);
+
+  // Transparent UX summary
+  console.log('');
+  if (startupRemoved) {
+    console.log(`${c.green}✓${c.reset} Windows Startup integration removed.`);
+  } else {
+    console.log(`${c.gray}• Windows Startup integration was not present.${c.reset}`);
+  }
+
+  if (proxyStopped) {
+    console.log(`${c.green}✓${c.reset} Active proxy daemon stopped.`);
+  } else if (running) {
+    console.log(`${c.gray}• Active proxy daemon preserved.${c.reset}`);
+  }
+
+  if (claudeRemoved) {
+    console.log(`${c.green}✓${c.reset} Removed atc proxy configuration from Claude Code settings.`);
+  } else {
+    console.log(`${c.gray}• Claude Code configuration preserved.${c.reset}`);
+  }
+
+  console.log(`${c.green}•${c.reset} ${c.bold}Existing accounts and credentials preserved${c.reset} (~/.config/atc/).\n`);
+  console.log(`${c.bold}atc has been removed from startup.${c.reset}\n`);
 }
 
 async function main() {
   // Handle flags
-  if (args.includes('--help') || args.includes('-h')) {
+  if (args.includes('--help') || args.includes('-h') || args.includes('-H') || command === 'help') {
     showHelp();
     process.exit(0);
   }
@@ -612,7 +794,7 @@ async function main() {
       break;
 
     case 'stop':
-      stopServer();
+      await stopServer();
       break;
 
     case 'restart':
@@ -708,7 +890,7 @@ async function main() {
 
     default:
       console.error(`Unknown command: ${command}`);
-      console.error('Run "acc --help" for usage information.');
+      console.error('Run "atc --help" for usage information.');
       process.exit(1);
   }
 }

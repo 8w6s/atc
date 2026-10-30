@@ -568,7 +568,7 @@ export function mountWebUI(app, dirname, accountManager) {
                 status: 'ok',
                 config: publicConfig,
                 version: packageVersion,
-                note: 'Edit ~/.config/antigravity-proxy/config.json or use env vars to change these values'
+                note: 'Edit ~/.config/atc/config.json or use env vars to change these values'
             });
         } catch (error) {
             logger.error('[WebUI] Error getting config:', error);

@@ -162,7 +162,7 @@ function isObject(item) {
  * @returns {string} Absolute path to claude-presets.json
  */
 export function getPresetsPath() {
-    return path.join(os.homedir(), '.config', 'antigravity-proxy', 'claude-presets.json');
+    return path.join(os.homedir(), '.config', 'atc', 'claude-presets.json');
 }
 
 /**

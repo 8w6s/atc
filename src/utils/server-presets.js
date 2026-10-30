@@ -2,7 +2,7 @@
  * Server Configuration Presets Utility
  *
  * Handles reading and writing server config presets.
- * Location: ~/.config/antigravity-proxy/server-presets.json
+ * Location: ~/.config/atc/server-presets.json
  */
 
 import fs from 'fs/promises';
@@ -16,7 +16,7 @@ import { DEFAULT_SERVER_PRESETS } from '../constants.js';
  * @returns {string} Absolute path to server-presets.json
  */
 export function getServerPresetsPath() {
-    return path.join(os.homedir(), '.config', 'antigravity-proxy', 'server-presets.json');
+    return path.join(os.homedir(), '.config', 'atc', 'server-presets.json');
 }
 
 /**

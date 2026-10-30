@@ -12,6 +12,7 @@ import { logger } from './utils/logger.js';
 import { config } from './config.js';
 import { getStrategyLabel, STRATEGY_NAMES, DEFAULT_STRATEGY } from './account-manager/strategies/index.js';
 import { getPackageVersion } from './utils/helpers.js';
+import fs from 'fs';
 import path from 'path';
 import os from 'os';
 
@@ -62,16 +63,40 @@ if (process.env.HOST) {
 
 // Home directory for account storage
 const HOME_DIR = os.homedir();
-const CONFIG_DIR = path.join(HOME_DIR, '.antigravity-claude-proxy');
+const CONFIG_DIR = path.join(HOME_DIR, '.config', 'atc');
+const LOCK_FILE = path.join(CONFIG_DIR, 'daemon.lock');
+
+function acquireLock() {
+    try {
+        if (!fs.existsSync(CONFIG_DIR)) {
+            fs.mkdirSync(CONFIG_DIR, { recursive: true });
+        }
+        fs.writeFileSync(LOCK_FILE, process.pid.toString(), 'utf-8');
+    } catch {}
+}
+
+function releaseLock() {
+    try {
+        if (fs.existsSync(LOCK_FILE)) {
+            const cur = fs.readFileSync(LOCK_FILE, 'utf-8');
+            if (parseInt(cur, 10) === process.pid) {
+                fs.unlinkSync(LOCK_FILE);
+            }
+        }
+    } catch {}
+}
 
 const server = app.listen(PORT, HOST, () => {
+    acquireLock();
     // Get actual bound address
     const address = server.address();
     const boundHost = typeof address === 'string' ? address : address.address;
     const boundPort = typeof address === 'string' ? null : address.port;
 
-    // Clear console for a clean start
-    console.clear();
+    // Clear console for a clean start only if running in an interactive terminal
+    if (process.stdout.isTTY) {
+        console.clear();
+    }
 
     const border = '║';
     // align for 2-space indent (60 chars), align4 for 4-space indent (58 chars)
@@ -118,7 +143,7 @@ const server = app.listen(PORT, HOST, () => {
 
     logger.log(`
 ╔══════════════════════════════════════════════════════════════╗
-║            Antigravity Claude Proxy Server v${packageVersion}            ║
+║            atc (Antigravity to Claude) v${packageVersion}            ║
 ╠══════════════════════════════════════════════════════════════╣
 ║                                                              ║
 ${border}  ${align(`Server and WebUI running at: http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`)}${border}
@@ -158,9 +183,22 @@ ${environmentSection}
     }
 });
 
+// Error handling (e.g. port already bound)
+server.on('error', (err) => {
+    releaseLock();
+    if (err.code === 'EADDRINUSE') {
+        logger.error(`[Singleton Guard] Port ${PORT} is already in use. Exiting to prevent duplicate daemon.`);
+        process.exit(1);
+    } else {
+        logger.error(`Server error: ${err.message}`);
+        process.exit(1);
+    }
+});
+
 // Graceful shutdown
 const shutdown = () => {
     logger.info('Shutting down server...');
+    releaseLock();
     server.close(() => {
         logger.success('Server stopped');
         process.exit(0);
@@ -168,6 +206,7 @@ const shutdown = () => {
 
     // Force close if it takes too long
     setTimeout(() => {
+        releaseLock();
         logger.error('Could not close connections in time, forcefully shutting down');
         process.exit(1);
     }, 10000);

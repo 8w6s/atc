@@ -5,8 +5,7 @@
   "main": "src/index.js",
   "type": "module",
   "bin": {
-    "atc": "bin/cli.js",
-    "acc": "bin/cli.js"
+    "atc": "bin/cli.js"
   },
   "files": [
     "src",

@@ -135,13 +135,13 @@ export const DEFAULT_PORT = config?.port || 8080;
 // Multi-account configuration
 export const ACCOUNT_CONFIG_PATH = config?.accountConfigPath || join(
     homedir(),
-    '.config/antigravity-proxy/accounts.json'
+    '.config/atc/accounts.json'
 );
 
 // Usage history persistence path
 export const USAGE_HISTORY_PATH = join(
     homedir(),
-    '.config/antigravity-proxy/usage-history.json'
+    '.config/atc/usage-history.json'
 );
 
 // Antigravity app database path (for legacy single-account token extraction)
