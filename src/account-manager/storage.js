@@ -4,7 +4,7 @@
  * Handles loading and saving account configuration to disk.
  */
 
-import { readFile, writeFile, mkdir, access, rename, unlink } from 'fs/promises';
+import { readFile, writeFile, mkdir, access, rename, unlink, copyFile, chmod } from 'fs/promises';
 import { constants as fsConstants } from 'fs';
 import { dirname } from 'path';
 import { ACCOUNT_CONFIG_PATH } from '../constants.js';
@@ -21,12 +21,40 @@ let tmpCounter = 0;
  * @returns {Promise<{accounts: Array, settings: Object, activeIndex: number}>}
  */
 export async function loadAccounts(configPath = ACCOUNT_CONFIG_PATH) {
-    try {
-        // Check if config file exists using async access
-        await access(configPath, fsConstants.F_OK);
-        const configData = await readFile(configPath, 'utf-8');
-        const config = JSON.parse(configData);
+    let configData = null;
+    let config = null;
 
+    try {
+        await access(configPath, fsConstants.F_OK);
+        configData = await readFile(configPath, 'utf-8');
+        config = JSON.parse(configData);
+    } catch (parseOrReadErr) {
+        if (parseOrReadErr.code === 'ENOENT') {
+            logger.info('[AccountManager] No config file found. Using Antigravity database (single account mode)');
+            return { accounts: [], settings: {}, activeIndex: 0 };
+        }
+
+        // If file exists but contains invalid/corrupt JSON, preserve corrupt file and restore from backup
+        logger.error(`[AccountManager] Syntax error in ${configPath}: ${parseOrReadErr.message}`);
+        const corruptBackup = `${configPath}.corrupt-${Date.now()}`;
+        try {
+            await rename(configPath, corruptBackup);
+            logger.warn(`[AccountManager] Preserved corrupt accounts file as ${corruptBackup}`);
+        } catch {}
+
+        try {
+            const bakPath = `${configPath}.bak`;
+            await access(bakPath, fsConstants.F_OK);
+            const bakData = await readFile(bakPath, 'utf-8');
+            config = JSON.parse(bakData);
+            logger.warn(`[AccountManager] Successfully restored account pool from backup: ${bakPath}`);
+        } catch (bakErr) {
+            logger.error(`[AccountManager] Could not restore from backup: ${bakErr.message}`);
+            return { accounts: [], settings: {}, activeIndex: 0 };
+        }
+    }
+
+    try {
         const accounts = (config.accounts || []).map(acc => ({
             ...acc,
             lastUsed: acc.lastUsed || null,
@@ -187,6 +215,13 @@ export async function saveAccounts(configPath, accounts, settings, activeIndex) 
             if (lastRenameErr && process.env.DEBUG) {
                 logger.warn(`[AccountManager] Atomic rename fallback used (${lastRenameErr.code})`);
             }
+        }
+
+        // Maintain atomic .bak copy and restrict permissions on POSIX
+        await copyFile(configPath, `${configPath}.bak`).catch(() => {});
+        if (process.platform !== 'win32') {
+            await chmod(configPath, 0o600).catch(() => {});
+            await chmod(`${configPath}.bak`, 0o600).catch(() => {});
         }
     } catch (error) {
         logger.error('[AccountManager] Failed to save config:', error.message);

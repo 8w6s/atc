@@ -6,6 +6,7 @@ import { loadAccounts, saveAccounts } from '../account-manager/storage.js';
 import { config, saveConfig, reloadConfig } from '../config.js';
 import { getPackageVersion } from '../utils/helpers.js';
 import { renderRoundedBox, padEndVisible, truncateVisible } from '../utils/terminal-box.js';
+import { syncClaudeDesktopIntegration } from '../utils/claude-config.js';
 import { SAFETY_TIPS, getTipTickerFrame } from './tips.js';
 import {
     normalizeCustomProfile,
@@ -568,7 +569,10 @@ export async function runInteractiveDashboard(options = {}) {
                 const idxStr = `${String(frame.index + 1).padStart(totalDigits, ' ')}/${SAFETY_TIPS.length}`;
                 const pillStyle = getTipBadgeStyle(frame.tip.badge);
                 const pillSeg = `${pillStyle} ★ ${paddedBadge} ${idxStr} \x1b[0m`;
-                const bodySeg = `\x1b[38;5;230;48;5;236m ${frame.visibleText} \x1b[0m`;
+                const isHighContrast = config?.tipsHighContrast !== false;
+                const bodySeg = isHighContrast
+                    ? `\x1b[1;38;5;255;48;5;17m ${frame.visibleText} \x1b[0m`
+                    : `\x1b[38;5;230;48;5;236m ${frame.visibleText} \x1b[0m`;
                 const capSeg = `\x1b[38;5;117;48;5;238m Ctrl+D\x1b[38;5;250;48;5;238m Info · \x1b[38;5;220;48;5;238mX\x1b[38;5;250;48;5;238m Hide \x1b[0m`;
                 buf += `  ${pillSeg}${bodySeg}${capSeg}${c.clearToEndOfLine}\n`;
             }
@@ -933,30 +937,39 @@ export async function runInteractiveDashboard(options = {}) {
                     cooldownMs: config?.switchAccountDelayMs ?? 5000,
                     maxRetriesVal: config?.maxRetries ?? 2,
 
-                    // Tab 3: UI & Tips Banner
-                    showTips: config?.showTips !== false,
-                    tipsDismissScope: config?.tipsDismissScope === 'permanent' ? 'permanent' : 'session',
-                    tipsScrollSpeed: ['slow', 'normal', 'fast', 'static'].includes(config?.tipsScrollSpeed)
-                        ? config.tipsScrollSpeed
-                        : 'normal',
-                    maskEmails: !!config?.maskEmails,
-                    shimmerTitle: config?.shimmerTitle !== false,
+                    // Tab 3: Proxy IP Pool
+                    proxyPoolEnabled: !!config?.proxyPoolEnabled,
+                    proxyStrategy: config?.proxyRotationStrategy || 'sticky-account',
+                    proxyFallbackDirect: config?.proxyFallbackDirect !== false,
+                    proxyTimeoutMs: config?.proxyTimeoutMs || 10000,
 
-                    // Tab 4: Network & Daemon
+                    // Tab 4: Claude & Desktop
+                    claudeDesktopSync: config?.claudeDesktopSync !== false,
                     proxyPort: config?.port || port || 43128,
                     bindHost: config?.bindHost === '0.0.0.0' ? '0.0.0.0' : '127.0.0.1',
                     secretKey: config?.apiKey || 'atc-local-key',
                     streamTimeoutSec: config?.upstreamTimeoutSec ?? 300,
                     quotaTtlSec: config?.quotaRefreshTtlSec ?? 300,
                     loginTimeoutSec: config?.loginTimeoutSec || 120,
-                    debugMode: !!config?.debug
+                    debugMode: !!config?.debug,
+
+                    // Tab 5: UI & Tips Banner
+                    showTips: config?.showTips !== false,
+                    tipsDismissScope: config?.tipsDismissScope === 'permanent' ? 'permanent' : 'session',
+                    tipsScrollSpeed: ['slow', 'normal', 'fast', 'static'].includes(config?.tipsScrollSpeed)
+                        ? config.tipsScrollSpeed
+                        : 'normal',
+                    tipsHighContrast: config?.tipsHighContrast !== false,
+                    maskEmails: !!config?.maskEmails,
+                    shimmerTitle: config?.shimmerTitle !== false
                 };
 
                 const TABS = [
-                    { id: 'anti_ban', num: '1', title: 'Anti-Ban & Pacing' },
-                    { id: 'pool', num: '2', title: 'Pool & Failover' },
-                    { id: 'ui_tips', num: '3', title: 'UI & Tips Banner' },
-                    { id: 'network', num: '4', title: 'Network & Daemon' }
+                    { id: 'anti_ban', title: 'Anti-Ban & Pacing' },
+                    { id: 'pool', title: 'Pool & Failover' },
+                    { id: 'proxy_pool', title: 'Proxy IP Pool' },
+                    { id: 'claude', title: 'Claude & Desktop' },
+                    { id: 'ui_tips', title: 'UI & Tips Banner' }
                 ];
 
                 const ALL_ITEMS = [
@@ -970,6 +983,7 @@ export async function runInteractiveDashboard(options = {}) {
                     {
                         tab: 'anti_ban', key: 'pacerMs', label: 'Per-Account Burst Pacer', type: 'num', unit: 'ms',
                         min: 0, max: 5000, step: 50, safeMin: 150, safeMax: 1000,
+                        presets: [0, 150, 250, 350, 500, 1000],
                         guide: 'safe: 150–1000ms',
                         warnLow: 'Below 150ms: parallel subagent calls hit Cloud Code simultaneously in a tight spike',
                         warnHigh: 'Above 1000ms: parallel subagent tool calls queue noticeably slower',
@@ -978,6 +992,7 @@ export async function runInteractiveDashboard(options = {}) {
                     {
                         tab: 'anti_ban', key: 'pacerJitterPct', label: 'Burst Pacer Random Jitter', type: 'num', unit: '%',
                         min: 0, max: 80, step: 5, safeMin: 15, safeMax: 55,
+                        presets: [0, 15, 20, 30, 40, 50],
                         guide: 'safe: 15–55%',
                         warnLow: 'Below 15%: burst spacing looks robotic and metronomic',
                         warnHigh: 'Above 55%: wide variance adds occasional extra latency on bursts',
@@ -986,6 +1001,7 @@ export async function runInteractiveDashboard(options = {}) {
                     {
                         tab: 'anti_ban', key: 'hourlyCap', label: 'Hourly Cap / Account', type: 'num', unit: '/h',
                         min: 0, max: 600, step: 10, safeMin: 30, safeMax: 240,
+                        presets: [0, 30, 60, 120, 180, 240],
                         guide: 'safe: 30–240/h',
                         warnLow: '0 disables runaway loop protection; <30/h may cap active coding turns',
                         warnHigh: 'Above 240/h: permits sustained high-velocity automated bursts on one consumer account',
@@ -1006,6 +1022,7 @@ export async function runInteractiveDashboard(options = {}) {
                     {
                         tab: 'anti_ban', key: 'keepAliveSec', label: 'Socket Keep-Alive Idle TTL', type: 'num', unit: 's',
                         min: 5, max: 180, step: 5, safeMin: 15, safeMax: 90,
+                        presets: [15, 30, 45, 60, 90],
                         guide: 'safe: 15–90s',
                         warnLow: 'Below 15s: causes frequent TLS handshakes between consecutive prompts',
                         warnHigh: 'Above 90s: approaches Google Frontend idle socket cutoff (~240s)',
@@ -1016,6 +1033,7 @@ export async function runInteractiveDashboard(options = {}) {
                     {
                         tab: 'pool', key: 'quotaFloorPct', label: 'Global 5h Quota Floor', type: 'num', unit: '%',
                         min: 0, max: 50, step: 5, safeMin: 5, safeMax: 25,
+                        presets: [0, 5, 10, 15, 20, 25],
                         guide: 'safe: 5–25%',
                         warnLow: '0%: accounts drain all the way into hard 0% 429 exhaustion',
                         warnHigh: 'Above 25%: leaves substantial 5h quota unused before rotating',
@@ -1024,6 +1042,7 @@ export async function runInteractiveDashboard(options = {}) {
                     {
                         tab: 'pool', key: 'weeklyFloorPct', label: 'Weekly Quota Floor', type: 'num', unit: '%',
                         min: 0, max: 50, step: 5, safeMin: 5, safeMax: 25,
+                        presets: [0, 5, 10, 15, 20],
                         guide: 'safe: 5–25%',
                         warnLow: '0%: allows flagship models (Argon / Opus) to burn 100% of weekly cap',
                         warnHigh: 'Above 25%: holds back a large portion of weekly model quota',
@@ -1032,6 +1051,7 @@ export async function runInteractiveDashboard(options = {}) {
                     {
                         tab: 'pool', key: 'thresholdPct', label: 'Quota Rotation Step', type: 'num', unit: '%',
                         min: 1, max: 50, step: 1, safeMin: 3, safeMax: 15,
+                        presets: [3, 5, 7, 10, 15],
                         guide: 'safe: 3–15%',
                         warnLow: 'Below 3%: causes frequent multi-account cycling from one IP',
                         warnHigh: 'Above 15%: drains each account deeper before staggering 5h recovery',
@@ -1040,6 +1060,7 @@ export async function runInteractiveDashboard(options = {}) {
                     {
                         tab: 'pool', key: 'minStaySec', label: 'Min Account Stay Time', type: 'num', unit: 's',
                         min: 0, max: 3600, step: 30, safeMin: 60, safeMax: 900,
+                        presets: [0, 60, 120, 180, 300, 600],
                         guide: 'safe: 60–900s',
                         warnLow: 'Below 60s: rapid multi-account hopping under subagent bursts raises ban risk',
                         warnHigh: 'Above 900s: behaves closer to Sticky/Session mode with long single-account blocks',
@@ -1048,6 +1069,7 @@ export async function runInteractiveDashboard(options = {}) {
                     {
                         tab: 'pool', key: 'idleBreakSec', label: 'Idle Session Break Gap', type: 'num', unit: 's',
                         min: 30, max: 1800, step: 30, safeMin: 90, safeMax: 600,
+                        presets: [90, 180, 300, 600],
                         guide: 'safe: 90–600s',
                         warnLow: 'Below 90s: may mistake a long file read or user pause for a finished session',
                         warnHigh: 'Above 600s: requires >10m quiet break before Session mode rotates',
@@ -1056,6 +1078,7 @@ export async function runInteractiveDashboard(options = {}) {
                     {
                         tab: 'pool', key: 'reqCap', label: 'Fallback Request Cap', type: 'num', unit: ' reqs',
                         min: 5, max: 200, step: 5, safeMin: 10, safeMax: 50,
+                        presets: [10, 20, 30, 50],
                         guide: 'safe: 10–50 reqs',
                         warnLow: 'Below 10 reqs: switches accounts too often when telemetry lags',
                         warnHigh: 'Above 50 reqs: single account may drain heavily before fallback rotation',
@@ -1064,6 +1087,7 @@ export async function runInteractiveDashboard(options = {}) {
                     {
                         tab: 'pool', key: 'cooldownMs', label: 'Switch Delay Cooldown', type: 'num', unit: 'ms',
                         min: 500, max: 30000, step: 500, safeMin: 2000, safeMax: 10000,
+                        presets: [2000, 3000, 5000, 7000, 10000],
                         guide: 'safe: 2000–10000ms',
                         warnLow: 'Below 2000ms: instant cross-account failover looks like automated credential rotation',
                         warnHigh: 'Above 10000ms: adds noticeable wait when failing over from a rate-limited account',
@@ -1072,18 +1096,122 @@ export async function runInteractiveDashboard(options = {}) {
                     {
                         tab: 'pool', key: 'maxRetriesVal', label: 'Max Failover Retries', type: 'num', unit: '',
                         min: 0, max: 5, step: 1, safeMin: 1, safeMax: 3,
+                        presets: [0, 1, 2, 3],
                         guide: 'safe: 1–3',
                         warnLow: '0 retries: any transient error immediately fails the request',
                         warnHigh: 'Above 3 retries: fans a failing prompt across too many accounts in a single turn',
                         desc: 'Maximum failover attempts across accounts per request before returning an error'
                     },
 
-                    // --- Tab 3: UI & Tips Banner ---
+                    // --- Tab 3: Proxy IP Pool ---
+                    {
+                        tab: 'proxy_pool', key: 'proxyPoolEnabled', label: 'Proxy Pool Master', type: 'bool',
+                        onText: 'Enabled', offText: 'Disabled', onColor: '\x1b[1;38;5;49m',
+                        guide: 'anti-IP-cluster ban',
+                        desc: 'Distribute requests across forward proxies to avoid Google IP correlation and bulk account bans'
+                    },
+                    {
+                        tab: 'proxy_pool', key: 'proxyStrategy', label: 'Proxy Rotation Mode', type: 'enum',
+                        choices: [
+                            { val: 'sticky-account', label: 'Sticky per Account (Safest)' },
+                            { val: 'round-robin', label: 'Round-Robin Rotation' },
+                            { val: 'random', label: 'Random IP Selection' }
+                        ],
+                        guide: 'rotation strategy',
+                        desc: 'Sticky per Account pins each Google account to a consistent IP, preventing anomalous multi-IP hopping'
+                    },
+                    {
+                        tab: 'proxy_pool', key: 'proxyFallbackDirect', label: 'Direct IP Fallback', type: 'bool',
+                        onText: 'Enabled', offText: 'Disabled',
+                        guide: 'failover safety',
+                        desc: 'Automatically fallback to direct connection if all proxies in the pool fail or time out'
+                    },
+                    {
+                        tab: 'proxy_pool', key: 'proxyTimeoutMs', label: 'Proxy Connect Timeout', type: 'num', unit: 'ms',
+                        min: 2000, max: 30000, step: 1000, safeMin: 5000, safeMax: 20000,
+                        presets: [5000, 10000, 15000, 20000],
+                        guide: 'safe: 5000–20000ms',
+                        warnLow: 'Below 5000ms: slow forward proxies may drop connections prematurely',
+                        warnHigh: 'Above 20000ms: dead proxies delay failover routing',
+                        desc: 'HTTP CONNECT tunnel socket timeout when establishing connection through proxy'
+                    },
+
+                    // --- Tab 4: Claude & Desktop ---
+                    {
+                        tab: 'claude', key: 'claudeDesktopSync', label: 'Claude Desktop Auto-Sync', type: 'bool',
+                        onText: 'Enabled', offText: 'Disabled', onColor: '\x1b[1;38;5;49m',
+                        guide: 'syncs Desktop app',
+                        desc: 'Automatically synchronize proxy API port and MCP bridge into claude_desktop_config.json'
+                    },
+                    {
+                        tab: 'claude', key: 'proxyPort', label: 'Proxy Listen Port', type: 'num', unit: '',
+                        min: 1024, max: 65535, step: 1, safeMin: 1024, safeMax: 65535,
+                        presets: [43128, 43129, 8080],
+                        guide: 'syncs Claude Code & Desktop',
+                        warnLow: 'Ports below 1024 require elevated OS privileges',
+                        warnHigh: 'Port out of valid TCP range',
+                        desc: 'Local HTTP listen port (auto-updates ANTHROPIC_BASE_URL; run atc restart to rebind socket)'
+                    },
+                    {
+                        tab: 'claude', key: 'bindHost', label: 'Proxy Bind Address', type: 'enum',
+                        choices: [
+                            { val: '127.0.0.1', label: '127.0.0.1 (Loopback)' },
+                            { val: '0.0.0.0', label: '0.0.0.0 (All NICs)' }
+                        ],
+                        guide: '127.0.0.1 recommended',
+                        desc: 'Keep on 127.0.0.1 unless connecting from a local VM/WSL/container with a strong Secret API Key'
+                    },
+                    {
+                        tab: 'claude', key: 'secretKey', label: 'Secret API Key', type: 'text',
+                        guide: 'syncs ANTHROPIC_API_KEY',
+                        desc: 'Local bearer key required on proxy requests; automatically synced to ~/.claude/settings.json'
+                    },
+                    {
+                        tab: 'claude', key: 'streamTimeoutSec', label: 'Active Stream Timeout', type: 'num', unit: 's',
+                        min: 60, max: 900, step: 30, safeMin: 120, safeMax: 600,
+                        presets: [120, 180, 300, 450, 600],
+                        guide: 'safe: 120–600s',
+                        warnLow: 'Below 120s: long thinking models may time out mid-reasoning',
+                        warnHigh: 'Above 600s: hung upstream sockets stay open longer',
+                        desc: 'Maximum socket wait for active streaming/thinking responses before aborting'
+                    },
+                    {
+                        tab: 'claude', key: 'quotaTtlSec', label: 'Quota Poll Cache TTL', type: 'num', unit: 's',
+                        min: 30, max: 3600, step: 30, safeMin: 120, safeMax: 1800,
+                        presets: [120, 300, 600, 1800],
+                        guide: 'safe: 120–1800s',
+                        warnLow: 'Below 120s: frequent multi-account quota probes from one IP increase noise',
+                        warnHigh: 'Above 1800s: displayed quota percentages refresh less frequently',
+                        desc: 'Cache lifetime for /account-limits probes to avoid multi-account polling bursts'
+                    },
+                    {
+                        tab: 'claude', key: 'loginTimeoutSec', label: 'OAuth Login Timeout', type: 'num', unit: 's',
+                        min: 30, max: 600, step: 15, safeMin: 60, safeMax: 300,
+                        presets: [60, 120, 180, 300],
+                        guide: 'safe: 60–300s',
+                        warnLow: 'Below 60s: browser sign-in or 2FA may time out prematurely',
+                        warnHigh: 'Above 300s: temporary OAuth callback port stays open longer if cancelled',
+                        desc: 'Maximum wait time for Google OAuth browser callback during account login'
+                    },
+                    {
+                        tab: 'claude', key: 'debugMode', label: 'Debug Verbose Logging', type: 'bool',
+                        onText: 'Enabled', offText: 'Disabled',
+                        guide: 'for troubleshooting',
+                        desc: 'Emit detailed request conversion and strategy trace logs to server output'
+                    },
+
+                    // --- Tab 5: UI & Tips Banner ---
                     {
                         tab: 'ui_tips', key: 'showTips', label: 'Tips Banner on Startup', type: 'bool',
                         onText: 'Enabled', offText: 'Disabled',
                         guide: 'top safety ribbon',
                         desc: 'Enable or disable the high-contrast safety & operational tips ribbon whenever atc opens'
+                    },
+                    {
+                        tab: 'ui_tips', key: 'tipsHighContrast', label: 'High-Contrast Banner', type: 'bool',
+                        onText: 'Enabled (Navy/White)', offText: 'Standard',
+                        guide: 'vivid readability',
+                        desc: 'Use dual-tone deep navy background and bold white foreground for maximum contrast'
                     },
                     {
                         tab: 'ui_tips', key: 'tipsDismissScope', label: 'Dismiss Key [X] Behavior', type: 'enum',
@@ -1116,60 +1244,6 @@ export async function runInteractiveDashboard(options = {}) {
                         onText: 'Enabled', offText: 'Disabled',
                         guide: 'metallic sweep',
                         desc: 'Toggle the periodic silver sheen sweep across the atc header title'
-                    },
-
-                    // --- Tab 4: Network & Daemon ---
-                    {
-                        tab: 'network', key: 'proxyPort', label: 'Proxy Listen Port', type: 'num', unit: '',
-                        min: 1024, max: 65535, step: 1, safeMin: 1024, safeMax: 65535,
-                        guide: 'syncs Claude Code',
-                        warnLow: 'Ports below 1024 require elevated OS privileges',
-                        warnHigh: 'Port out of valid TCP range',
-                        desc: 'Local HTTP listen port (auto-updates ANTHROPIC_BASE_URL; run atc restart to rebind socket)'
-                    },
-                    {
-                        tab: 'network', key: 'bindHost', label: 'Proxy Bind Address', type: 'enum',
-                        choices: [
-                            { val: '127.0.0.1', label: '127.0.0.1 (Loopback)' },
-                            { val: '0.0.0.0', label: '0.0.0.0 (All NICs)' }
-                        ],
-                        guide: '127.0.0.1 recommended',
-                        desc: 'Keep on 127.0.0.1 unless connecting from a local VM/WSL/container with a strong Secret API Key'
-                    },
-                    {
-                        tab: 'network', key: 'secretKey', label: 'Secret API Key', type: 'text',
-                        guide: 'syncs ANTHROPIC_API_KEY',
-                        desc: 'Local bearer key required on proxy requests; automatically synced to ~/.claude/settings.json'
-                    },
-                    {
-                        tab: 'network', key: 'streamTimeoutSec', label: 'Active Stream Timeout', type: 'num', unit: 's',
-                        min: 60, max: 900, step: 30, safeMin: 120, safeMax: 600,
-                        guide: 'safe: 120–600s',
-                        warnLow: 'Below 120s: long thinking models may time out mid-reasoning',
-                        warnHigh: 'Above 600s: hung upstream sockets stay open longer',
-                        desc: 'Maximum socket wait for active streaming/thinking responses before aborting'
-                    },
-                    {
-                        tab: 'network', key: 'quotaTtlSec', label: 'Quota Poll Cache TTL', type: 'num', unit: 's',
-                        min: 30, max: 3600, step: 30, safeMin: 120, safeMax: 1800,
-                        guide: 'safe: 120–1800s',
-                        warnLow: 'Below 120s: frequent multi-account quota probes from one IP increase noise',
-                        warnHigh: 'Above 1800s: displayed quota percentages refresh less frequently',
-                        desc: 'Cache lifetime for /account-limits probes to avoid multi-account polling bursts'
-                    },
-                    {
-                        tab: 'network', key: 'loginTimeoutSec', label: 'OAuth Login Timeout', type: 'num', unit: 's',
-                        min: 30, max: 600, step: 15, safeMin: 60, safeMax: 300,
-                        guide: 'safe: 60–300s',
-                        warnLow: 'Below 60s: browser sign-in or 2FA may time out prematurely',
-                        warnHigh: 'Above 300s: temporary OAuth callback port stays open longer if cancelled',
-                        desc: 'Maximum wait time for Google OAuth browser callback during account login'
-                    },
-                    {
-                        tab: 'network', key: 'debugMode', label: 'Debug Verbose Logging', type: 'bool',
-                        onText: 'Enabled', offText: 'Disabled',
-                        guide: 'for troubleshooting',
-                        desc: 'Emit detailed request conversion and strategy trace logs to server output'
                     }
                 ];
 
@@ -1184,9 +1258,9 @@ export async function runInteractiveDashboard(options = {}) {
                     const tabSettings = ALL_ITEMS.filter((it) => it.tab === tabId);
                     return [
                         ...tabSettings,
-                        { type: 'action', id: 'reset_tab', label: `Reset "${TABS[activeTabIdx].title}" Tab to Safe Defaults`, desc: 'Restore safe recommended values for the settings in this tab only' },
-                        { type: 'action', id: 'reset_all', label: 'Reset All 4 Tabs to Safe Defaults', desc: 'Restore recommended anti-ban & operational defaults across every tab' },
-                        { type: 'action', id: 'save', label: 'Save All Settings & Return to Dashboard', desc: 'Persist all 4 tabs to ~/.config/atc/config.json, sync Claude Code, and reload daemon' }
+                        { type: 'action', id: 'reset_tab', label: `Reset "${TABS[activeTabIdx].title}" to Defaults`, desc: 'Restore recommended values for this tab only' },
+                        { type: 'action', id: 'reset_all', label: 'Reset All 5 Tabs to Defaults', desc: 'Restore recommended settings across all 5 tabs' },
+                        { type: 'action', id: 'save', label: 'Save & Return to Dashboard', desc: 'Save settings to config, sync Claude Code & Desktop, and return to dashboard' }
                     ];
                 }
 
@@ -1210,14 +1284,14 @@ export async function runInteractiveDashboard(options = {}) {
                         state.cooldownMs = 5000;
                         state.maxRetriesVal = 2;
                     }
-                    if (tabId === 'ui_tips' || tabId === 'all') {
-                        state.showTips = true;
-                        state.tipsDismissScope = 'session';
-                        state.tipsScrollSpeed = 'normal';
-                        state.maskEmails = false;
-                        state.shimmerTitle = true;
+                    if (tabId === 'proxy_pool' || tabId === 'all') {
+                        state.proxyPoolEnabled = false;
+                        state.proxyStrategy = 'sticky-account';
+                        state.proxyFallbackDirect = true;
+                        state.proxyTimeoutMs = 10000;
                     }
-                    if (tabId === 'network' || tabId === 'all') {
+                    if (tabId === 'claude' || tabId === 'all') {
+                        state.claudeDesktopSync = true;
                         state.proxyPort = port || 43128;
                         state.bindHost = '127.0.0.1';
                         state.secretKey = state.secretKey || 'atc-local-key';
@@ -1225,6 +1299,14 @@ export async function runInteractiveDashboard(options = {}) {
                         state.quotaTtlSec = 300;
                         state.loginTimeoutSec = 120;
                         state.debugMode = false;
+                    }
+                    if (tabId === 'ui_tips' || tabId === 'all') {
+                        state.showTips = true;
+                        state.tipsHighContrast = true;
+                        state.tipsDismissScope = 'session';
+                        state.tipsScrollSpeed = 'normal';
+                        state.maskEmails = false;
+                        state.shimmerTitle = true;
                     }
                 }
 
@@ -1263,14 +1345,13 @@ export async function runInteractiveDashboard(options = {}) {
                     let out = c.cursorHome;
                     out += drawHeaderBox('atc Engine, Anti-Ban & Interface Settings', 76);
 
-                    // Balanced Category Tab Bar
+                    // Clean Category Tab Bar
                     let tabLine = '  ';
                     TABS.forEach((t, idx) => {
-                        const count = ALL_ITEMS.filter((it) => it.tab === t.id).length;
                         const active = idx === activeTabIdx;
                         const pill = active
-                            ? `\x1b[1;38;5;16;48;5;48m ${t.num}. ${t.title} (${count}) \x1b[0m`
-                            : `\x1b[38;5;249;48;5;236m ${t.num}. ${t.title} (${count}) \x1b[0m`;
+                            ? `\x1b[1;38;5;16;48;5;48m  ${t.title}  \x1b[0m`
+                            : `\x1b[38;5;246;48;5;236m  ${t.title}  \x1b[0m`;
                         tabLine += pill + ' ';
                     });
                     out += `${tabLine}${c.clearToEndOfLine}\n`;
@@ -1335,23 +1416,39 @@ export async function runInteractiveDashboard(options = {}) {
                     const curWarn = curIt && curIt.type !== 'action' ? getItemWarning(curIt) : null;
                     const wrapCols = Math.max(58, Math.min((process.stdout.columns || 88) - 6, 78));
 
-                    out += `\n`;
+                    out += `  ${c.clearToEndOfLine}\n`;
                     if (notice) {
                         out += `  \x1b[38;5;120m✓ ${notice}\x1b[0m${c.clearToEndOfLine}\n`;
+                        out += `  ${c.clearToEndOfLine}\n`;
                     } else if (curWarn) {
-                        for (const wl of wrapPlainText(`▲ ${curWarn}`, wrapCols)) {
+                        const warnLines = wrapPlainText(`▲ ${curWarn}`, wrapCols);
+                        for (const wl of warnLines) {
                             out += `  \x1b[1;38;5;214m${wl}\x1b[0m${c.clearToEndOfLine}\n`;
                         }
-                    } else if (curIt?.desc) {
-                        for (const dl of wrapPlainText(curIt.desc, wrapCols)) {
-                            out += `  ${c.textMuted}Info:${c.reset} ${c.textNormal}${dl}${c.reset}${c.clearToEndOfLine}\n`;
+                        for (let k = warnLines.length; k < 2; k++) {
+                            out += `  ${c.clearToEndOfLine}\n`;
                         }
+                    } else if (curIt?.desc) {
+                        const descLines = wrapPlainText(curIt.desc, wrapCols);
+                        descLines.forEach((dl, i) => {
+                            if (i === 0) {
+                                out += `  ${c.textMuted}Info:${c.reset} ${c.textNormal}${dl}${c.reset}${c.clearToEndOfLine}\n`;
+                            } else {
+                                out += `        ${c.textNormal}${dl}${c.reset}${c.clearToEndOfLine}\n`;
+                            }
+                        });
+                        for (let k = descLines.length; k < 2; k++) {
+                            out += `  ${c.clearToEndOfLine}\n`;
+                        }
+                    } else {
+                        out += `  ${c.clearToEndOfLine}\n`;
+                        out += `  ${c.clearToEndOfLine}\n`;
                     }
 
                     if (isFocusEditing) {
                         out += `  ${c.textMuted}[0-9 / Text] Type  ·  [Backspace] Delete  ·  [Enter] Confirm  ·  [ESC] Cancel Edit${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
                     } else {
-                        out += `  ${c.textMuted}[Tab / 1-4] Switch Tab  ·  [↑↓] Move  ·  [←/→ / Space] Change  ·  [Enter] Edit  ·  [ESC] Save & Exit${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
+                        out += `  ${c.textMuted}[←/→] Switch Tab  ·  [↑↓] Move  ·  [Enter / Space] Toggle  ·  [ESC] Save & Exit${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
                     }
 
                     process.stdout.write(out);
@@ -1378,9 +1475,18 @@ export async function runInteractiveDashboard(options = {}) {
                         accountSelection: accSel,
                         switchAccountDelayMs: state.cooldownMs,
                         maxRetries: state.maxRetriesVal,
+                        // Proxy IP Pool
+                        proxyPoolEnabled: state.proxyPoolEnabled,
+                        proxyRotationStrategy: state.proxyStrategy,
+                        proxyFallbackDirect: state.proxyFallbackDirect,
+                        proxyTimeoutMs: state.proxyTimeoutMs,
+                        // Claude Desktop
+                        claudeDesktopSync: state.claudeDesktopSync,
+                        // UI & Tips
                         showTips: state.showTips,
                         tipsDismissScope: state.tipsDismissScope,
                         tipsScrollSpeed: state.tipsScrollSpeed,
+                        tipsHighContrast: state.tipsHighContrast,
                         maskEmails: state.maskEmails,
                         shimmerTitle: state.shimmerTitle,
                         port: state.proxyPort,
@@ -1400,6 +1506,15 @@ export async function runInteractiveDashboard(options = {}) {
                     cs.env.ANTHROPIC_API_KEY = state.secretKey;
                     cs.env.ANTHROPIC_BASE_URL = `http://localhost:${state.proxyPort}`;
                     writeClaudeSettings(cs);
+
+                    if (state.claudeDesktopSync) {
+                        try {
+                            await syncClaudeDesktopIntegration({
+                                port: state.proxyPort,
+                                apiKey: state.secretKey
+                            });
+                        } catch {}
+                    }
                     port = state.proxyPort;
                     try {
                         await fetch(`http://127.0.0.1:${port}/reload`, {
@@ -1413,19 +1528,30 @@ export async function runInteractiveDashboard(options = {}) {
                     if (process.stdin.isTTY) process.stdin.setRawMode(true);
                     readline.emitKeypressEvents(process.stdin);
 
-                    function stepChoice(it, dir) {
+                    function toggleSetting(it) {
                         if (it.type === 'bool') {
                             state[it.key] = !state[it.key];
                             notice = `${it.label} -> ${formatItemDisplay(it)}`;
                         } else if (it.type === 'enum') {
                             const idx = Math.max(0, it.choices.findIndex((ch) => ch.val === state[it.key]));
-                            const next = it.choices[(idx + dir + it.choices.length) % it.choices.length];
+                            const next = it.choices[(idx + 1) % it.choices.length];
                             state[it.key] = next.val;
                             notice = `${it.label} -> ${next.label}`;
                         } else if (it.type === 'num') {
-                            const nextVal = Math.max(it.min, Math.min(it.max, state[it.key] + dir * it.step));
-                            state[it.key] = nextVal;
-                            notice = '';
+                            if (Array.isArray(it.presets) && it.presets.length > 0) {
+                                const curVal = state[it.key];
+                                const pIdx = it.presets.indexOf(curVal);
+                                const nextVal = pIdx >= 0 ? it.presets[(pIdx + 1) % it.presets.length] : it.presets[0];
+                                state[it.key] = nextVal;
+                            } else {
+                                let nextVal = state[it.key] + it.step;
+                                if (nextVal > it.max) nextVal = it.min;
+                                state[it.key] = nextVal;
+                            }
+                            notice = `${it.label} -> ${formatItemDisplay(it)}`;
+                        } else if (it.type === 'text') {
+                            isFocusEditing = true;
+                            editBuffer = String(state[it.key] ?? '');
                         }
                     }
 
@@ -1479,19 +1605,31 @@ export async function runInteractiveDashboard(options = {}) {
                             return;
                         }
 
-                        if (key.name === 'tab' || str === ']' || str === '[') {
+                        // Arrow Left / Right and Tab switch between the 4 balanced categories
+                        if (key.name === 'left' || key.name === 'h') {
                             notice = '';
-                            const dir = (key.shift || str === '[') ? -1 : 1;
-                            activeTabIdx = (activeTabIdx + dir + TABS.length) % TABS.length;
+                            activeTabIdx = (activeTabIdx - 1 + TABS.length) % TABS.length;
                             rowIdx = 0;
+                            process.stdout.write(c.cursorHome + c.clearScreen);
                             renderScreen();
                             return;
                         }
 
-                        if (!key.ctrl && !key.meta && ['1', '2', '3', '4'].includes(str)) {
+                        if (key.name === 'right' || key.name === 'l') {
                             notice = '';
-                            activeTabIdx = parseInt(str, 10) - 1;
+                            activeTabIdx = (activeTabIdx + 1) % TABS.length;
                             rowIdx = 0;
+                            process.stdout.write(c.cursorHome + c.clearScreen);
+                            renderScreen();
+                            return;
+                        }
+
+                        if (key.name === 'tab') {
+                            notice = '';
+                            const dir = key.shift ? -1 : 1;
+                            activeTabIdx = (activeTabIdx + dir + TABS.length) % TABS.length;
+                            rowIdx = 0;
+                            process.stdout.write(c.cursorHome + c.clearScreen);
                             renderScreen();
                             return;
                         }
@@ -1510,28 +1648,11 @@ export async function runInteractiveDashboard(options = {}) {
                             return;
                         }
 
-                        if (key.name === 'left' && cur && cur.type !== 'action' && cur.type !== 'text') {
-                            stepChoice(cur, -1);
-                            renderScreen();
-                            return;
-                        }
-
-                        if ((key.name === 'right' || key.name === 'space') && cur && cur.type !== 'action' && cur.type !== 'text') {
-                            stepChoice(cur, 1);
-                            renderScreen();
-                            return;
-                        }
-
-                        if (key.name === 'return' || key.name === 'enter') {
+                        // Enter or Space toggles setting or executes action
+                        if (key.name === 'return' || key.name === 'enter' || key.name === 'space') {
                             if (!cur) return;
-                            if (cur.type === 'bool' || cur.type === 'enum') {
-                                stepChoice(cur, 1);
-                                renderScreen();
-                                return;
-                            }
-                            if (cur.type === 'num' || cur.type === 'text') {
-                                isFocusEditing = true;
-                                editBuffer = String(state[cur.key] ?? '');
+                            if (cur.type !== 'action') {
+                                toggleSetting(cur);
                                 renderScreen();
                                 return;
                             }
@@ -1543,7 +1664,7 @@ export async function runInteractiveDashboard(options = {}) {
                             }
                             if (cur.id === 'reset_all') {
                                 resetTabDefaults('all');
-                                notice = 'Reset all 4 tabs to recommended anti-ban defaults';
+                                notice = 'Reset all 4 tabs to recommended defaults';
                                 renderScreen();
                                 return;
                             }
@@ -2444,14 +2565,15 @@ export async function runInteractiveDashboard(options = {}) {
 
                     if (cur.id === 'model_mapping') {
                         await runSubScreen(async () => {
+                            process.stdout.write(c.clearScreen + c.cursorHome);
                             reloadConfig();
                             let claudeSettings = readClaudeSettings();
                             claudeSettings.env = claudeSettings.env || {};
 
                             const MM_TABS = [
-                                { id: 'slots', num: 1, title: 'Claude Code Slots' },
-                                { id: 'aliases', num: 2, title: 'Custom Aliases' },
-                                { id: 'presets', num: 3, title: 'Quick Presets' }
+                                { id: 'slots', title: 'Claude Code Slots' },
+                                { id: 'aliases', title: 'Custom Aliases' },
+                                { id: 'presets', title: 'Quick Presets' }
                             ];
 
                             const SLOT_DEFS = [
@@ -2602,21 +2724,21 @@ export async function runInteractiveDashboard(options = {}) {
                                         type: 'preset',
                                         id: 'preset_default',
                                         label: 'Balanced Default Setup',
-                                        summary: 'Sonnet 5.5 -> 3.8-Flash-High | Opus 5.5 -> 3.8-Pro',
+                                        summary: 'Sonnet 5.5 → 3.8-Flash-High  ·  Opus 5.5 → 3.8-Pro',
                                         desc: 'Recommended everyday coding setup: Flash-High for main/sonnet, 3.8-Pro for Opus, Flash-Lite for subagents'
                                     },
                                     {
                                         type: 'preset',
                                         id: 'preset_flex',
                                         label: 'Flagship Flex Signatures',
-                                        summary: 'Claude 3.7 Sonnet & 3 Opus -> 3.8-Pro / Flash-High',
+                                        summary: 'Claude 3.7 Sonnet & 3 Opus → 3.8-Pro / Flash-High',
                                         desc: 'Configures official Claude 3.7 Sonnet, 3.5 Haiku & 3 Opus model IDs backed by Gemini 3.8 Pro and Flash-High'
                                     },
                                     {
                                         type: 'preset',
                                         id: 'preset_pro',
                                         label: 'Deep Reasoning Pro Setup',
-                                        summary: 'Main / Opus / Sonnet -> 3.8-Pro | Subagent -> Flash-High',
+                                        summary: 'Main / Opus / Sonnet → 3.8-Pro  ·  Subagent → Flash-High',
                                         desc: 'Routes primary, Opus, and Sonnet tiers to Gemini 3.8 Pro for heavy architecture & debugging tasks'
                                     },
                                     {
@@ -2660,18 +2782,16 @@ export async function runInteractiveDashboard(options = {}) {
                                 const rows = buildTabRows();
                                 if (rowIdx >= rows.length) rowIdx = Math.max(0, rows.length - 1);
                                 const curTabId = MM_TABS[tabIdx].id;
-                                const aliasCount = getCustomAliasEntries().length;
 
-                                let out = c.cursorHome;
+                                let out = '\x1b[2J\x1b[H';
                                 out += drawHeaderBox('Model Mappings, Claude Code Slots & Alias Routing', 76);
 
                                 let tabBar = '  ';
                                 MM_TABS.forEach((t, idx) => {
-                                    const badgeCount = t.id === 'slots' ? SLOT_DEFS.length : (t.id === 'aliases' ? aliasCount : 4);
                                     const isAct = idx === tabIdx;
                                     const pill = isAct
-                                        ? `\x1b[1;38;5;16;48;5;48m ${t.num}. ${t.title} (${badgeCount}) \x1b[0m`
-                                        : `\x1b[38;5;249;48;5;236m ${t.num}. ${t.title} (${badgeCount}) \x1b[0m`;
+                                        ? `\x1b[1;38;5;16;48;5;48m  ${t.title}  \x1b[0m`
+                                        : `\x1b[38;5;249;48;5;236m  ${t.title}  \x1b[0m`;
                                     tabBar += pill + ' ';
                                 });
                                 out += `${tabBar}${c.clearToEndOfLine}\n`;
@@ -2784,9 +2904,9 @@ export async function runInteractiveDashboard(options = {}) {
                                 if (editState) {
                                     out += `  ${c.textMuted}Type Model ID  ·  [←/→] Cycle Backend (Step 2)  ·  [Enter] Confirm  ·  [ESC] Cancel${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
                                 } else if (curTabId === 'aliases') {
-                                    out += `  ${c.textMuted}[Tab / 1-3] Tab  ·  [↑↓] Move  ·  [←/→] Change Backend  ·  [N] New  ·  [D] Delete  ·  [ESC] Exit${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
+                                    out += `  ${c.textMuted}[←/→] Switch Tab  ·  [↑↓] Move  ·  [Enter / Space] Cycle Backend  ·  [E] Edit  ·  [N] New  ·  [D] Delete  ·  [ESC] Exit${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
                                 } else {
-                                    out += `  ${c.textMuted}[Tab / 1-3] Switch Tab  ·  [↑↓] Move  ·  [←/→ / Space] Change Backend  ·  [Enter] Edit  ·  [ESC] Exit${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
+                                    out += `  ${c.textMuted}[←/→] Switch Tab  ·  [↑↓] Move  ·  [Enter / Space] Cycle / Apply  ·  [E] Edit  ·  [ESC] Exit${c.reset}${c.clearToEndOfLine}${c.clearToEndOfScreen}`;
                                 }
 
                                 process.stdout.write(out);
@@ -2880,18 +3000,29 @@ export async function runInteractiveDashboard(options = {}) {
                                         return;
                                     }
 
-                                    if (key.name === 'tab') {
+                                    // Arrow Left / Right and Tab switch between tabs
+                                    if (key.name === 'left' || key.name === 'h') {
                                         notice = '';
-                                        tabIdx = (tabIdx + (key.shift ? -1 : 1) + MM_TABS.length) % MM_TABS.length;
+                                        tabIdx = (tabIdx - 1 + MM_TABS.length) % MM_TABS.length;
                                         rowIdx = 0;
                                         process.stdout.write(c.clearScreen + c.cursorHome);
                                         renderScreen();
                                         return;
                                     }
 
-                                    if (!key.ctrl && !key.meta && ['1', '2', '3'].includes(str)) {
+                                    if (key.name === 'right' || key.name === 'l') {
                                         notice = '';
-                                        tabIdx = parseInt(str, 10) - 1;
+                                        tabIdx = (tabIdx + 1) % MM_TABS.length;
+                                        rowIdx = 0;
+                                        process.stdout.write(c.clearScreen + c.cursorHome);
+                                        renderScreen();
+                                        return;
+                                    }
+
+                                    if (key.name === 'tab') {
+                                        notice = '';
+                                        const dir = key.shift ? -1 : 1;
+                                        tabIdx = (tabIdx + dir + MM_TABS.length) % MM_TABS.length;
                                         rowIdx = 0;
                                         process.stdout.write(c.clearScreen + c.cursorHome);
                                         renderScreen();
@@ -2916,54 +3047,8 @@ export async function runInteractiveDashboard(options = {}) {
 
                                     const curRow = rows[rowIdx];
 
-                                    if (key.name === 'left' || key.name === 'right' || key.name === 'space') {
-                                        const dir = key.name === 'left' ? -1 : 1;
-                                        if (curRow?.type === 'slot') {
-                                            const nextBackend = cycleBackendValue(curRow.backendModel, dir);
-                                            saveSlotMapping(curRow.envKey, curRow.clientModel, nextBackend);
-                                            notice = `${curRow.label}: [${curRow.clientModel}] -> [${nextBackend}]`;
-                                            renderScreen();
-                                            return;
-                                        }
-                                        if (curRow?.type === 'alias') {
-                                            const nextBackend = cycleBackendValue(curRow.backendModel, dir);
-                                            saveCustomAlias(curRow.alias, curRow.alias, nextBackend);
-                                            notice = `Alias [${curRow.alias}] -> [${nextBackend}]`;
-                                            renderScreen();
-                                            return;
-                                        }
-                                    }
-
-                                    if (!key.ctrl && !key.meta && key.name === 'n') {
-                                        tabIdx = 1;
-                                        editState = {
-                                            mode: 'new_alias',
-                                            step: 'client',
-                                            clientBuf: '',
-                                            backendBuf: 'gemini-3.8-flash-high'
-                                        };
-                                        const aliasRows = buildTabRows();
-                                        rowIdx = Math.max(0, aliasRows.findIndex((r) => r.type === 'new_alias_draft'));
-                                        process.stdout.write(c.clearScreen + c.cursorHome);
-                                        renderScreen();
-                                        return;
-                                    }
-
-                                    if (!key.ctrl && !key.meta && (key.name === 'd' || key.name === 'delete') && curRow?.type === 'alias') {
-                                        const newMm = { ...(config.modelMapping || {}) };
-                                        delete newMm[curRow.alias];
-                                        config.modelMapping = newMm;
-                                        saveConfig({ modelMapping: newMm });
-                                        notice = `Removed custom alias [${curRow.alias}]`;
-                                        rowIdx = Math.max(0, rowIdx - 1);
-                                        process.stdout.write(c.clearScreen + c.cursorHome);
-                                        renderScreen();
-                                        return;
-                                    }
-
-                                    if (key.name === 'return' || key.name === 'enter') {
-                                        if (!curRow) return;
-
+                                    // Edit Model ID inline with 'e' / 'E'
+                                    if ((str === 'e' || str === 'E') && curRow) {
                                         if (curRow.type === 'slot') {
                                             editState = {
                                                 mode: 'edit_slot',
@@ -2975,7 +3060,6 @@ export async function runInteractiveDashboard(options = {}) {
                                             renderScreen();
                                             return;
                                         }
-
                                         if (curRow.type === 'alias') {
                                             editState = {
                                                 mode: 'edit_alias',
@@ -2984,6 +3068,27 @@ export async function runInteractiveDashboard(options = {}) {
                                                 clientBuf: curRow.alias,
                                                 backendBuf: curRow.backendModel
                                             };
+                                            renderScreen();
+                                            return;
+                                        }
+                                    }
+
+                                    // Enter or Space toggles / cycles backend or executes action
+                                    if (key.name === 'return' || key.name === 'enter' || key.name === 'space') {
+                                        if (!curRow) return;
+
+                                        if (curRow.type === 'slot') {
+                                            const nextBackend = cycleBackendValue(curRow.backendModel, 1);
+                                            saveSlotMapping(curRow.envKey, curRow.clientModel, nextBackend);
+                                            notice = `${curRow.label}: [${curRow.clientModel}] -> [${nextBackend}]`;
+                                            renderScreen();
+                                            return;
+                                        }
+
+                                        if (curRow.type === 'alias') {
+                                            const nextBackend = cycleBackendValue(curRow.backendModel, 1);
+                                            saveCustomAlias(curRow.alias, curRow.alias, nextBackend);
+                                            notice = `Alias [${curRow.alias}] -> [${nextBackend}]`;
                                             renderScreen();
                                             return;
                                         }
@@ -3092,7 +3197,35 @@ export async function runInteractiveDashboard(options = {}) {
                                         if (curRow.id === 'save_exit') {
                                             process.stdin.removeListener('keypress', onKey);
                                             resolve();
+                                            return;
                                         }
+                                    }
+
+                                    if (!key.ctrl && !key.meta && key.name === 'n') {
+                                        tabIdx = 1;
+                                        editState = {
+                                            mode: 'new_alias',
+                                            step: 'client',
+                                            clientBuf: '',
+                                            backendBuf: 'gemini-3.8-flash-high'
+                                        };
+                                        const aliasRows = buildTabRows();
+                                        rowIdx = Math.max(0, aliasRows.findIndex((r) => r.type === 'new_alias_draft'));
+                                        process.stdout.write(c.clearScreen + c.cursorHome);
+                                        renderScreen();
+                                        return;
+                                    }
+
+                                    if (!key.ctrl && !key.meta && (key.name === 'd' || key.name === 'delete') && curRow?.type === 'alias') {
+                                        const newMm = { ...(config.modelMapping || {}) };
+                                        delete newMm[curRow.alias];
+                                        config.modelMapping = newMm;
+                                        saveConfig({ modelMapping: newMm });
+                                        notice = `Removed custom alias [${curRow.alias}]`;
+                                        rowIdx = Math.max(0, rowIdx - 1);
+                                        process.stdout.write(c.clearScreen + c.cursorHome);
+                                        renderScreen();
+                                        return;
                                     }
                                 }
 

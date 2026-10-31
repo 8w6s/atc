@@ -22,7 +22,7 @@
     "accounts:list": "node src/cli/accounts.js list",
     "accounts:remove": "node src/cli/accounts.js remove",
     "accounts:verify": "node src/cli/accounts.js verify",
-    "test": "node tests/run-all.cjs",
+    "test": "node --test tests/*.test.js",
     "test:signatures": "node tests/test-thinking-signatures.cjs",
     "test:multiturn": "node tests/test-multiturn-thinking-tools.cjs",
     "test:streaming": "node tests/test-multiturn-thinking-tools-streaming.cjs",
@@ -48,11 +48,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/badri-s2001/antigravity-claude-proxy.git"
+    "url": "git+https://github.com/8w6s/atc.git"
   },
-  "homepage": "https://github.com/badri-s2001/antigravity-claude-proxy#readme",
+  "homepage": "https://github.com/8w6s/atc#readme",
   "bugs": {
-    "url": "https://github.com/badri-s2001/antigravity-claude-proxy/issues"
+    "url": "https://github.com/8w6s/atc/issues"
   },
   "engines": {
     "node": ">=18.0.0"

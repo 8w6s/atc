@@ -16,9 +16,10 @@ import { logger } from '../utils/logger.js';
  *
  * @param {Response} response - The HTTP response with SSE body
  * @param {string} originalModel - The original model name
+ * @param {Object} [streamState] - Optional state tracking object to signal emitted events
  * @yields {Object} Anthropic-format SSE events
  */
-export async function* streamSSEResponse(response, originalModel) {
+export async function* streamSSEResponse(response, originalModel, streamState = null) {
     const messageId = `msg_${crypto.randomBytes(16).toString('hex')}`;
     let hasEmittedStart = false;
     let blockIndex = 0;
@@ -68,6 +69,7 @@ export async function* streamSSEResponse(response, originalModel) {
                 // Note: input_tokens = promptTokenCount - cachedContentTokenCount (Antigravity includes cached in total)
                 if (!hasEmittedStart && parts.length > 0) {
                     hasEmittedStart = true;
+                    if (streamState) streamState.hasEmittedAnyEvent = true;
                     yield {
                         type: 'message_start',
                         message: {
@@ -251,12 +253,46 @@ export async function* streamSSEResponse(response, originalModel) {
                         stopReason = 'max_tokens';
                     } else if (firstCandidate.finishReason === 'STOP') {
                         stopReason = 'end_turn';
+                    } else if (['SAFETY', 'BLOCKLIST', 'PROHIBITED_CONTENT'].includes(firstCandidate.finishReason)) {
+                        stopReason = 'refusal';
+                        logger.warn(`[CloudCode] Upstream rejected content (${firstCandidate.finishReason})`);
+                    } else if (firstCandidate.finishReason === 'MALFORMED_FUNCTION_CALL') {
+                        stopReason = 'stop_sequence';
+                        logger.warn(`[CloudCode] Upstream reported MALFORMED_FUNCTION_CALL`);
                     }
                 }
 
             } catch (parseError) {
                 logger.warn('[CloudCode] SSE parse error:', parseError.message);
             }
+        }
+    }
+
+    // Process any remaining bytes in buffer without trailing newline
+    if (buffer && buffer.trim().startsWith('data:')) {
+        const jsonText = buffer.slice(buffer.indexOf('data:') + 5).trim();
+        if (jsonText) {
+            try {
+                const data = JSON.parse(jsonText);
+                const innerResponse = data.response || data;
+                const candidates = innerResponse.candidates || [];
+                const firstCandidate = candidates[0] || {};
+                const parts = firstCandidate.content?.parts || [];
+                for (const part of parts) {
+                    if (part.text && currentBlockType === 'text') {
+                        yield {
+                            type: 'content_block_delta',
+                            index: blockIndex,
+                            delta: { type: 'text_delta', text: part.text }
+                        };
+                    }
+                }
+                if (firstCandidate.finishReason && !stopReason) {
+                    if (firstCandidate.finishReason === 'MAX_TOKENS') stopReason = 'max_tokens';
+                    else if (firstCandidate.finishReason === 'STOP') stopReason = 'end_turn';
+                    else if (['SAFETY', 'BLOCKLIST'].includes(firstCandidate.finishReason)) stopReason = 'refusal';
+                }
+            } catch {}
         }
     }
 

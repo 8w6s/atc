@@ -130,6 +130,48 @@ atc
 | `atc mapid` | Print active model alias mappings |
 | `atc flex` | Configure Claude Code environment variables for flagship model IDs |
 | `atc settings` / `atc config` | Open proxy engine settings screen directly |
+| `atc desktop [setup\|status\|launch]` | Connect proxy & MCP bridge server to Claude Desktop app |
+
+---
+
+## Claude Desktop Integration
+
+`atc` natively supports the official Anthropic Claude Desktop application. It registers a local MCP bridge and generates an automated launcher script ensuring `ANTHROPIC_BASE_URL` directs traffic to your active `atc` account pool.
+
+```bash
+# 1. Synchronize Claude Desktop configuration & register MCP bridge
+atc desktop setup
+
+# 2. Inspect active integration status
+atc desktop status
+
+# 3. Launch Claude Desktop routed through atc
+atc desktop launch
+```
+
+---
+
+## Outbound Proxy IP Pool
+
+To eliminate bulk Google account suspension caused by multiple accounts issuing requests from a single residential or datacenter IP cluster, `atc` v1.0.2 includes an Outbound Proxy IP Pool engine:
+
+- **Sticky-per-Account (Default & Safest)**: Permanently pins each Google account to a consistent proxy IP, preventing anomalous multi-IP hopping that triggers automated Google Cloud Code security challenges.
+- **Round-Robin & Random**: Distributes requests evenly across forward proxies for high-throughput subagent bursts.
+- **Failover Protection**: Automatically cools down failing proxies for 60 seconds and gracefully falls back to direct IP connection.
+
+Configure proxies via **Settings → Tab 3 (Proxy IP Pool)** in the TUI dashboard, or edit `~/.config/atc/config.json`:
+
+```json
+{
+  "proxyPoolEnabled": true,
+  "proxyRotationStrategy": "sticky-account",
+  "proxyFallbackDirect": true,
+  "proxyIpPool": [
+    "http://username:password@proxy1.example.com:8080",
+    "http://username:password@proxy2.example.com:8080"
+  ]
+}
+```
 
 ---
 
@@ -171,6 +213,13 @@ Once configured, run Claude Code:
 ```bash
 claude
 ```
+
+---
+
+## Documentation
+
+- **[Anti-Ban & Google Enforcement Deep Dive](docs/GOOGLE_BAN_MECHANISMS.md)**: Technical breakdown of Google Cloud Code / GFE anti-abuse detection vectors, 5-tier penalty taxonomy, multi-account rotation risks, and production safety guidelines.
+- **[Changelog](docs/CHANGELOG.md)**: Full release history and architectural improvements.
 
 ---
 

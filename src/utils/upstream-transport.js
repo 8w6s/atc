@@ -1,8 +1,10 @@
 import crypto from 'crypto';
 import https from 'https';
+import tls from 'tls';
 import { Readable } from 'stream';
 import zlib from 'zlib';
 import { config } from '../config.js';
+import { proxyPool } from './proxy-pool.js';
 
 /*
  * Google Frontend (GFE) correlates requests sharing a keep-alive TLS socket and
@@ -117,7 +119,11 @@ function evictStalePools(now) {
 
 function getIsolatedAgent(poolKey, testTlsOptions = null) {
     const now = Date.now();
-    const effectiveKey = testTlsOptions ? `test:${poolKey}` : poolKey;
+    const proxyUrl = testTlsOptions ? null : proxyPool.selectProxy(poolKey);
+    const effectiveKey = testTlsOptions
+        ? `test:${poolKey}`
+        : (proxyUrl ? `${poolKey}:${proxyUrl}` : poolKey);
+
     const existing = agentPools.get(effectiveKey);
     if (existing) {
         existing.lastUsed = now;
@@ -134,14 +140,45 @@ function getIsolatedAgent(poolKey, testTlsOptions = null) {
      * Arm the 30s timeout only when the socket enters the free pool (matching Go's
      * http.Transport.IdleConnTimeout) and clear/extend it while a request is active.
      */
-    const agent = new https.Agent({
+    const agentOptions = {
         keepAlive: true,
         keepAliveMsecs: 15000,
         maxSockets: 6,
         maxFreeSockets: 2,
         ALPNProtocols: ['http/1.1'],
         ...(testTlsOptions || {})
-    });
+    };
+
+    if (proxyUrl && !testTlsOptions) {
+        agentOptions.createConnection = (connOpts, callback) => {
+            proxyPool.createProxiedTLSSocket({
+                proxyUrl,
+                targetHost: connOpts.host,
+                targetPort: connOpts.port || 443,
+                timeoutMs: config?.proxyTimeoutMs || 10000,
+                alpnProtocols: ['http/1.1']
+            }).then((socket) => {
+                proxyPool.reportResult(proxyUrl, true);
+                callback(null, socket);
+            }).catch((err) => {
+                proxyPool.reportResult(proxyUrl, false, err);
+                if (config?.proxyFallbackDirect !== false) {
+                    try {
+                        const directSocket = tls.connect(connOpts, () => {
+                            callback(null, directSocket);
+                        });
+                        directSocket.on('error', (tlsErr) => callback(tlsErr));
+                    } catch (e) {
+                        callback(e);
+                    }
+                } else {
+                    callback(err);
+                }
+            });
+        };
+    }
+
+    const agent = new https.Agent(agentOptions);
 
     agent.on('free', (socket) => {
         clearIdleTimeout(socket);

@@ -311,16 +311,24 @@ export async function* sendMessageStream(anthropicRequest, accountManager, fallb
 
                     // Stream the response with retry logic for empty responses
                     let currentResponse = response;
+                    const streamState = { hasEmittedAnyEvent: false };
 
                     for (let emptyRetries = 0; emptyRetries <= MAX_EMPTY_RESPONSE_RETRIES; emptyRetries++) {
                         try {
-                            yield* streamSSEResponse(currentResponse, anthropicRequest.model);
+                            yield* streamSSEResponse(currentResponse, anthropicRequest.model, streamState);
                             logger.debug('[CloudCode] Stream completed');
                             // Clear rate limit state on success
                             clearRateLimitState(account.email, model);
                             accountManager.notifySuccess(account, model);
                             return;
                         } catch (streamError) {
+                            // If stream already started emitting events to client, DO NOT retry
+                            // Retrying after message_start would inject a duplicated message_start into the client stream
+                            if (streamState.hasEmittedAnyEvent) {
+                                logger.error('[CloudCode] Stream disconnected mid-flight after message_start, aborting retry to avoid duplicate headers');
+                                throw streamError;
+                            }
+
                             // Only retry on EmptyResponseError
                             if (!isEmptyResponseError(streamError)) {
                                 throw streamError;
@@ -329,8 +337,7 @@ export async function* sendMessageStream(anthropicRequest, accountManager, fallb
                             // Check if we have retries left
                             if (emptyRetries >= MAX_EMPTY_RESPONSE_RETRIES) {
                                 logger.error(`[CloudCode] Empty response after ${MAX_EMPTY_RESPONSE_RETRIES} retries`);
-                                yield* emitEmptyResponseFallback(anthropicRequest.model);
-                                return;
+                                throw streamError;
                             }
 
                             // Exponential backoff: 500ms, 1000ms, 2000ms

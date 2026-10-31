@@ -62,6 +62,32 @@ export const SAFETY_TIPS = [
             'Run "atc doctor --fix" anytime to audit client version tuple, loopback port sync, and safety thresholds.'
         ],
         sources: []
+    },
+    {
+        id: 'proxy-ip-pool',
+        badge: 'PROXY-IP',
+        title: 'Prevent Multi-Account Bans with Outbound Proxy IP Pool',
+        ticker: 'Running >2 accounts? Enable the Proxy IP Pool in Settings with "Sticky per Account" so Google sees distinct, consistent IPs instead of multi-account credential bursts from one residential machine.',
+        summary: 'Google Frontend correlates high-frequency requests across multiple accounts originating from identical client IPs. Using an IP pool with sticky-account routing isolates each account to a dedicated IP.',
+        points: [
+            'Enable "Proxy Pool Master: Enabled" under Settings -> Proxy IP Pool tab.',
+            'Keep "Proxy Rotation Mode: Sticky per Account" (default). Each Google account deterministically binds to one proxy IP, eliminating suspicious rapid IP hopping on a single account.',
+            'If a proxy times out, atc automatically applies a 60s cooldown and fails over cleanly to another healthy proxy or direct connection without dropping your request.'
+        ],
+        sources: []
+    },
+    {
+        id: 'claude-desktop-integration',
+        badge: 'DESKTOP',
+        title: 'Use atc with Claude Desktop via Auto-Synced Bridge',
+        ticker: 'Connect Claude Desktop: run "atc desktop setup" to auto-sync MCP bridges and use the launcher script to forward all Desktop requests through your local multi-account proxy pool.',
+        summary: 'Claude Desktop connects seamlessly through atc with auto-configured MCP server bridges and environment launcher scripts.',
+        points: [
+            'Run "atc desktop setup" to automatically discover and update claude_desktop_config.json on Windows, macOS, or Linux.',
+            'Use the generated launcher script in ~/.config/atc/launch-claude-desktop to start Claude Desktop with ANTHROPIC_BASE_URL pointed to atc.',
+            'All Claude Desktop chats enjoy the same multi-account quota expansion, thinking preservation, and anti-ban safeguards as Claude Code.'
+        ],
+        sources: []
     }
 ];
 

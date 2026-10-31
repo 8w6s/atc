@@ -27,6 +27,12 @@ import {
   showLiveLogs,
   toggleSingleAccountLock
 } from '../src/cli/diagnostics.js';
+import {
+  getClaudeDesktopConfigPath,
+  readClaudeDesktopConfig,
+  syncClaudeDesktopIntegration,
+  getClaudeDesktopLauncherPath
+} from '../src/utils/claude-config.js';
 import { getDisplayWidth, renderRoundedBox } from '../src/utils/terminal-box.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -615,6 +621,7 @@ ${c.bold + c.bCyan}━━━ DASHBOARD & ACCOUNTS ━━━━━━━━━━
 ${c.bold + c.bCyan}━━━ MODELS & SETTINGS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}
   ${c.cyan}models [id] [--refresh]${c.reset}  List available Antigravity models (specific ID or top plan)
   ${c.cyan}mapid, map${c.reset}          List Claude Code fake model ID mappings
+  ${c.cyan}desktop [setup|launch]${c.reset} Connect proxy & MCP bridge to Claude Desktop
   ${c.cyan}flex${c.reset}                Auto-bind Claude 3.7 Sonnet & Opus to Google backend
   ${c.cyan}settings, config${c.reset}    Directly open proxy engine & secret key settings
 
@@ -1008,6 +1015,80 @@ async function uninstallCommand() {
   console.log(`  ${c.bCyan}npm uninstall -g @8w6s/atc${c.reset}\n`);
 }
 
+async function handleDesktopCommand(subCommand = 'status') {
+  let cfg = {};
+  if (existsSync(CONFIG_FILE)) {
+    try {
+      cfg = JSON.parse(readFileSync(CONFIG_FILE, 'utf-8'));
+    } catch {}
+  }
+  const port = parseInt(cfg.port, 10) || getPort() || 43128;
+  const apiKey = cfg.apiKey || 'atc-local-key';
+  const configPath = getClaudeDesktopConfigPath();
+  const launcherPath = getClaudeDesktopLauncherPath();
+
+  if (subCommand === 'setup' || subCommand === 'sync' || subCommand === 'install') {
+    console.log(`\n${c.bold + c.bCyan}━━━ CLAUDE DESKTOP INTEGRATION SETUP ━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}`);
+    const res = await syncClaudeDesktopIntegration({ port, apiKey });
+    if (res.success) {
+      console.log(`  ${c.green}✓${c.reset} Config file:    ${res.configPath}`);
+      console.log(`  ${c.green}✓${c.reset} Launcher:       ${res.launcherPath}`);
+      console.log(`  ${c.green}✓${c.reset} MCP Bridge:     Registered "atc-bridge" server`);
+      console.log(`\n  ${c.white}To start Claude Desktop routed through atc proxy:${c.reset}`);
+      if (process.platform === 'win32') {
+        console.log(`  ${c.cyan}cmd /c "${res.launcherPath}"${c.reset}  (or simply: ${c.bCyan}atc desktop launch${c.reset})\n`);
+      } else {
+        console.log(`  ${c.cyan}bash "${res.launcherPath}"${c.reset}  (or simply: ${c.bCyan}atc desktop launch${c.reset})\n`);
+      }
+    } else {
+      console.log(`  ${c.red}✗ Setup failed:${c.reset} ${res.error}\n`);
+    }
+    return;
+  }
+
+  if (subCommand === 'launch' || subCommand === 'start') {
+    const res = await syncClaudeDesktopIntegration({ port, apiKey });
+    if (!res.success) {
+      console.error(`\n  ${c.red}✗ Cannot launch Claude Desktop:${c.reset} ${res.error}\n`);
+      return;
+    }
+    console.log(`\n${c.bold + c.bCyan}Starting Claude Desktop via atc proxy...${c.reset}`);
+    console.log(`  Proxy endpoint: ${c.green}http://localhost:${port}${c.reset}`);
+    console.log(`  Launcher:       ${c.gray}${launcherPath}${c.reset}\n`);
+
+    if (process.platform === 'win32') {
+      exec(`start "" "${launcherPath}"`, { windowsHide: true }, (err) => {
+        if (err) console.error(`Failed to launch Claude Desktop: ${err.message}`);
+      });
+    } else if (process.platform === 'darwin') {
+      exec(`open -a "Claude"`, { env: { ...process.env, ANTHROPIC_BASE_URL: `http://localhost:${port}` } }, (err) => {
+        if (err) console.error(`Failed to launch Claude Desktop: ${err.message}`);
+      });
+    } else {
+      exec(`bash "${launcherPath}"`, (err) => {
+        if (err) console.error(`Failed to launch Claude Desktop: ${err.message}`);
+      });
+    }
+    return;
+  }
+
+  // Default: status
+  const currentCfg = await readClaudeDesktopConfig();
+  const hasBridge = !!(currentCfg?.mcpServers?.['atc'] || currentCfg?.mcpServers?.['atc-bridge']);
+  const launcherExists = existsSync(launcherPath);
+
+  console.log(`\n${c.bold + c.bCyan}━━━ CLAUDE DESKTOP INTEGRATION STATUS ━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}`);
+  console.log(`  Config file:    ${existsSync(configPath) ? c.green + configPath : c.gray + configPath + ' (not created yet)'}${c.reset}`);
+  console.log(`  MCP Bridge:     ${hasBridge ? c.green + 'ACTIVE ("atc")' : c.yellow + 'NOT CONFIGURED'}${c.reset}`);
+  console.log(`  Launcher:       ${launcherExists ? c.green + launcherPath : c.gray + 'None (run atc desktop setup)'}${c.reset}`);
+  console.log(`  Target proxy:   ${c.cyan}http://localhost:${port}${c.reset}\n`);
+
+  console.log(`  ${c.white}Available commands:${c.reset}`);
+  console.log(`    ${c.cyan}atc desktop setup${c.reset}   Sync MCP bridge server and generate launcher script`);
+  console.log(`    ${c.cyan}atc desktop launch${c.reset}  Open Claude Desktop routed through atc proxy`);
+  console.log(`    ${c.cyan}atc desktop status${c.reset}  Show this status inspection\n`);
+}
+
 async function main() {
   // Handle flags
   if (args.includes('--help') || args.includes('-h') || args.includes('-H') || command === 'help') {
@@ -1112,6 +1193,10 @@ async function main() {
     case 'settings':
     case 'config':
       await runInteractiveDashboard({ initialScreen: 'settings' });
+      break;
+
+    case 'desktop':
+      await handleDesktopCommand(args[1]);
       break;
 
     case 'remove':

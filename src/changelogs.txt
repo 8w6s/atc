@@ -35,3 +35,14 @@
 [FIX] Fixed ConPTY sub-screen layer overlap in Model Mappings caused by shadowed sub-screen state and scrollback-clear escape sequences.
 [FIX] Fixed right-hand box border (│ / ║) misalignments across Changelog Book, TUI sub-screens, CLI banners, and daemon startup output using ANSI-aware display-width measurement.
 [FIX] Hardened Windows atomic accounts.json writes with per-PID temp files and EPERM retry/fallback logic during concurrent TUI and daemon saves.
+[NEW] Native Claude Desktop integration: automatic MCP configuration synchronization, path discovery across Windows, macOS, and Linux, and dedicated one-click launcher scripts ("atc desktop setup / status / launch").
+[NEW] Outbound Proxy IP Pool engine (src/utils/proxy-pool.js) with sticky-per-account consistency, round-robin, and random strategies to eliminate Google IP clustering and bulk account bans.
+[NEW] HTTP CONNECT tunneling over isolated per-account TLS sockets with automatic health tracking, error cooldowns, and direct-IP fallback.
+[NEW] Redesigned Settings & Model Mappings TUI with clean arrow-key tab navigation ([←/→]), single-key toggles ([Enter / Space]), and removal of numbered prefixes.
+[NEW] Enhanced high-contrast Safety Tips banner with dual-tone background styling, zero-flicker fixed viewport dimensions, and an explicit startup toggle in Settings.
+[SECURITY] Guarded streaming mid-flight retries: prevented duplicate message_start event emissions during disconnects and removed synthetic end_turn fallbacks.
+[SECURITY] Hardened account configuration storage: preserved corrupted configurations as timestamped backups and enabled automatic .bak recovery with POSIX 0600 permissions.
+[SECURITY] Enhanced upstream error parsing: mapped Google Cloud Code SAFETY, BLOCKLIST, and MALFORMED_FUNCTION_CALL finishes to proper refusal/stop_sequence events.
+[FIX] Fixed Model Mappings ConPTY layer overlap by introducing synchronous alternate buffer flushing and arrow-key tab switching without numeric hotkey clutter.
+[FIX] Fixed right border misalignment (|) in Model Mappings and TUI header boxes using strict column padding and Unicode box-drawing glyphs.
+[FIX] Eliminated duplicate action rows in Engine Settings and restored clean, balanced spacing across all categories.

@@ -86,6 +86,17 @@ const DEFAULT_CONFIG = {
     },
     loginTimeoutSec: 120, // OAuth login callback timeout in seconds (default 120s / 2m)
     quotaRefreshTtlSec: 300, // Cache lifetime for live quota probes (seconds)
+    // Outbound forward proxy IP pool configuration
+    proxyPoolEnabled: false, // Enable outbound proxy IP rotation
+    proxyIpPool: [], // List of HTTP/HTTPS proxy URLs (e.g. http://user:pass@ip:port)
+    proxyRotationStrategy: 'sticky-account', // 'sticky-account' | 'round-robin' | 'random'
+    proxyFallbackDirect: true, // Fallback to direct connection if all proxies fail
+    proxyTimeoutMs: 10000, // Proxy CONNECT timeout in milliseconds
+    // Claude Desktop integration
+    claudeDesktopSync: true, // Automatically synchronize proxy config to Claude Desktop
+    claudeDesktopConfigPath: '', // Custom path to claude_desktop_config.json (empty = auto)
+    burstDefenseLimit: 15, // Max bursts per 10s window before safety pacer enforces delay
+    tipsHighContrast: true, // High-contrast styling for safety tips ribbon
     customModes: [], // User-defined custom load balancer strategy profiles
     // Account selection strategy configuration
     accountSelection: {

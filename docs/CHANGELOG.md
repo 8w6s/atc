@@ -142,3 +142,47 @@ Detailed code-level history of architectural changes, feature additions/removals
   - Rewrote `src/changelogs.txt` and `~/.config/atc/CHANGELOG.md` in 100% English and updated `parseChangelogFile()` / `showInteractiveChangelog()` in `src/cli/changelog-viewer.js` to sort and navigate chronologically from **oldest release (`v0.9.5`) to newest release (`v1.0.1 Latest`)**, adding `[SECURITY]` badge formatting, clean word wrapping, vertical `[↑/↓]` scrolling, and `[L]` Latest / `[F]` Oldest jump keys.
   - Audited and fixed all right-hand box borders (`│` and `║`) across `src/cli/changelog-viewer.js`, `src/cli/interactive-dashboard.js`, `bin/cli.js`, and `src/index.js` via `src/utils/terminal-box.js` (`getDisplayWidth()`, `renderRoundedBox()`, `renderDoubleBox()`).
   - Hardened `saveAccounts()` in `src/account-manager/storage.js` with per-process unique temp filenames (`${configPath}.${process.pid}.${++tmpCounter}.tmp`) and Windows `EPERM`/`EACCES`/`EBUSY` rename retries + safe in-place write fallback to prevent HTTP 500 errors during concurrent TUI and daemon saves.
+
+### 7. Claude Desktop App Native Integration
+- **Files Modified / Added**: `src/utils/claude-config.js`, `bin/cli.js`, `README.md`
+- **Capabilities**:
+  - Automatically resolves OS-specific Claude Desktop config paths:
+    - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+    - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+    - Linux: `~/.config/Claude/claude_desktop_config.json`
+  - Registers the local `atc` MCP bridge server with `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` configuration.
+  - Generates cross-platform launcher scripts (`~/.config/atc/launch-claude-desktop.cmd` on Windows, `.sh` on macOS/Linux) that set `ANTHROPIC_BASE_URL` before launching Claude Desktop.
+  - Added CLI lifecycle commands: `atc desktop setup`, `atc desktop status`, and `atc desktop launch`.
+
+### 8. Outbound Proxy IP Pool & IP Correlation Defense
+- **Files Introduced / Modified**: `src/utils/proxy-pool.js`, `src/utils/upstream-transport.js`, `src/config.js`, `docs/GOOGLE_BAN_MECHANISMS.md`
+- **Capabilities**:
+  - Introduced `ProxyPoolManager` supporting HTTP CONNECT tunneling with TLS upgrade, maintaining Go-style client wire fingerprints and ALPN negotiation over external proxies.
+  - 3 proxy rotation strategies:
+    - `sticky-account` (Default & Recommended): SHA-256 hashes account IDs to pin each Google account to a dedicated proxy IP, eliminating multi-IP hopping that triggers Google security verification.
+    - `round-robin`: Cycles through healthy proxies sequentially for distributed subagent bursts.
+    - `random`: Uniformly selects among active forward proxies.
+  - Health monitoring: Tracks consecutive failure counts, enforces 60-second cooldowns for dead proxies, and gracefully falls back to direct connection if all proxies time out (`proxyFallbackDirect`).
+
+### 9. Settings & Model Mappings TUI Overhaul
+- **Files Modified**: `src/cli/interactive-dashboard.js`
+- **Improvements**:
+  - Redesigned Engine Settings into 5 balanced categories: `Anti-Ban & Pacing`, `Pool & Failover`, `Proxy IP Pool`, `Claude & Desktop`, and `UI & Tips Banner`.
+  - Replaced numeric hotkeys (`1-4`) with smooth arrow-key tab navigation (`[←/→]`, `h/l`, `Tab`).
+  - Streamlined controls: `[Enter]` and `[Space]` strictly toggle boolean settings and cycle preset values; `[E]` triggers inline value editing.
+  - Removed duplicate action entries (`Save All Settings & Return to Dashboard`).
+  - Fixed Model Mappings ConPTY layer overlap by executing synchronous alternate screen and scrollback buffer flushes (`\x1b[2J\x1b[3J\x1b[H`).
+  - Aligned table columns and header boxes using Unicode box-drawing characters (`│`, `·`) instead of misaligned ASCII pipes (`|`).
+
+### 10. Critical Safety & Protocol Hardening (Claude Review Remediation)
+- **Files Modified**: `src/cloudcode/streaming-handler.js`, `src/cloudcode/sse-streamer.js`, `src/account-manager/storage.js`
+- **Hardening**:
+  - Guarded mid-stream retries in `streaming-handler.js`: Prevents re-emitting duplicate `message_start` events when connections drop after the initial chunk, allowing `server.js` to emit a proper SSE error event.
+  - Fixed trailing SSE buffer drainage in `sse-streamer.js` when upstream chunks terminate without trailing newlines.
+  - Mapped upstream Cloud Code finish reasons (`SAFETY`, `BLOCKLIST`, `MALFORMED_FUNCTION_CALL`) to official Anthropic `refusal` and `stop_sequence` reasons instead of synthetic `end_turn`.
+  - Protected account token storage: Preserves corrupted JSON configurations as `.corrupt-<timestamp>` backups, automatically falls back to `accounts.json.bak`, and sets `0600` POSIX file permissions.
+
+### 11. Automated Native Test Suite
+- **Files Introduced**: `tests/proxy-pool.test.js`, `tests/claude-config.test.js`, `tests/sse-streamer.test.js`, `tests/terminal-box.test.js`
+- **Capabilities**:
+  - Integrated Node.js built-in test runner (`node --test tests/*.test.js`) in `package.json` with 14 automated unit tests covering proxy pooling, SSE mapping, ANSI box rendering, and Claude Desktop path discovery.
